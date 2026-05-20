@@ -1,0 +1,66 @@
+# Custom Unit Mint: stock cdk-mintd + a custom "branch" payment processor.
+#
+#   processor — implements the "branch" custom payment method over gRPC and
+#               serves the operator web UI on :9090. cdk-mintd routes all
+#               mint/melt for the custom unit (ora, by default) to it.
+#   mint      — stock cdk-mintd on :8089. Talks to the processor's gRPC and,
+#               for keyset management, exposes its management RPC on :8091.
+#
+# Both run from one image (two binaries). Bring it up with:
+#   docker compose up --build
+
+services:
+  processor:
+    build:
+      context: .
+    image: custom-unit-mint:latest
+    container_name: custom-unit-processor
+    command: ["cdk-branch-processor"]
+    ports:
+      - "${UI_PORT:-9090}:9090"          # operator web UI
+    environment:
+      RUST_LOG: "info,h2=warn,hyper=warn,reqwest=warn"
+      CDK_BRANCH_PROCESSOR_WORK_DIR: "/var/lib/cdk-branch-processor"
+      CDK_BRANCH_PROCESSOR_GRPC_ADDR: "0.0.0.0"
+      CDK_BRANCH_PROCESSOR_GRPC_PORT: "50051"
+      CDK_BRANCH_PROCESSOR_HTTP_ADDR: "0.0.0.0"
+      CDK_BRANCH_PROCESSOR_HTTP_PORT: "9090"
+      # The custom unit and method this mint serves. Change UNIT to issue a
+      # different currency (and update config/mint.toml to match).
+      CDK_BRANCH_PROCESSOR_UNIT: "ora"
+      CDK_BRANCH_PROCESSOR_METHOD: "branch"
+      # CHANGE THIS before exposing the UI anywhere real.
+      CDK_BRANCH_PROCESSOR_OPERATOR_PASSWORD: "${OPERATOR_PASSWORD:-branch-admin}"
+      CDK_BRANCH_PROCESSOR_MINT_RPC_URL: "http://mint:8091"
+      CDK_BRANCH_PROCESSOR_MINT_HTTP_URL: "http://mint:8089"
+    volumes:
+      - processor-data:/var/lib/cdk-branch-processor
+    restart: unless-stopped
+    networks:
+      - custom-unit
+
+  mint:
+    image: custom-unit-mint:latest
+    container_name: custom-unit-mint
+    command:
+      ["cdk-mintd", "--config", "/etc/cdk-mintd/config.toml", "--work-dir", "/var/lib/cdk-mintd"]
+    ports:
+      - "${MINT_PORT:-8089}:8089"        # mint HTTP API (NUT endpoints)
+    environment:
+      RUST_LOG: "info,h2=warn,hyper=warn"
+    volumes:
+      - ./config/mint.toml:/etc/cdk-mintd/config.toml:ro
+      - mint-data:/var/lib/cdk-mintd
+    depends_on:
+      - processor
+    restart: unless-stopped
+    networks:
+      - custom-unit
+
+networks:
+  custom-unit:
+    driver: bridge
+
+volumes:
+  mint-data:
+  processor-data:

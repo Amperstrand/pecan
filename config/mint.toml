@@ -1,0 +1,51 @@
+# Stock cdk-mintd configuration for the Custom Unit Mint.
+#
+# Nothing here is a patched/custom mintd setting — every key is a stock cdk
+# option. The mint is made specific to the custom unit (ora, here) purely by
+# pointing its gRPC payment backend at our processor (see [ln]/[grpc_processor]
+# below). To issue a different unit, change "ora" here and CDK_BRANCH_PROCESSOR_UNIT.
+
+[info]
+url = "http://localhost:8089"
+listen_host = "0.0.0.0"
+listen_port = 8089
+# Embedded signatory seed. Keyset final_expiry is enforced natively by the mint
+# (cdk: ecash from an expired keyset is rejected with ExpiredKeyset / 12003), so
+# no external/custom signatory is needed.
+#
+# !!! DEMO SEED — replace before any non-throwaway use. Anyone with this seed
+# !!! can forge the mint's keys.
+mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+[info.http_cache]
+backend = "memory"
+ttl = 60
+tti = 60
+
+[mint_info]
+name = "Custom Unit Mint"
+description = "Cashu mint for a custom unit (ora). Mint and melt quotes settle manually through a branch operator."
+description_long = "Demonstrates an unmodified cdk-mintd plumbed against a custom gRPC payment processor implementing the 'branch' method (manual cash settlement). Keyset expiry is enforced natively by the mint."
+
+[database]
+engine = "sqlite"
+
+# Route the custom unit "ora" to our processor instead of a Lightning backend.
+[ln]
+ln_backend = "grpcprocessor"
+
+[grpc_processor]
+supported_units = ["ora"]
+# docker-compose service name; plaintext on the compose-internal network.
+addr = "http://processor"
+port = 50051
+
+# Lets the operator UI rotate keysets (and set each keyset's final_expiry).
+[mint_management_rpc]
+enabled = true
+address = "0.0.0.0"
+port = 8091
+
+[limits]
+max_inputs = 1000
+max_outputs = 1000
