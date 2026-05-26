@@ -58,7 +58,10 @@ Default operator password is `branch-admin` (override with
 `http://localhost:8089` and you'll see a mint that issues `ora`.
 
 To reach it from other devices on your LAN, set `info.url` in
-`config/mint.toml` to this host's LAN address and use that from the wallet.
+`config/mint.toml` to this host's LAN address and set
+`CDK_BRANCH_PROCESSOR_MINT_PUBLIC_URL` to the same wallet-facing base URL.
+The teller QR codes use that public URL; Docker Compose defaults it to
+`http://localhost:8089`.
 
 If ports 8089/9090 are taken, override the host ports without editing anything:
 `MINT_PORT=18089 UI_PORT=19090 docker compose up`.
@@ -66,28 +69,30 @@ If ports 8089/9090 are taken, override the host ports without editing anything:
 ## How settlement works
 
 **Minting (customer buys ecash with cash).**
-1. Wallet requests a mint quote for `ora` via the `branch` method.
-2. The processor creates a pending **ticket** and returns its id; the wallet
-   shows it to the customer.
-3. Customer hands cash to the operator, who finds the ticket in the UI and
-   clicks **Mark paid**.
-4. The mint sees the payment and the wallet issues the ecash.
+1. Teller selects **Cash deposit**, enters the amount, and creates the quote.
+2. The UI shows the mint quote id and a QR code for
+   `/v1/mint/quote/branch/{quote_id}`.
+3. Wallet scans the QR code, fetches the quote, and waits for payment.
+4. Customer hands cash to the teller, who clicks **Cash received**.
+5. The mint sees the payment and the wallet issues the ecash.
 
 **Melting (customer redeems ecash for cash).**
-1. Wallet requests a melt quote for the `branch` method
-   (`POST /v1/melt/quote/branch`). The body is a standard NUT-05 custom melt
-   request — `{"method": "branch", "request": "100", "unit": "ora"}` — where
-   `request` is just the amount as a decimal (here, redeem 100 ora).
-2. Wallet submits the melt with its proofs. The proofs go **pending** and a
-   melt ticket appears in the UI.
-3. Operator hands over the cash and clicks **Mark paid** (or **Mark failed**
-   to release the proofs).
-4. The mint finalises the melt; the proofs are spent.
+1. Teller selects **Cash dispense**, enters the amount, and creates the quote.
+2. The UI shows the melt quote id and a QR code for
+   `/v1/melt/quote/branch/{quote_id}`.
+3. Wallet scans the QR code, fetches the quote, and submits the melt with its
+   proofs. The proofs go **pending**, and the UI changes from waiting for the
+   wallet to ready for cash dispense.
+4. Teller hands over the cash and clicks **Cash handed over** (or **Cancel**
+   to fail the melt and release the proofs).
+5. The mint finalises the melt; the proofs are spent.
 
-The processor correlates the quote and the eventual payment using the mint's
-`quote_id` (the field added in cdk PR
-[#1973](https://github.com/cashubtc/cdk/pull/1973)), so it doesn't depend on
-the wallet putting anything unique in `request`.
+The operator UI only allows one active quote at a time. The processor also
+rejects direct wallet-created branch quotes unless they carry the teller
+metadata created by the UI, so the amount comes from the teller workflow rather
+than from a wallet-controlled `request` string. Melt settlement is still
+correlated using the mint's `quote_id` (the field added in cdk PR
+[#1973](https://github.com/cashubtc/cdk/pull/1973)).
 
 ## Keyset management & expiry
 
@@ -117,6 +122,7 @@ it to the custom unit are `[ln] ln_backend = "grpcprocessor"` and the
 | `CDK_BRANCH_PROCESSOR_HTTP_PORT` | `9090` | operator web UI |
 | `CDK_BRANCH_PROCESSOR_MINT_RPC_URL` | — | mint management RPC (keyset rotate) |
 | `CDK_BRANCH_PROCESSOR_MINT_HTTP_URL` | — | mint HTTP API (read keysets) |
+| `CDK_BRANCH_PROCESSOR_MINT_PUBLIC_URL` | `CDK_BRANCH_PROCESSOR_MINT_HTTP_URL` | wallet-facing mint URL encoded in quote QR codes |
 | `CDK_BRANCH_PROCESSOR_WORK_DIR` | `/var/lib/cdk-branch-processor` | ticket store location |
 
 State persists across restarts: the mint in a SQLite DB (named volume

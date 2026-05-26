@@ -41,6 +41,7 @@ const ENV_METHOD: &str = "CDK_BRANCH_PROCESSOR_METHOD";
 const ENV_OPERATOR_PASSWORD: &str = "CDK_BRANCH_PROCESSOR_OPERATOR_PASSWORD";
 const ENV_MINT_RPC_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_RPC_URL";
 const ENV_MINT_HTTP_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_HTTP_URL";
+const ENV_MINT_PUBLIC_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_PUBLIC_URL";
 
 const DEFAULT_WORK_DIR: &str = "/var/lib/cdk-branch-processor";
 const DEFAULT_GRPC_ADDR: &str = "0.0.0.0";
@@ -86,23 +87,32 @@ async fn main() -> Result<()> {
         anyhow!("{ENV_OPERATOR_PASSWORD} is required (operator web-UI login password)")
     })?;
 
-    let mint_rpc_url = std::env::var(ENV_MINT_RPC_URL).map_err(|_| {
-        anyhow!("{ENV_MINT_RPC_URL} is required (e.g. http://mint-c:8091)")
-    })?;
+    let mint_rpc_url = std::env::var(ENV_MINT_RPC_URL)
+        .map_err(|_| anyhow!("{ENV_MINT_RPC_URL} is required (e.g. http://mint-c:8091)"))?;
     let mint_http_url = std::env::var(ENV_MINT_HTTP_URL).map_err(|_| {
         anyhow!("{ENV_MINT_HTTP_URL} is required (e.g. http://mint-c:8089) — used to read /v1/keysets for the operator UI")
     })?;
+    let mint_public_url =
+        std::env::var(ENV_MINT_PUBLIC_URL).unwrap_or_else(|_| mint_http_url.clone());
 
     let state_path = work_dir.join("tickets.json");
     let branch = BranchState::load(state_path).await?;
 
-    let backend = Arc::new(BranchBackend::new(branch.clone(), unit.clone(), method.clone()));
+    let backend = Arc::new(BranchBackend::new(
+        branch.clone(),
+        unit.clone(),
+        method.clone(),
+    ));
 
-    let mut grpc_server =
-        PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
-            .map_err(|e| anyhow!("payment processor server init: {e}"))?;
-    grpc_server.start(None).await.map_err(|e| anyhow!("grpc start: {e}"))?;
-    tracing::info!("branch-processor gRPC on {grpc_addr}:{grpc_port} (method={method}, unit={unit})");
+    let mut grpc_server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
+        .map_err(|e| anyhow!("payment processor server init: {e}"))?;
+    grpc_server
+        .start(None)
+        .await
+        .map_err(|e| anyhow!("grpc start: {e}"))?;
+    tracing::info!(
+        "branch-processor gRPC on {grpc_addr}:{grpc_port} (method={method}, unit={unit})"
+    );
 
     let web_state = web::WebState {
         branch,
@@ -111,6 +121,8 @@ async fn main() -> Result<()> {
         password: Arc::new(password),
         sessions: Arc::new(RwLock::new(HashSet::new())),
         unit,
+        method: Arc::new(method),
+        mint_public_url: Arc::new(mint_public_url),
         default_amounts: Arc::new((0..32).map(|i| 2u64.pow(i)).collect()),
     };
     let app = web::router(web_state);

@@ -10,11 +10,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use cdk_common::nuts::{CurrencyUnit, MeltQuoteState};
-use cdk_common::payment::{
-    Event, MakePaymentResponse, PaymentIdentifier, WaitPaymentResponse,
-};
+use cdk_common::payment::{Event, MakePaymentResponse, PaymentIdentifier, WaitPaymentResponse};
 use cdk_common::Amount;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
@@ -29,14 +27,23 @@ pub enum TicketKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketStatus {
+    Waiting,
     Pending,
     Paid,
     Failed,
 }
 
+impl TicketStatus {
+    pub fn is_active(self) -> bool {
+        matches!(self, TicketStatus::Waiting | TicketStatus::Pending)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ticket {
     pub id: String,
+    #[serde(default)]
+    pub quote_id: Option<String>,
     pub kind: TicketKind,
     pub amount: u64,
     pub unit: String,
@@ -52,6 +59,7 @@ impl Ticket {
     pub fn new_incoming(amount: u64, unit: String, description: Option<String>) -> Self {
         Self {
             id: format!("MINT-{}", uuid::Uuid::new_v4()),
+            quote_id: None,
             kind: TicketKind::Incoming,
             amount,
             unit,
@@ -63,18 +71,20 @@ impl Ticket {
         }
     }
 
-    pub fn new_outgoing_with_id(
+    pub fn new_outgoing_quote(
         id: String,
+        quote_id: String,
         amount: u64,
         unit: String,
         description: Option<String>,
     ) -> Self {
         Self {
             id,
+            quote_id: Some(quote_id),
             kind: TicketKind::Outgoing,
             amount,
             unit,
-            status: TicketStatus::Pending,
+            status: TicketStatus::Waiting,
             created_at: unix_now(),
             paid_at: None,
             description,
@@ -83,7 +93,9 @@ impl Ticket {
     }
 
     pub fn unit_typed(&self) -> CurrencyUnit {
-        self.unit.parse().unwrap_or(CurrencyUnit::Custom(self.unit.clone()))
+        self.unit
+            .parse()
+            .unwrap_or(CurrencyUnit::Custom(self.unit.clone()))
     }
 }
 
@@ -142,29 +154,76 @@ impl BranchState {
         self.inner.tickets.read().await.values().cloned().collect()
     }
 
-    pub async fn insert(&self, ticket: Ticket) -> Result<()> {
-        {
-            let mut t = self.inner.tickets.write().await;
-            t.insert(ticket.id.clone(), ticket);
-        }
-        self.persist().await?;
-        self.notify_ui_change();
-        Ok(())
+    pub async fn active_tickets(&self) -> Vec<Ticket> {
+        self.inner
+            .tickets
+            .read()
+            .await
+            .values()
+            .filter(|t| t.status.is_active())
+            .cloned()
+            .collect()
     }
 
-    /// Insert only if no ticket with this id already exists. Returns whether
-    /// the ticket was newly inserted (true) or already present (false).
-    pub async fn insert_if_absent(&self, ticket: Ticket) -> Result<bool> {
-        {
+    /// Insert a new active teller quote only if no other active quote exists.
+    /// This is the server-side guard that keeps branch settlement one-at-a-time.
+    pub async fn insert_active(&self, ticket: Ticket) -> Result<Ticket> {
+        let updated = {
             let mut t = self.inner.tickets.write().await;
-            if t.contains_key(&ticket.id) {
-                return Ok(false);
+            if let Some(existing) = t.get(&ticket.id) {
+                return Ok(existing.clone());
             }
-            t.insert(ticket.id.clone(), ticket);
-        }
+            if let Some(active) = t
+                .values()
+                .find(|existing| existing.status.is_active() && existing.id != ticket.id)
+            {
+                bail!("finish active quote {} before creating another", active.id);
+            }
+            t.insert(ticket.id.clone(), ticket.clone());
+            ticket
+        };
         self.persist().await?;
         self.notify_ui_change();
-        Ok(true)
+        Ok(updated)
+    }
+
+    pub async fn attach_quote_id(&self, id: &str, quote_id: String) -> Result<Ticket> {
+        let updated = {
+            let mut t = self.inner.tickets.write().await;
+            let ticket = t
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("ticket {id} not found"))?;
+            ticket.quote_id = Some(quote_id);
+            ticket.clone()
+        };
+        self.persist().await?;
+        self.notify_ui_change();
+        Ok(updated)
+    }
+
+    /// Move a pre-created outgoing quote into the state where customer proofs
+    /// are locked by the mint and the operator can safely dispense cash.
+    pub async fn mark_outgoing_submitted(&self, id: &str) -> Result<Ticket> {
+        let mut changed = false;
+        let updated = {
+            let mut t = self.inner.tickets.write().await;
+            let ticket = t.get_mut(id).ok_or_else(|| {
+                anyhow::anyhow!("outgoing quote {id} was not created by the teller UI")
+            })?;
+            if ticket.kind != TicketKind::Outgoing {
+                bail!("ticket {id} is not an outgoing quote");
+            }
+            if ticket.status == TicketStatus::Waiting {
+                ticket.status = TicketStatus::Pending;
+                changed = true;
+            }
+            ticket.clone()
+        };
+        if changed {
+            self.persist().await?;
+            self.notify_ui_change();
+        }
+        Ok(updated)
     }
 
     /// Mark a ticket as paid. For incoming tickets, also pushes a
@@ -178,6 +237,9 @@ impl BranchState {
             let ticket = t
                 .get_mut(id)
                 .ok_or_else(|| anyhow::anyhow!("ticket {id} not found"))?;
+            if ticket.status == TicketStatus::Waiting {
+                bail!("ticket {id} is waiting for the wallet");
+            }
             if ticket.status == TicketStatus::Pending {
                 ticket.status = TicketStatus::Paid;
                 ticket.paid_at = Some(unix_now());
@@ -210,9 +272,11 @@ impl BranchState {
             let ticket = t
                 .get_mut(id)
                 .ok_or_else(|| anyhow::anyhow!("ticket {id} not found"))?;
-            ticket.status = TicketStatus::Failed;
-            if let Some(n) = notes {
-                ticket.notes = Some(n);
+            if ticket.status != TicketStatus::Paid {
+                ticket.status = TicketStatus::Failed;
+                if let Some(n) = notes {
+                    ticket.notes = Some(n);
+                }
             }
             ticket.clone()
         };
@@ -269,6 +333,7 @@ impl BranchState {
         let status = match t.status {
             TicketStatus::Paid => MeltQuoteState::Paid,
             TicketStatus::Pending => MeltQuoteState::Pending,
+            TicketStatus::Waiting => MeltQuoteState::Unpaid,
             TicketStatus::Failed => MeltQuoteState::Failed,
         };
         Some(MakePaymentResponse {

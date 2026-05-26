@@ -13,16 +13,18 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use futures::stream::{Stream, StreamExt};
-use std::convert::Infallible;
-use tokio_stream::wrappers::BroadcastStream;
 use cdk_common::nuts::CurrencyUnit;
+use futures::stream::{Stream, StreamExt};
 use maud::{html, Markup, PreEscaped, DOCTYPE};
+use qrcode::render::svg;
+use qrcode::QrCode;
 use serde::Deserialize;
+use std::convert::Infallible;
 use tokio::sync::RwLock;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::clients::{MintHttpClient, MintRpcClient};
-use crate::state::{BranchState, TicketKind, TicketStatus};
+use crate::state::{BranchState, Ticket, TicketKind, TicketStatus};
 
 #[derive(Clone)]
 pub struct WebState {
@@ -32,6 +34,8 @@ pub struct WebState {
     pub password: Arc<String>,
     pub sessions: Arc<RwLock<HashSet<String>>>,
     pub unit: CurrencyUnit,
+    pub method: Arc<String>,
+    pub mint_public_url: Arc<String>,
     pub default_amounts: Arc<Vec<u64>>,
 }
 
@@ -40,6 +44,7 @@ pub fn router(state: WebState) -> Router {
         .route("/", get(dashboard))
         .route("/login", get(login_page).post(login_submit))
         .route("/logout", post(logout))
+        .route("/quotes", post(create_quote))
         .route("/tickets/{id}/mark-paid", post(mark_paid))
         .route("/tickets/{id}/mark-failed", post(mark_failed))
         .route("/keysets", get(keysets_page))
@@ -63,7 +68,8 @@ async fn sse_events(
     let rx = state.branch.subscribe_ui_changes();
     let stream = BroadcastStream::new(rx).filter_map(|r| async move {
         // Drop Lagged errors; treat every successful tick as one event.
-        r.ok().map(|()| Ok(SseEvent::default().event("change").data("1")))
+        r.ok()
+            .map(|()| Ok(SseEvent::default().event("change").data("1")))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -148,17 +154,10 @@ async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Respons
     tickets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     let now = unix_now();
-    let pending_in: Vec<_> = tickets
-        .iter()
-        .filter(|t| t.kind == TicketKind::Incoming && t.status == TicketStatus::Pending)
-        .collect();
-    let pending_out: Vec<_> = tickets
-        .iter()
-        .filter(|t| t.kind == TicketKind::Outgoing && t.status == TicketStatus::Pending)
-        .collect();
+    let active: Vec<_> = tickets.iter().filter(|t| t.status.is_active()).collect();
     let done: Vec<_> = tickets
         .iter()
-        .filter(|t| t.status != TicketStatus::Pending)
+        .filter(|t| !t.status.is_active())
         .take(50)
         .collect();
 
@@ -169,89 +168,58 @@ async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Respons
                 div.card {
                     div.card-header {
                         div {
-                            h2.card-title { "Incoming · cash deposit" }
-                            p.card-subtitle { "Customer is paying cash to mint new ecash." }
+                            h2.card-title { "Create quote" }
+                            p.card-subtitle { "The teller starts each branch quote from this screen." }
                         }
-                        span.pill { (pending_in.len()) " pending" }
+                        @if active.is_empty() {
+                            span.pill.pill-active { "Ready" }
+                        } @else {
+                            span.pill.pill-pending { (active.len()) " active" }
+                        }
                     }
-                    @if pending_in.is_empty() {
-                        div.empty {
-                            div.empty-title { "Nothing waiting" }
-                            div { "Mint quotes for the branch method will show up here." }
-                        }
-                    } @else {
-                        div.card-body.zero {
-                            table {
-                                thead { tr {
-                                    th { "Ticket" } th { "Amount" } th { "Created" }
-                                    th { "Description" } th { "Action" }
-                                } }
-                                tbody {
-                                    @for t in &pending_in {
-                                        tr {
-                                            td { span.id-chip { (short_id(&t.id)) } }
-                                            td { (amount_cell(t.amount, &t.unit)) }
-                                            td.muted { (relative_age(t.created_at, now)) }
-                                            td { (t.description.as_deref().unwrap_or("—")) }
-                                            td {
-                                                div.actions {
-                                                    form method="post" action={ "/tickets/" (t.id) "/mark-paid" } {
-                                                        input type="text" name="notes" placeholder="Receipt note (optional)";
-                                                        button type="submit" class="btn btn-success btn-sm" { "Cash received" }
-                                                    }
-                                                    form method="post" action={ "/tickets/" (t.id) "/mark-failed" } class="inline" {
-                                                        button type="submit" class="btn btn-danger btn-sm" { "Cancel" }
-                                                    }
-                                                }
-                                            }
+                    @if active.is_empty() {
+                        div.card-body {
+                            form method="post" action="/quotes" class="quote-form" {
+                                div.field-row {
+                                    div.field {
+                                        label for="quote-kind" { "Flow" }
+                                        select id="quote-kind" name="kind" {
+                                            option value="mint" { "Cash deposit" }
+                                            option value="melt" { "Cash dispense" }
                                         }
                                     }
+                                    div.field {
+                                        label for="quote-amount" { "Amount" }
+                                        input id="quote-amount" type="number" name="amount" min="1" step="1" required autofocus;
+                                    }
+                                }
+                                div.field {
+                                    label for="quote-description" { "Note" }
+                                    input id="quote-description" type="text" name="description" placeholder="optional";
+                                }
+                                div.form-row {
+                                    button type="submit" class="btn btn-primary" { "Create quote" }
+                                    span.muted { (state.unit) " · " (state.method.as_str()) }
                                 }
                             }
                         }
-                    }
-                }
-            }
-
-            section {
-                div.card {
-                    div.card-header {
-                        div {
-                            h2.card-title { "Outgoing · cash dispense" }
-                            p.card-subtitle { "Customer wants to redeem ecash for physical cash." }
-                        }
-                        span.pill { (pending_out.len()) " pending" }
-                    }
-                    @if pending_out.is_empty() {
-                        div.empty {
-                            div.empty-title { "Nothing waiting" }
-                            div { "Melt quotes will show up here once the wallet submits them." }
-                        }
+                    } @else if active.len() == 1 {
+                        (active_quote_panel(active[0], now, &state))
                     } @else {
                         div.card-body.zero {
+                            div.alert.alert-error { "Multiple active quotes exist. Finish or cancel active quotes before creating another." }
                             table {
                                 thead { tr {
-                                    th { "Ticket" } th { "Amount" } th { "Created" }
-                                    th { "Request" } th { "Action" }
+                                    th { "Ticket" } th { "Kind" } th { "Amount" } th { "Status" } th { "Created" }
                                 } }
                                 tbody {
-                                    @for t in &pending_out {
+                                    @for t in &active {
                                         tr {
                                             td { span.id-chip { (short_id(&t.id)) } }
+                                            td.muted { (kind_label(t.kind)) }
                                             td { (amount_cell(t.amount, &t.unit)) }
+                                            td { (status_pill(t.status)) }
                                             td.muted { (relative_age(t.created_at, now)) }
-                                            td { (t.description.as_deref().unwrap_or("—")) }
-                                            td {
-                                                div.actions {
-                                                    form method="post" action={ "/tickets/" (t.id) "/mark-paid" } {
-                                                        input type="text" name="notes" placeholder="Receipt # (optional)";
-                                                        button type="submit" class="btn btn-success btn-sm" { "Cash handed over" }
-                                                    }
-                                                    form method="post" action={ "/tickets/" (t.id) "/mark-failed" } class="inline" {
-                                                        button type="submit" class="btn btn-danger btn-sm" { "Cancel" }
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
                                 }
@@ -331,10 +299,7 @@ struct LoginForm {
     password: String,
 }
 
-async fn login_submit(
-    State(state): State<WebState>,
-    Form(form): Form<LoginForm>,
-) -> Response {
+async fn login_submit(State(state): State<WebState>, Form(form): Form<LoginForm>) -> Response {
     if form.password != *state.password {
         return (
             StatusCode::UNAUTHORIZED,
@@ -382,9 +347,76 @@ async fn logout(State(state): State<WebState>, headers: HeaderMap) -> Response {
     let mut resp = Redirect::to("/login").into_response();
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        format!("{COOKIE_NAME}=deleted; Path=/; Max-Age=0").parse().unwrap(),
+        format!("{COOKIE_NAME}=deleted; Path=/; Max-Age=0")
+            .parse()
+            .unwrap(),
     );
     resp
+}
+
+#[derive(Deserialize)]
+struct CreateQuoteForm {
+    kind: String,
+    amount: u64,
+    #[serde(default)]
+    description: String,
+}
+
+async fn create_quote(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Form(form): Form<CreateQuoteForm>,
+) -> Response {
+    if let Err(r) = require_auth(&state, &headers).await {
+        return r;
+    }
+    if form.amount == 0 {
+        return error_response("amount must be greater than zero");
+    }
+    if !state.branch.active_tickets().await.is_empty() {
+        return error_response("finish the active quote before creating another");
+    }
+
+    let description = match form.description.trim() {
+        "" => None,
+        s => Some(s.to_string()),
+    };
+
+    let result = match form.kind.as_str() {
+        "mint" => {
+            let quote = match state
+                .mint_http
+                .create_mint_quote(state.method.as_str(), form.amount, &state.unit, description)
+                .await
+            {
+                Ok(quote) => quote,
+                Err(e) => return error_response(&format!("create mint quote: {e}")),
+            };
+            state
+                .branch
+                .attach_quote_id(&quote.request, quote.quote)
+                .await
+        }
+        "melt" => {
+            let quote = match state
+                .mint_http
+                .create_melt_quote(state.method.as_str(), form.amount, &state.unit)
+                .await
+            {
+                Ok(quote) => quote,
+                Err(e) => return error_response(&format!("create melt quote: {e}")),
+            };
+            let ticket_id = format!("MELT-{}", quote.quote);
+            state.branch.attach_quote_id(&ticket_id, quote.quote).await
+        }
+        other => return error_response(&format!("unknown quote flow: {other}")),
+    };
+
+    if let Err(e) = result {
+        return error_response(&format!("store quote id: {e}"));
+    }
+
+    Redirect::to("/").into_response()
 }
 
 #[derive(Deserialize)]
@@ -572,6 +604,145 @@ async fn rotate_keyset(
 }
 
 // ---------------- helpers ----------------
+
+fn active_quote_panel(ticket: &Ticket, now: u64, state: &WebState) -> Markup {
+    let (title, subtitle) = match (ticket.kind, ticket.status) {
+        (TicketKind::Incoming, TicketStatus::Pending) => {
+            ("Cash deposit", "Customer pays cash before ecash is issued.")
+        }
+        (TicketKind::Outgoing, TicketStatus::Waiting) => {
+            ("Cash dispense", "Waiting for the wallet to lock ecash.")
+        }
+        (TicketKind::Outgoing, TicketStatus::Pending) => {
+            ("Cash dispense", "Ecash is locked; cash can be handed over.")
+        }
+        _ => ("Quote", "Quote is no longer active."),
+    };
+    let quote_url = quote_status_url(ticket, state);
+
+    html! {
+        div.card-body {
+            div.quote-workspace {
+                div.quote-main {
+                    div.quote-heading {
+                        div {
+                            h3 { (title) }
+                            p { (subtitle) }
+                        }
+                        (status_pill(ticket.status))
+                    }
+                    div.quote-amount {
+                        (amount_cell(ticket.amount, &ticket.unit))
+                    }
+                    div.quote-grid {
+                        div.quote-meta {
+                            span.muted { "Quote" }
+                            @if let Some(quote_id) = ticket.quote_id.as_deref() {
+                                span.id-chip.full { (quote_id) }
+                            } @else {
+                                span.id-chip.full { (ticket.id) }
+                            }
+                        }
+                        div.quote-meta {
+                            span.muted { "Ticket" }
+                            span.id-chip.full { (ticket.id) }
+                        }
+                        div.quote-meta {
+                            span.muted { "Created" }
+                            span { (relative_age(ticket.created_at, now)) }
+                        }
+                        @if let Some(description) = ticket.description.as_deref() {
+                            div.quote-meta {
+                                span.muted { "Note" }
+                                span { (description) }
+                            }
+                        }
+                    }
+                    @if let Some(url) = quote_url.as_deref() {
+                        div.quote-url {
+                            span.muted { "Fetch URL" }
+                            span.mono { (url) }
+                        }
+                    }
+                }
+                div.quote-qr {
+                    @if let Some(url) = quote_url.as_deref() {
+                        (qr_code_markup(url))
+                    } @else {
+                        div.qr-placeholder { "No quote id" }
+                    }
+                }
+            }
+            (active_quote_actions(ticket))
+        }
+    }
+}
+
+fn active_quote_actions(ticket: &Ticket) -> Markup {
+    html! {
+        div.settlement-actions {
+            @match (ticket.kind, ticket.status) {
+                (TicketKind::Incoming, TicketStatus::Pending) => {
+                    form method="post" action={ "/tickets/" (ticket.id) "/mark-paid" } {
+                        input type="text" name="notes" placeholder="Receipt note (optional)";
+                        button type="submit" class="btn btn-success" { "Cash received" }
+                    }
+                    form method="post" action={ "/tickets/" (ticket.id) "/mark-failed" } class="inline" {
+                        button type="submit" class="btn btn-danger" { "Cancel" }
+                    }
+                }
+                (TicketKind::Outgoing, TicketStatus::Waiting) => {
+                    form method="post" action={ "/tickets/" (ticket.id) "/mark-failed" } class="inline" {
+                        button type="submit" class="btn btn-danger" { "Cancel quote" }
+                    }
+                }
+                (TicketKind::Outgoing, TicketStatus::Pending) => {
+                    form method="post" action={ "/tickets/" (ticket.id) "/mark-paid" } {
+                        input type="text" name="notes" placeholder="Receipt note (optional)";
+                        button type="submit" class="btn btn-success" { "Cash handed over" }
+                    }
+                    form method="post" action={ "/tickets/" (ticket.id) "/mark-failed" } class="inline" {
+                        button type="submit" class="btn btn-danger" { "Cancel" }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn quote_status_url(ticket: &Ticket, state: &WebState) -> Option<String> {
+    let quote_id = ticket.quote_id.as_ref()?;
+    let quote_kind = match ticket.kind {
+        TicketKind::Incoming => "mint",
+        TicketKind::Outgoing => "melt",
+    };
+    Some(format!(
+        "{}/v1/{}/quote/{}/{}",
+        state.mint_public_url.trim_end_matches('/'),
+        quote_kind,
+        state.method.as_str(),
+        quote_id
+    ))
+}
+
+fn qr_code_markup(data: &str) -> Markup {
+    match QrCode::new(data.as_bytes()) {
+        Ok(code) => {
+            let mut image = code
+                .render::<svg::Color>()
+                .min_dimensions(220, 220)
+                .dark_color(svg::Color("#0a0a0a"))
+                .light_color(svg::Color("#ffffff"))
+                .build();
+            if let Some(svg) = image.strip_prefix(r#"<?xml version="1.0" standalone="yes"?>"#) {
+                image = svg.to_string();
+            }
+            html! { div.qr-frame { (PreEscaped(image)) } }
+        }
+        Err(e) => html! { div.alert.alert-error { "QR error: " (e) } },
+    }
+}
 
 fn layout(title: &str, body: Markup) -> Markup {
     layout_with_chrome(title, body, true)
@@ -809,6 +980,7 @@ tbody tr:hover { background: var(--surface-2); }
   content: ""; width: 6px; height: 6px; border-radius: 50%;
   background: currentColor;
 }
+.pill-waiting { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 .pill-pending { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
 .pill-paid { background: var(--success-soft); color: var(--success); border-color: transparent; }
 .pill-failed { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
@@ -859,14 +1031,92 @@ input[type=text], input[type=password], input[type=number] {
   background: var(--surface); color: var(--fg);
   width: 100%;
 }
+select {
+  font: inherit; font-size: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--fg);
+  width: 100%;
+}
 input::placeholder { color: var(--fg-subtle); }
-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 input[readonly] { background: var(--surface-2); color: var(--fg-muted); }
 
 /* Row of inline action buttons in a table cell */
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
 .actions input { width: auto; min-width: 200px; padding: 7px 10px; font-size: 13px; }
 .actions form { display: flex; gap: 6px; align-items: center; }
+
+/* Active quote */
+.quote-form { display: flex; flex-direction: column; gap: 14px; }
+.quote-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 24px;
+  align-items: start;
+}
+.quote-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.quote-heading h3 { margin: 0; font-size: 18px; font-weight: 600; }
+.quote-heading p { margin: 2px 0 0; color: var(--fg-muted); font-size: 13px; }
+.quote-amount { margin-top: 18px; font-size: 22px; }
+.quote-amount .amount .unit { font-size: 13px; }
+.quote-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+.quote-meta { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.quote-url {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 14px;
+  min-width: 0;
+}
+.quote-url .mono {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--fg-muted);
+}
+.quote-qr { display: flex; justify-content: center; }
+.qr-frame {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  line-height: 0;
+}
+.qr-frame svg { width: 220px; height: 220px; display: block; }
+.qr-placeholder {
+  width: 246px; height: 246px;
+  display: grid; place-items: center;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+}
+.settlement-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.settlement-actions form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.settlement-actions input { width: 240px; }
+@media (max-width: 780px) {
+  .quote-workspace { grid-template-columns: 1fr; }
+  .quote-grid { grid-template-columns: 1fr; }
+  .quote-qr { justify-content: flex-start; }
+  .settlement-actions input { width: 100%; }
+}
 
 /* Login */
 .auth-shell {
@@ -924,7 +1174,10 @@ fn error_response(msg: &str) -> Response {
 
 fn short_id(id: &str) -> String {
     // "MINT-5a6c5a9e-..." → "MINT-5a6c5a9e"
-    match id.find('-').and_then(|p1| id[p1 + 1..].find('-').map(|p2| p1 + 1 + p2)) {
+    match id
+        .find('-')
+        .and_then(|p1| id[p1 + 1..].find('-').map(|p2| p1 + 1 + p2))
+    {
         Some(end) => id[..end].to_string(),
         None => id.to_string(),
     }
@@ -945,6 +1198,7 @@ fn kind_label(k: TicketKind) -> &'static str {
 
 fn status_pill(s: TicketStatus) -> Markup {
     let (cls, label) = match s {
+        TicketStatus::Waiting => ("pill pill-waiting", "Waiting"),
         TicketStatus::Pending => ("pill pill-pending", "Pending"),
         TicketStatus::Paid => ("pill pill-paid", "Paid"),
         TicketStatus::Failed => ("pill pill-failed", "Failed"),

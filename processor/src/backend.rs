@@ -1,8 +1,9 @@
 //! `MintPayment` implementation for the "branch" custom payment method.
 //!
-//! The convention for melt quote `request` strings is "<amount>" — bare decimal
-//! digits in the configured unit (e.g. `request: "100"` means "melt 100 ora").
-//! This is what the wallet must send in `POST /v1/melt/quote/branch`.
+//! Branch quotes are created by the operator UI. The UI sends a teller marker
+//! and amount metadata to cdk-mintd, which forwards that metadata here over the
+//! payment-processor interface. Wallets fetch existing quote ids instead of
+//! creating branch quotes themselves.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,10 +17,15 @@ use cdk_common::payment::{
 };
 use cdk_common::Amount;
 use futures::Stream;
+use serde_json::Value;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
-use crate::state::{BranchState, Ticket};
+use crate::state::{BranchState, Ticket, TicketStatus};
+
+pub const TELLER_QUOTE_MARKER: &str = "branch_teller_quote";
+pub const TELLER_AMOUNT_FIELD: &str = "amount";
+pub const TELLER_MELT_REQUEST: &str = "teller";
 
 /// Single-method, single-unit payment backend. Everything not matching the
 /// configured `method` is rejected with `UnsupportedPaymentOption`.
@@ -60,20 +66,30 @@ impl BranchBackend {
         Ok(())
     }
 
-    /// Parse the melt request string as a decimal amount in the configured unit.
-    fn parse_outgoing_amount(
-        &self,
-        request: &str,
-        melt_options: Option<&cdk_common::nuts::MeltOptions>,
-    ) -> Result<u64, Error> {
-        if let Some(opts) = melt_options {
-            // amount_msat is what the wallet passed; we treat it as a bare amount in our unit.
-            return Ok(u64::from(opts.amount_msat()));
+    fn teller_extra(&self, extra_json: Option<&str>) -> Result<Value, Error> {
+        let raw = extra_json.ok_or_else(|| {
+            Error::Custom("branch quotes must be created by the teller UI".into())
+        })?;
+        let value: Value = serde_json::from_str(raw)
+            .map_err(|e| Error::Custom(format!("branch quote metadata is invalid JSON: {e}")))?;
+        if value.get(TELLER_QUOTE_MARKER).and_then(Value::as_bool) != Some(true) {
+            return Err(Error::Custom(
+                "branch quotes must be created by the teller UI".into(),
+            ));
         }
-        request
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| Error::Custom(format!("branch melt request must be a decimal amount, got {request:?}")))
+        Ok(value)
+    }
+
+    fn teller_outgoing_amount(&self, extra_json: Option<&str>) -> Result<u64, Error> {
+        let value = self.teller_extra(extra_json)?;
+        let amount = value
+            .get(TELLER_AMOUNT_FIELD)
+            .and_then(Value::as_u64)
+            .filter(|amount| *amount > 0)
+            .ok_or_else(|| {
+                Error::Custom("branch melt quote metadata must include a positive amount".into())
+            })?;
+        Ok(amount)
     }
 
     /// Derive a stable ticket id from the mint's quote id. The same quote_id
@@ -113,6 +129,7 @@ impl MintPayment for BranchBackend {
                 // name (server-side sets it to ""), so we can't verify it here. Whatever
                 // method the mint advertises to wallets that points at us IS our method
                 // — see `get_settings` below where we declare it.
+                let _extra = self.teller_extra(opts.extra_json.as_deref())?;
                 self.check_unit(opts.amount.unit())?;
                 let ticket = Ticket::new_incoming(
                     opts.amount.value(),
@@ -122,7 +139,7 @@ impl MintPayment for BranchBackend {
                 let id = ticket.id.clone();
                 let expiry = opts.unix_expiry;
                 self.state
-                    .insert(ticket)
+                    .insert_active(ticket)
                     .await
                     .map_err(|e| Error::Custom(e.to_string()))?;
                 Ok(CreateIncomingPaymentResponse {
@@ -150,14 +167,25 @@ impl MintPayment for BranchBackend {
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
                 // See note in create_incoming_payment_request — method not on the wire.
-                let amount =
-                    self.parse_outgoing_amount(&opts.request, opts.melt_options.as_ref())?;
+                let amount = self.teller_outgoing_amount(opts.extra_json.as_deref())?;
                 // Use the mint's quote_id as the stable correlation key — it's
                 // identical in `make_payment` for this same melt.
                 let ticket_id = self.derive_melt_ticket_id(&opts.quote_id);
+                let ticket = Ticket::new_outgoing_quote(
+                    ticket_id.clone(),
+                    opts.quote_id.to_string(),
+                    amount,
+                    self.unit.to_string(),
+                    Some(opts.request.clone()),
+                );
+                let ticket = self
+                    .state
+                    .insert_active(ticket)
+                    .await
+                    .map_err(|e| Error::Custom(e.to_string()))?;
                 Ok(PaymentQuoteResponse {
                     request_lookup_id: Some(PaymentIdentifier::CustomId(ticket_id)),
-                    amount: Amount::new(amount, self.unit.clone()),
+                    amount: Amount::new(ticket.amount, self.unit.clone()),
                     fee: Amount::new(0, self.unit.clone()),
                     state: MeltQuoteState::Unpaid,
                     extra_json: None,
@@ -178,30 +206,27 @@ impl MintPayment for BranchBackend {
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
                 // See note in create_incoming_payment_request — method not on the wire.
-                let amount =
-                    self.parse_outgoing_amount(&opts.request, opts.melt_options.as_ref())?;
                 // Same id `get_payment_quote` returned (derived from the same
-                // quote_id). `insert_if_absent` makes us idempotent against
-                // mint retries.
+                // quote_id). The amount was captured when the teller created
+                // the quote, so the wallet's request string is not parsed here.
                 let ticket_id = self.derive_melt_ticket_id(&opts.quote_id);
-                let ticket = Ticket::new_outgoing_with_id(
-                    ticket_id.clone(),
-                    amount,
-                    self.unit.to_string(),
-                    Some(opts.request.clone()),
-                );
-                let _inserted = self
+                let ticket = self
                     .state
-                    .insert_if_absent(ticket)
+                    .mark_outgoing_submitted(&ticket_id)
                     .await
                     .map_err(|e| Error::Custom(e.to_string()))?;
+                let status = match ticket.status {
+                    TicketStatus::Paid => MeltQuoteState::Paid,
+                    TicketStatus::Pending | TicketStatus::Waiting => MeltQuoteState::Pending,
+                    TicketStatus::Failed => MeltQuoteState::Failed,
+                };
                 Ok(MakePaymentResponse {
                     payment_lookup_id: PaymentIdentifier::CustomId(ticket_id),
-                    payment_proof: None,
+                    payment_proof: ticket.notes.clone(),
                     // The mint will poll check_outgoing_payment until the operator
                     // confirms cash handover via the UI.
-                    status: MeltQuoteState::Pending,
-                    total_spent: Amount::new(amount, self.unit.clone()),
+                    status,
+                    total_spent: Amount::new(ticket.amount, self.unit.clone()),
                 })
             }
             OutgoingPaymentOptions::Bolt11(_) | OutgoingPaymentOptions::Bolt12(_) => {
@@ -246,4 +271,3 @@ impl MintPayment for BranchBackend {
         }
     }
 }
-

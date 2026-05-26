@@ -33,6 +33,7 @@ services:
       CDK_BRANCH_PROCESSOR_OPERATOR_PASSWORD: "${OPERATOR_PASSWORD:-branch-admin}"
       CDK_BRANCH_PROCESSOR_MINT_RPC_URL: "http://mint:8091"
       CDK_BRANCH_PROCESSOR_MINT_HTTP_URL: "http://mint:8089"
+      CDK_BRANCH_PROCESSOR_MINT_PUBLIC_URL: "http://localhost:${MINT_PORT:-8089}"
     volumes:
       - processor-data:/var/lib/cdk-branch-processor
     restart: unless-stopped
