@@ -70,6 +70,11 @@ impl MintRpcClient {
             input_fee_ppk: response.input_fee_ppk,
         })
     }
+
+    pub async fn health(&self) -> Result<()> {
+        let _ = self.connect().await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +149,20 @@ impl MintHttpClient {
         }
         let parsed: KeysetsResponse = r.json().await?;
         Ok(parsed.keysets)
+    }
+
+    pub async fn get_info(&self) -> Result<Value> {
+        let base = self.base.trim_end_matches('/');
+        let r = self
+            .http
+            .get(format!("{base}/v1/info"))
+            .send()
+            .await
+            .with_context(|| format!("GET {base}/v1/info"))?;
+        if !r.status().is_success() {
+            return Err(anyhow!("get_info: HTTP {}", r.status()));
+        }
+        Ok(r.json().await?)
     }
 
     pub async fn create_mint_quote(

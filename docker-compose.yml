@@ -21,21 +21,18 @@ services:
     environment:
       RUST_LOG: "info,h2=warn,hyper=warn,reqwest=warn"
       CDK_BRANCH_PROCESSOR_WORK_DIR: "/var/lib/cdk-branch-processor"
+      CDK_BRANCH_PROCESSOR_CONFIG_DIR: "/var/lib/custom-unit-mint/config"
       CDK_BRANCH_PROCESSOR_GRPC_ADDR: "0.0.0.0"
       CDK_BRANCH_PROCESSOR_GRPC_PORT: "50051"
       CDK_BRANCH_PROCESSOR_HTTP_ADDR: "0.0.0.0"
       CDK_BRANCH_PROCESSOR_HTTP_PORT: "9090"
-      # The custom unit and method this mint serves. Change UNIT to issue a
-      # different currency (and update config/mint.toml to match).
-      CDK_BRANCH_PROCESSOR_UNIT: "ora"
-      CDK_BRANCH_PROCESSOR_METHOD: "branch"
-      # CHANGE THIS before exposing the UI anywhere real.
-      CDK_BRANCH_PROCESSOR_OPERATOR_PASSWORD: "${OPERATOR_PASSWORD:-branch-admin}"
       CDK_BRANCH_PROCESSOR_MINT_RPC_URL: "http://mint:8091"
       CDK_BRANCH_PROCESSOR_MINT_HTTP_URL: "http://mint:8089"
-      CDK_BRANCH_PROCESSOR_MINT_PUBLIC_URL: "http://localhost:${MINT_PORT:-8089}"
+      CDK_BRANCH_PROCESSOR_MINT_GRPC_ADDR: "http://processor"
+      CDK_BRANCH_PROCESSOR_DEFAULT_MINT_PUBLIC_URL: "http://localhost:${MINT_PORT:-8089}"
     volumes:
       - processor-data:/var/lib/cdk-branch-processor
+      - config-data:/var/lib/custom-unit-mint/config
     restart: unless-stopped
     networks:
       - custom-unit
@@ -44,13 +41,17 @@ services:
     image: custom-unit-mint:latest
     container_name: custom-unit-mint
     command:
-      ["cdk-mintd", "--config", "/etc/cdk-mintd/config.toml", "--work-dir", "/var/lib/cdk-mintd"]
+      [
+        "sh",
+        "-c",
+        "while [ ! -s /var/lib/custom-unit-mint/config/mint.toml ]; do echo 'waiting for browser setup at http://localhost:${UI_PORT:-9090}'; sleep 2; done; exec cdk-mintd --config /var/lib/custom-unit-mint/config/mint.toml --work-dir /var/lib/cdk-mintd",
+      ]
     ports:
       - "${MINT_PORT:-8089}:8089"        # mint HTTP API (NUT endpoints)
     environment:
       RUST_LOG: "info,h2=warn,hyper=warn"
     volumes:
-      - ./config/mint.toml:/etc/cdk-mintd/config.toml:ro
+      - config-data:/var/lib/custom-unit-mint/config:ro
       - mint-data:/var/lib/cdk-mintd
     depends_on:
       - processor
@@ -65,3 +66,4 @@ networks:
 volumes:
   mint-data:
   processor-data:
+  config-data:

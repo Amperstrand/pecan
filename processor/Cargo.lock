@@ -461,6 +461,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bip39",
+ "bitcoin_hashes",
  "cdk-common",
  "cdk-mint-rpc",
  "cdk-payment-processor",

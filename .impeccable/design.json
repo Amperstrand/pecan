@@ -1,0 +1,209 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-13T23:53:32+02:00",
+  "title": "Design System: Custom Unit Mint",
+  "extensions": {
+    "colorMeta": {
+      "bg": {
+        "role": "neutral",
+        "displayName": "Worksurface",
+        "canonical": "#f7f7f8",
+        "tonalRamp": ["oklch(15% 0.004 260)", "oklch(27% 0.004 260)", "oklch(39% 0.004 260)", "oklch(51% 0.004 260)", "oklch(63% 0.004 260)", "oklch(75% 0.004 260)", "oklch(87% 0.004 260)", "oklch(97% 0.004 260)"]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Panel White",
+        "canonical": "#ffffff",
+        "tonalRamp": ["oklch(15% 0 0)", "oklch(27% 0 0)", "oklch(39% 0 0)", "oklch(51% 0 0)", "oklch(63% 0 0)", "oklch(75% 0 0)", "oklch(87% 0 0)", "oklch(100% 0 0)"]
+      },
+      "fg": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#0a0a0a",
+        "tonalRamp": ["#0a0a0a", "#18181b", "#27272a", "#3f3f46", "#52525b", "#71717a", "#a1a1aa", "#fafafa"]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Operational Blue",
+        "canonical": "#2563eb",
+        "tonalRamp": ["oklch(22% 0.12 265)", "oklch(32% 0.16 265)", "oklch(43% 0.19 265)", "oklch(53% 0.21 265)", "oklch(62% 0.20 265)", "oklch(73% 0.16 265)", "oklch(84% 0.10 265)", "oklch(95% 0.04 265)"]
+      },
+      "success": {
+        "role": "semantic",
+        "displayName": "Settlement Green",
+        "canonical": "#15803d",
+        "tonalRamp": ["oklch(21% 0.10 150)", "oklch(31% 0.13 150)", "oklch(42% 0.15 150)", "oklch(52% 0.16 150)", "oklch(62% 0.14 150)", "oklch(73% 0.11 150)", "oklch(84% 0.07 150)", "oklch(95% 0.03 150)"]
+      },
+      "warning": {
+        "role": "semantic",
+        "displayName": "Expiry Amber",
+        "canonical": "#b45309",
+        "tonalRamp": ["oklch(24% 0.10 65)", "oklch(34% 0.13 65)", "oklch(44% 0.15 65)", "oklch(55% 0.16 65)", "oklch(66% 0.14 65)", "oklch(77% 0.10 65)", "oklch(88% 0.06 65)", "oklch(96% 0.03 65)"]
+      },
+      "danger": {
+        "role": "semantic",
+        "displayName": "Failure Red",
+        "canonical": "#b91c1c",
+        "tonalRamp": ["oklch(22% 0.12 25)", "oklch(32% 0.16 25)", "oklch(43% 0.18 25)", "oklch(54% 0.18 25)", "oklch(64% 0.15 25)", "oklch(75% 0.11 25)", "oklch(86% 0.07 25)", "oklch(96% 0.03 25)"]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Operational Headline",
+        "purpose": "Page-level task titles and setup screen headings."
+      },
+      "title": {
+        "displayName": "Panel Title",
+        "purpose": "Card headers, section headers, and compact operational labels."
+      },
+      "body": {
+        "displayName": "Interface Body",
+        "purpose": "Main product UI copy, table cells, and form text."
+      },
+      "label": {
+        "displayName": "Control Label",
+        "purpose": "Form labels, metric labels, and metadata."
+      },
+      "mono": {
+        "displayName": "Exact Value Mono",
+        "purpose": "Ticket IDs, keyset IDs, URLs, and protocol-like values."
+      }
+    },
+    "shadows": [
+      {
+        "name": "surface-low",
+        "value": "0 1px 2px rgba(0,0,0,.04)",
+        "purpose": "Default card separation without visible lift."
+      },
+      {
+        "name": "surface-medium",
+        "value": "0 1px 3px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.04)",
+        "purpose": "Login and auth panels only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "120ms",
+        "purpose": "Button and control hover transitions."
+      },
+      {
+        "name": "press-nudge",
+        "value": "translateY(1px)",
+        "purpose": "Pressed button feedback."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact-form",
+        "value": "720px"
+      },
+      {
+        "name": "overview-stack",
+        "value": "820px"
+      },
+      {
+        "name": "setup-mobile",
+        "value": "560px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The only high-emphasis action style. Use for provisioning, opening workflows, and committing clear operator actions.",
+      "html": "<button class=\"ds-btn-primary\">Provision mint</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 14px; border: 1px solid var(--accent, #2563eb); border-radius: var(--radius-sm, 6px); background: var(--accent, #2563eb); color: var(--accent-fg, #fff); font: inherit; font-weight: 500; line-height: 1; cursor: pointer; transition: background-color .12s, border-color .12s, color .12s, transform .04s; white-space: nowrap; } .ds-btn-primary:hover { filter: brightness(1.08); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft, rgba(37,99,235,.10)); } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:disabled { opacity: .55; cursor: not-allowed; transform: none; filter: none; }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Secondary action style for management navigation and non-primary commands.",
+      "html": "<button class=\"ds-btn-outline\">Manage keysets</button>",
+      "css": ".ds-btn-outline { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 14px; border: 1px solid var(--border-strong, #d4d4d8); border-radius: var(--radius-sm, 6px); background: transparent; color: var(--fg, #0a0a0a); font: inherit; font-weight: 500; line-height: 1; cursor: pointer; transition: background-color .12s, border-color .12s, color .12s, transform .04s; white-space: nowrap; } .ds-btn-outline:hover { background: var(--surface-2, #fafafa); } .ds-btn-outline:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft, rgba(37,99,235,.10)); } .ds-btn-outline:active { transform: translateY(1px); }"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "pill-active",
+      "description": "Compact semantic state marker for quote, keyset, health, and setup status.",
+      "html": "<span class=\"ds-pill ds-pill-active\">Active</span>",
+      "css": ".ds-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: var(--radius-pill, 999px); font-size: 12px; font-weight: 500; background: var(--surface-2, #fafafa); color: var(--fg-muted, #71717a); border: 1px solid var(--border, #e4e4e7); } .ds-pill::before { content: \"\"; width: 6px; height: 6px; border-radius: 50%; background: currentColor; } .ds-pill-active { background: var(--accent-soft, rgba(37,99,235,.10)); color: var(--accent, #2563eb); border-color: transparent; }"
+    },
+    {
+      "name": "Operational Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Default panel container for dashboard, teller, keyset, and settings surfaces.",
+      "html": "<section class=\"ds-card\"><div class=\"ds-card-header\"><h2>Keyset state</h2><span class=\"ds-card-meta\">Active</span></div><div class=\"ds-card-body\">Expiry is immutable per keyset.</div></section>",
+      "css": ".ds-card { background: var(--surface, #fff); color: var(--fg, #0a0a0a); border: 1px solid var(--border, #e4e4e7); border-radius: var(--radius, 10px); box-shadow: 0 1px 2px rgba(0,0,0,.04); overflow: hidden; } .ds-card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border, #e4e4e7); background: var(--surface, #fff); } .ds-card-header h2 { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; letter-spacing: -0.005em; } .ds-card-meta { color: var(--fg-muted, #71717a); font-size: 13px; } .ds-card-body { padding: 16px 20px; color: var(--fg-muted, #71717a); font-size: 14px; line-height: 1.5; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Standard setup and operations field with clear focus feedback.",
+      "html": "<label class=\"ds-field\"><span>Wallet-facing URL</span><input type=\"text\" value=\"http://localhost:8089\"><small>Use the URL wallets will scan or paste.</small></label>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: 6px; color: var(--fg, #0a0a0a); font: inherit; } .ds-field span { color: var(--fg-muted, #71717a); font-size: 12px; font-weight: 500; } .ds-field input { width: 100%; padding: 9px 12px; border: 1px solid var(--border-strong, #d4d4d8); border-radius: var(--radius-sm, 6px); background: var(--surface, #fff); color: var(--fg, #0a0a0a); font: inherit; font-size: 14px; } .ds-field input:focus { outline: none; border-color: var(--accent, #2563eb); box-shadow: 0 0 0 3px var(--accent-soft, rgba(37,99,235,.10)); } .ds-field small { color: var(--fg-subtle, #a1a1aa); font-size: 12px; }"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "description": "Sticky app navigation for authenticated operations.",
+      "html": "<nav class=\"ds-topbar\"><div class=\"ds-brand\"><span class=\"ds-brand-mark\">B</span><span>Branch</span></div><div class=\"ds-navlinks\"><a href=\"#\">Overview</a><a href=\"#\">Teller</a><a href=\"#\">Keysets</a></div></nav>",
+      "css": ".ds-topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 28px; background: var(--surface, #fff); border-bottom: 1px solid var(--border, #e4e4e7); color: var(--fg, #0a0a0a); } .ds-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -0.01em; } .ds-brand-mark { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: var(--radius-sm, 6px); background: var(--accent, #2563eb); color: var(--accent-fg, #fff); font-weight: 700; font-size: 16px; } .ds-navlinks { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; } .ds-navlinks a { color: var(--fg-muted, #71717a); padding: 6px 10px; border-radius: var(--radius-sm, 6px); font-weight: 500; text-decoration: none; } .ds-navlinks a:hover { color: var(--fg, #0a0a0a); background: var(--surface-2, #fafafa); }"
+    },
+    {
+      "name": "Metric Card",
+      "kind": "card",
+      "refersTo": "metric",
+      "description": "Compact dashboard value block for health, circulation, and processed totals.",
+      "html": "<div class=\"ds-metric\"><span>Estimated circulation</span><strong>2,100 ORA</strong><small>Paid mints minus paid melts</small></div>",
+      "css": ".ds-metric { background: var(--surface, #fff); border: 1px solid var(--border, #e4e4e7); border-radius: var(--radius, 10px); padding: 14px 16px; min-width: 0; color: var(--fg, #0a0a0a); } .ds-metric span { display: block; color: var(--fg-muted, #71717a); font-size: 12px; font-weight: 500; } .ds-metric strong { display: block; margin-top: 4px; font-size: 22px; line-height: 1.2; font-weight: 650; overflow-wrap: anywhere; } .ds-metric small { display: block; margin-top: 5px; color: var(--fg-subtle, #a1a1aa); font-size: 12px; overflow-wrap: anywhere; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Operations Console",
+    "overview": "Custom Unit Mint is calm, exact, operational infrastructure software. It favors dense but readable panels, explicit state, and familiar controls so branch operators and mint administrators can provision and run a custom unit mint without editing config files or knowing CDK internals.",
+    "keyCharacteristics": [
+      "Restrained, high-contrast product UI.",
+      "Dense operational layouts with clear grouping and stable dimensions.",
+      "Plain labels and state names before clever copy.",
+      "One accent used for primary actions, active state, and information emphasis.",
+      "Irreversible or security-sensitive choices are explained before action."
+    ],
+    "rules": [
+      {
+        "name": "The One Accent Rule",
+        "body": "Blue is the only non-semantic accent. Do not introduce extra brand colors for decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The No Hero Type Rule",
+        "body": "This is an operational tool. Do not use oversized display type inside dashboards, forms, cards, or setup panels.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat By Default Rule",
+        "body": "Prefer borders and tonal layers. Do not increase shadow blur to make a panel feel important.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep interfaces calm, exact, and operational.",
+      "Do use the existing CSS variables before introducing new visual values.",
+      "Do explain irreversible decisions before the operator commits them.",
+      "Do pair semantic color with text labels."
+    ],
+    "donts": [
+      "Don't create marketing-style landing pages for app surfaces.",
+      "Don't use crypto-dashboard spectacle, neon palettes, glass panels, or decorative gradients.",
+      "Don't rely on terminal-only workflows or hidden manual configuration steps.",
+      "Don't assume the operator already knows Cashu/CDK internals.",
+      "Don't nest cards inside cards or use cards as decorative page sections."
+    ]
+  }
+}

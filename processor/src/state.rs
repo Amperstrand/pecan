@@ -293,7 +293,7 @@ impl BranchState {
         self.inner.ui_changed_tx.subscribe()
     }
 
-    fn notify_ui_change(&self) {
+    pub fn notify_ui_change(&self) {
         let _ = self.inner.ui_changed_tx.send(());
     }
 

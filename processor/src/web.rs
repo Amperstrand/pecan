@@ -3,7 +3,7 @@
 //! Auth: static password. POST /login → cookie session id (kept in process memory,
 //! invalidated on restart). All other routes require a valid session cookie.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,9 +21,14 @@ use qrcode::QrCode;
 use serde::Deserialize;
 use std::convert::Infallible;
 use tokio::sync::RwLock;
+use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::clients::{MintHttpClient, MintRpcClient};
+use crate::config::{
+    default_amounts, generate_mnemonic, parse_amounts, AppConfig, ConfigStore, SetupDraft,
+    PASSWORD_MIN_LENGTH,
+};
 use crate::state::{BranchState, Ticket, TicketKind, TicketStatus};
 
 #[derive(Clone)]
@@ -31,17 +36,58 @@ pub struct WebState {
     pub branch: BranchState,
     pub mint_rpc: MintRpcClient,
     pub mint_http: MintHttpClient,
-    pub password: Arc<String>,
-    pub sessions: Arc<RwLock<HashSet<String>>>,
+    pub config: Arc<AppConfig>,
+    pub sessions: Arc<RwLock<HashMap<String, Session>>>,
     pub unit: CurrencyUnit,
     pub method: Arc<String>,
     pub mint_public_url: Arc<String>,
     pub default_amounts: Arc<Vec<u64>>,
 }
 
+impl WebState {
+    pub fn new(
+        branch: BranchState,
+        mint_rpc: MintRpcClient,
+        mint_http: MintHttpClient,
+        config: AppConfig,
+        unit: CurrencyUnit,
+    ) -> Self {
+        let method = config.mint.method.clone();
+        let mint_public_url = config.endpoints.public_url.clone();
+        let default_amounts = config.rollover.amounts.clone();
+        Self {
+            branch,
+            mint_rpc,
+            mint_http,
+            config: Arc::new(config),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            unit,
+            method: Arc::new(method),
+            mint_public_url: Arc::new(mint_public_url),
+            default_amounts: Arc::new(default_amounts),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SetupState {
+    pub config_store: ConfigStore,
+    pub mint_http_url: String,
+    pub mint_rpc_url: String,
+    pub mint_grpc_addr: String,
+    pub grpc_port: u16,
+    pub default_public_url: String,
+}
+
+#[derive(Clone)]
+pub struct Session {
+    expires_at: u64,
+}
+
 pub fn router(state: WebState) -> Router {
     Router::new()
-        .route("/", get(dashboard))
+        .route("/", get(overview))
+        .route("/teller", get(dashboard))
         .route("/login", get(login_page).post(login_submit))
         .route("/logout", post(logout))
         .route("/quotes", post(create_quote))
@@ -49,10 +95,21 @@ pub fn router(state: WebState) -> Router {
         .route("/tickets/{id}/mark-failed", post(mark_failed))
         .route("/keysets", get(keysets_page))
         .route("/keysets/rotate", post(rotate_keyset))
+        .route("/settings", get(settings_page))
+        .route("/setup", get(setup_already_done))
         // Server-sent events: the dashboard listens here and reloads when state changes.
         .route("/events", get(sse_events))
         // Self-hosted fonts (embedded in the binary so the UI works offline / behind
         // content blockers).
+        .route("/static/inter.woff2", get(font_inter))
+        .route("/static/jbm.woff2", get(font_jbm))
+        .with_state(state)
+}
+
+pub fn setup_router(state: SetupState) -> Router {
+    Router::new()
+        .route("/", get(setup_page))
+        .route("/setup", get(setup_page).post(setup_submit))
         .route("/static/inter.woff2", get(font_inter))
         .route("/static/jbm.woff2", get(font_jbm))
         .with_state(state)
@@ -131,7 +188,19 @@ async fn is_authenticated(state: &WebState, headers: &HeaderMap) -> bool {
     let Some(c) = cookie_value(headers) else {
         return false;
     };
-    state.sessions.read().await.contains(&c)
+    let now = unix_now();
+    let expired = {
+        let sessions = state.sessions.read().await;
+        match sessions.get(&c) {
+            Some(session) if session.expires_at > now => return true,
+            Some(_) => true,
+            None => false,
+        }
+    };
+    if expired {
+        state.sessions.write().await.remove(&c);
+    }
+    false
 }
 
 /// Reject the request with a redirect to /login. Always returns the same
@@ -144,7 +213,673 @@ async fn require_auth(state: &WebState, headers: &HeaderMap) -> Result<(), Respo
     }
 }
 
+async fn setup_already_done() -> Response {
+    Redirect::to("/teller").into_response()
+}
+
 // ---------------- pages ----------------
+
+async fn setup_page(State(state): State<SetupState>) -> Markup {
+    let mnemonic = generate_mnemonic().unwrap_or_else(|_| {
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+            .to_string()
+    });
+    layout_no_chrome("Setup", setup_markup(&state, None, None, Some(mnemonic)))
+}
+
+#[derive(Deserialize, Clone)]
+struct SetupForm {
+    name: String,
+    description: String,
+    #[serde(default)]
+    description_long: String,
+    unit: String,
+    method: String,
+    public_url: String,
+    password: String,
+    password_confirm: String,
+    mnemonic: String,
+    #[serde(default)]
+    rollover_enabled: Option<String>,
+    keyset_lifetime_days: u64,
+    rotate_before_expiry_days: u64,
+    #[serde(default)]
+    input_fee_ppk: u64,
+    amounts: String,
+    #[serde(default)]
+    backup_confirmed: Option<String>,
+}
+
+async fn setup_submit(State(state): State<SetupState>, Form(form): Form<SetupForm>) -> Response {
+    let amounts = match parse_amounts(&form.amounts) {
+        Ok(v) => v,
+        Err(e) => {
+            return setup_error_response(&state, &form, &format!("amounts: {e}"));
+        }
+    };
+    let description_long = if form.description_long.trim().is_empty() {
+        form.description.clone()
+    } else {
+        form.description_long.clone()
+    };
+    let draft = SetupDraft {
+        name: form.name.clone(),
+        description: form.description.clone(),
+        description_long,
+        unit: form.unit.clone(),
+        method: form.method.clone(),
+        public_url: form.public_url.clone(),
+        password: form.password.clone(),
+        password_confirm: form.password_confirm.clone(),
+        mnemonic: form.mnemonic.clone(),
+        rollover_enabled: form.rollover_enabled.is_some(),
+        keyset_lifetime_days: form.keyset_lifetime_days,
+        rotate_before_expiry_days: form.rotate_before_expiry_days,
+        input_fee_ppk: form.input_fee_ppk,
+        amounts,
+        backup_confirmed: form.backup_confirmed.is_some(),
+    };
+    let config = match AppConfig::from_draft(
+        draft,
+        unix_now(),
+        state.mint_http_url.clone(),
+        state.mint_rpc_url.clone(),
+        state.mint_grpc_addr.clone(),
+        state.grpc_port,
+    ) {
+        Ok(config) => config,
+        Err(e) => return setup_error_response(&state, &form, &e.to_string()),
+    };
+    if let Err(e) = state.config_store.save(&config).await {
+        return setup_error_response(&state, &form, &format!("save setup: {e}"));
+    }
+    if let Err(e) = state.config_store.write_mint_config(&config).await {
+        return setup_error_response(&state, &form, &format!("write mint config: {e}"));
+    }
+
+    tokio::spawn(async {
+        sleep(Duration::from_millis(900)).await;
+        std::process::exit(0);
+    });
+
+    layout_no_chrome(
+        "Setup complete",
+        html! {
+            div.setup-shell {
+                div.setup-panel.compact {
+                    div.brand {
+                        span.brand-mark { "◐" }
+                        span.brand-name { "Branch" }
+                    }
+                    h1 { "Mint configuration saved" }
+                    p.lede { "The service is restarting with the generated mint configuration. The mint container will start as soon as the config file is visible." }
+                    div.status-list {
+                        div.status-row {
+                            span.pill.pill-paid { "Saved" }
+                            div {
+                                strong { "Lifecycle config" }
+                                p.muted { (state.config_store.app_config_path().display().to_string()) }
+                            }
+                        }
+                        div.status-row {
+                            span.pill.pill-paid { "Generated" }
+                            div {
+                                strong { "Mint config" }
+                                p.muted { (state.config_store.mint_config_path().display().to_string()) }
+                            }
+                        }
+                    }
+                    p.muted { "Refresh this page in a few seconds if the browser does not reconnect automatically." }
+                    script { (PreEscaped("setTimeout(() => location.href='/', 3500);")) }
+                }
+            }
+        },
+    )
+    .into_response()
+}
+
+fn setup_error_response(state: &SetupState, form: &SetupForm, msg: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        layout_no_chrome("Setup", setup_markup(state, Some(msg), Some(form), None)),
+    )
+        .into_response()
+}
+
+fn setup_markup(
+    state: &SetupState,
+    error: Option<&str>,
+    form: Option<&SetupForm>,
+    generated_mnemonic: Option<String>,
+) -> Markup {
+    let amounts = default_amounts();
+    let mnemonic = form
+        .map(|f| f.mnemonic.clone())
+        .or(generated_mnemonic)
+        .unwrap_or_default();
+    let name = form.map(|f| f.name.as_str()).unwrap_or("Custom Unit Mint");
+    let description = form
+        .map(|f| f.description.as_str())
+        .unwrap_or("Cashu mint for a custom unit with branch settlement.");
+    let description_long = form
+        .map(|f| f.description_long.as_str())
+        .unwrap_or("A stock cdk-mintd instance managed from the browser UI. Mint and melt quotes settle manually through the branch operator workflow.");
+    let unit = form.map(|f| f.unit.as_str()).unwrap_or("ora");
+    let method = form.map(|f| f.method.as_str()).unwrap_or("branch");
+    let public_url = form
+        .map(|f| f.public_url.as_str())
+        .unwrap_or(state.default_public_url.as_str());
+    let keyset_lifetime_days = form.map(|f| f.keyset_lifetime_days).unwrap_or(90);
+    let rotate_before_expiry_days = form.map(|f| f.rotate_before_expiry_days).unwrap_or(14);
+    let input_fee_ppk = form.map(|f| f.input_fee_ppk).unwrap_or(0);
+    let amounts_value = form
+        .map(|f| f.amounts.clone())
+        .unwrap_or_else(|| default_amounts_str(&amounts));
+    let rollover_checked = form.map(|f| f.rollover_enabled.is_some()).unwrap_or(true);
+    let backup_checked = form.map(|f| f.backup_confirmed.is_some()).unwrap_or(false);
+
+    html! {
+        div.setup-shell {
+            div.setup-panel {
+                div.setup-head {
+                    div.brand {
+                        span.brand-mark { "◐" }
+                        span.brand-name { "Branch" }
+                    }
+                    h1 { "Set up your custom unit mint" }
+                    p.lede { "One command starts the containers. This browser setup writes the mint configuration, locks the irreversible choices, and brings the mint online." }
+                }
+                @if let Some(error) = error {
+                    div.alert.alert-error { (error) }
+                }
+                form id="setup-form" method="post" action="/setup" class="setup-form" {
+                    div.setup-section {
+                        h2 { "Mint identity" }
+                        div.field-row {
+                            div.field {
+                                label for="setup-name" { "Mint name" }
+                                input id="setup-name" type="text" name="name" value=(name) required;
+                            }
+                            div.field {
+                                label for="setup-public-url" { "Wallet-facing URL" }
+                                input id="setup-public-url" type="url" name="public_url" value=(public_url) required;
+                                div.field-help { "Use the URL wallets will scan or paste, for example http://localhost:8089 or your LAN address." }
+                            }
+                        }
+                        div.field {
+                            label for="setup-description" { "Short description" }
+                            input id="setup-description" type="text" name="description" value=(description) required;
+                        }
+                        div.field {
+                            label for="setup-description-long" { "Long description" }
+                            textarea id="setup-description-long" name="description_long" rows="3" { (description_long) }
+                        }
+                    }
+
+                    div.setup-section {
+                        h2 { "Immutable unit settings" }
+                        div.field-row {
+                            div.field {
+                                label for="setup-unit" { "Custom unit" }
+                                input id="setup-unit" type="text" name="unit" value=(unit) pattern="[a-z0-9_-]+" required;
+                                div.field-help { "Lowercase unit code. This cannot be changed after provisioning." }
+                            }
+                            div.field {
+                                label for="setup-method" { "Payment method" }
+                                input id="setup-method" type="text" name="method" value=(method) pattern="[a-z0-9_-]+" required;
+                                div.field-help { "Use branch unless you know a wallet integration expects a different method." }
+                            }
+                        }
+                    }
+
+                    div.setup-section {
+                        h2 { "Operator access" }
+                        div.field-row {
+                            div.field {
+                                label for="setup-password" { "Operator password" }
+                                div.password-control {
+                                    input id="setup-password" type="password" name="password" autocomplete="new-password" minlength=(PASSWORD_MIN_LENGTH) data-password-min=(PASSWORD_MIN_LENGTH) required;
+                                    button type="button" class="btn btn-outline btn-sm password-toggle" data-password-toggle="setup-password" aria-controls="setup-password" aria-pressed="false" { "Show" }
+                                }
+                            }
+                            div.field {
+                                label for="setup-password-confirm" { "Confirm password" }
+                                div.password-control {
+                                    input id="setup-password-confirm" type="password" name="password_confirm" autocomplete="new-password" minlength=(PASSWORD_MIN_LENGTH) required;
+                                    button type="button" class="btn btn-outline btn-sm password-toggle" data-password-toggle="setup-password-confirm" aria-controls="setup-password-confirm" aria-pressed="false" { "Show" }
+                                }
+                            }
+                        }
+                        ul.password-rules id="setup-password-rules" aria-live="polite" {
+                            li data-password-rule="length" data-valid="false" {
+                                span.rule-status { "Needed" }
+                                span { "At least " (PASSWORD_MIN_LENGTH) " characters" }
+                            }
+                            li data-password-rule="letter" data-valid="false" {
+                                span.rule-status { "Needed" }
+                                span { "Contains a letter" }
+                            }
+                            li data-password-rule="number" data-valid="false" {
+                                span.rule-status { "Needed" }
+                                span { "Contains a number" }
+                            }
+                            li data-password-rule="symbol" data-valid="false" {
+                                span.rule-status { "Needed" }
+                                span { "Contains a symbol" }
+                            }
+                            li data-password-rule="match" data-valid="false" {
+                                span.rule-status { "Needed" }
+                                span { "Passwords match" }
+                            }
+                        }
+                    }
+
+                    div.setup-section {
+                        h2 { "Recovery phrase" }
+                        div.field {
+                            label for="setup-mnemonic" { "Mint seed phrase" }
+                            textarea id="setup-mnemonic" name="mnemonic" rows="4" aria-describedby="setup-seed-help" required { (mnemonic) }
+                            div.field-help id="setup-seed-help" { "This phrase restores Cashu mint signing keys and keysets. It does not control bitcoin funds in this custom processor. Use the generated phrase, or paste an existing phrase when restoring." }
+                        }
+                        label.checkbox-row {
+                            input id="setup-backup-confirmed" type="checkbox" name="backup_confirmed" value="yes" checked[backup_checked] required;
+                            span { "I have saved the recovery phrase somewhere safe and understand it is required to recover this mint's signing keys." }
+                        }
+                    }
+
+                    div.setup-section {
+                        h2 { "Keyset expiry" }
+                        label.checkbox-row {
+                            input type="checkbox" name="rollover_enabled" value="yes" checked[rollover_checked];
+                            span { "Automatically rotate keysets before they expire." }
+                        }
+                        div.field-row {
+                            div.field {
+                                label for="setup-lifetime" { "Keyset lifetime · days" }
+                                input id="setup-lifetime" type="number" name="keyset_lifetime_days" min="2" value=(keyset_lifetime_days) required;
+                            }
+                            div.field {
+                                label for="setup-rotate" { "Rotate before expiry · days" }
+                                input id="setup-rotate" type="number" name="rotate_before_expiry_days" min="1" value=(rotate_before_expiry_days) required;
+                            }
+                        }
+                        div.field-row {
+                            div.field {
+                                label for="setup-fee" { "Input fee (ppk)" }
+                                input id="setup-fee" type="number" name="input_fee_ppk" min="0" value=(input_fee_ppk) required;
+                            }
+                            div.field {
+                                label for="setup-amounts" { "Denominations" }
+                                input id="setup-amounts" type="text" name="amounts" value=(amounts_value) required;
+                            }
+                        }
+                    }
+
+                    div.setup-review {
+                        strong { "Locked after setup" }
+                        span { " Unit, method, recovery phrase, and initial mint identity become read-only after provisioning." }
+                    }
+                    div.setup-submit-row {
+                        button id="setup-submit" type="submit" class="btn btn-primary" disabled aria-disabled="true" { "Provision mint" }
+                        span id="setup-validation-summary" class="setup-submit-hint" aria-live="polite" { "Complete the required fields to continue." }
+                    }
+                }
+                script { (PreEscaped(SETUP_VALIDATION_JS)) }
+            }
+        }
+    }
+}
+
+const SETUP_VALIDATION_JS: &str = r#"
+(() => {
+  const form = document.getElementById('setup-form');
+  if (!form) return;
+
+  const byId = (id) => document.getElementById(id);
+  const submit = byId('setup-submit');
+  const summary = byId('setup-validation-summary');
+  const password = byId('setup-password');
+  const passwordConfirm = byId('setup-password-confirm');
+  const unit = byId('setup-unit');
+  const method = byId('setup-method');
+  const publicUrl = byId('setup-public-url');
+  const seed = byId('setup-mnemonic');
+  const backup = byId('setup-backup-confirmed');
+  const lifetime = byId('setup-lifetime');
+  const rotate = byId('setup-rotate');
+  const fee = byId('setup-fee');
+  const amounts = byId('setup-amounts');
+
+  const slugPattern = /^[a-z0-9_-]+$/;
+  const letterPattern = /\p{L}/u;
+  const symbolPattern = /[^\p{L}\p{N}\s]/u;
+
+  function setRule(name, valid) {
+    const item = form.querySelector(`[data-password-rule="${name}"]`);
+    if (!item) return;
+    item.dataset.valid = valid ? 'true' : 'false';
+    const status = item.querySelector('.rule-status');
+    if (status) status.textContent = valid ? 'Met' : 'Needed';
+  }
+
+  function setValidity(input, valid, message) {
+    if (!input) return valid;
+    input.setCustomValidity(valid ? '' : message);
+    return valid;
+  }
+
+  function validHttpUrl(value) {
+    try {
+      const url = new URL(value.trim());
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function validAmounts(value) {
+    const parts = value.split(',').map((part) => part.trim()).filter(Boolean);
+    if (parts.length === 0) return false;
+    return parts.every((part) => {
+      if (!/^\d+$/.test(part)) return false;
+      try {
+        return BigInt(part) > 0n;
+      } catch (_) {
+        return false;
+      }
+    });
+  }
+
+  function passwordState() {
+    const value = password.value;
+    const minLength = Number(password.dataset.passwordMin || 12);
+    const checks = {
+      length: Array.from(value).length >= minLength,
+      letter: letterPattern.test(value),
+      number: /\d/.test(value),
+      symbol: symbolPattern.test(value),
+      match: value.length > 0 && value === passwordConfirm.value,
+    };
+
+    Object.entries(checks).forEach(([name, valid]) => setRule(name, valid));
+
+    const baseOk = checks.length && checks.letter && checks.number && checks.symbol;
+    setValidity(password, baseOk, 'Password does not meet the listed requirements.');
+    setValidity(passwordConfirm, checks.match, 'Passwords do not match.');
+    return { ...checks, baseOk };
+  }
+
+  function numberValue(input) {
+    const value = Number(input.value);
+    return Number.isInteger(value) ? value : NaN;
+  }
+
+  function validateSetup() {
+    const passwordChecks = passwordState();
+    const lifetimeValue = numberValue(lifetime);
+    const rotateValue = numberValue(rotate);
+    const feeValue = numberValue(fee);
+
+    const unitOk = setValidity(unit, slugPattern.test(unit.value.trim()), 'Use lowercase letters, digits, hyphen, or underscore.');
+    const methodOk = setValidity(method, slugPattern.test(method.value.trim()), 'Use lowercase letters, digits, hyphen, or underscore.');
+    const publicUrlOk = setValidity(publicUrl, validHttpUrl(publicUrl.value), 'Enter an http:// or https:// URL.');
+    const seedOk = setValidity(seed, seed.value.trim().length > 0, 'A mint seed phrase is required.');
+    const backupOk = setValidity(backup, backup.checked, 'Confirm that the seed phrase has been saved.');
+    const lifetimeOk = setValidity(lifetime, lifetimeValue >= 2, 'Keyset lifetime must be at least 2 days.');
+    const rotateOk = setValidity(rotate, rotateValue >= 1 && rotateValue < lifetimeValue, 'Rotate-before-expiry must be shorter than the keyset lifetime.');
+    const feeOk = setValidity(fee, feeValue >= 0, 'Input fee must be zero or greater.');
+    const amountsOk = setValidity(amounts, validAmounts(amounts.value), 'Enter comma-separated positive whole numbers.');
+
+    const ok = form.checkValidity()
+      && passwordChecks.baseOk
+      && passwordChecks.match
+      && unitOk
+      && methodOk
+      && publicUrlOk
+      && seedOk
+      && backupOk
+      && lifetimeOk
+      && rotateOk
+      && feeOk
+      && amountsOk;
+
+    submit.disabled = !ok;
+    submit.setAttribute('aria-disabled', ok ? 'false' : 'true');
+    summary.dataset.valid = ok ? 'true' : 'false';
+
+    if (ok) {
+      summary.textContent = 'Ready to provision. This writes config and restarts the services.';
+    } else if (!passwordChecks.baseOk) {
+      summary.textContent = 'Complete the password requirements.';
+    } else if (!passwordChecks.match) {
+      summary.textContent = 'Confirm the operator password.';
+    } else if (!backupOk) {
+      summary.textContent = 'Save the seed phrase before provisioning.';
+    } else if (!unitOk || !methodOk || !publicUrlOk || !seedOk) {
+      summary.textContent = 'Complete the required mint settings.';
+    } else if (!lifetimeOk || !rotateOk || !feeOk || !amountsOk) {
+      summary.textContent = 'Review the keyset expiry settings.';
+    } else {
+      summary.textContent = 'Complete the required fields to continue.';
+    }
+
+    return ok;
+  }
+
+  form.querySelectorAll('[data-password-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const target = byId(button.dataset.passwordToggle);
+      if (!target) return;
+      const reveal = target.type === 'password';
+      target.type = reveal ? 'text' : 'password';
+      button.textContent = reveal ? 'Hide' : 'Show';
+      button.setAttribute('aria-pressed', reveal ? 'true' : 'false');
+      target.focus();
+    });
+  });
+
+  form.addEventListener('input', validateSetup);
+  form.addEventListener('change', validateSetup);
+  form.addEventListener('submit', (event) => {
+    if (!validateSetup()) {
+      event.preventDefault();
+      form.reportValidity();
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = 'Provisioning...';
+    summary.textContent = 'Writing configuration. The service will restart.';
+  });
+
+  validateSetup();
+})();
+"#;
+
+async fn overview(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_auth(&state, &headers).await {
+        return r;
+    }
+
+    let mut tickets = state.branch.list_all().await;
+    tickets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let summary = MintSummary::from_tickets(&tickets);
+    let active_count = tickets.iter().filter(|t| t.status.is_active()).count();
+    let now = unix_now();
+
+    let info_health = state.mint_http.get_info().await;
+    let rpc_health = state.mint_rpc.health().await;
+    let keysets_result = state.mint_http.list_keysets().await;
+    let active_keyset = keysets_result.as_ref().ok().and_then(|keysets| {
+        keysets
+            .iter()
+            .find(|ks| ks.unit == state.config.mint.unit.as_str() && ks.active)
+    });
+
+    let recent_done: Vec<_> = tickets
+        .iter()
+        .filter(|t| !t.status.is_active())
+        .take(8)
+        .collect();
+
+    layout(
+        "Overview",
+        html! {
+            section class="overview-hero" {
+                div {
+                    h1 { (state.config.mint.name.as_str()) }
+                    p { (state.config.mint.description.as_str()) }
+                }
+                div.hero-actions {
+                    a.btn.btn-primary href="/teller" { "Open teller" }
+                    a.btn.btn-outline href="/keysets" { "Manage keysets" }
+                }
+            }
+
+            section class="metric-grid" {
+                (metric_card("Mint HTTP", health_label(info_health.is_ok()), health_detail(info_health.as_ref().err())))
+                (metric_card("Management RPC", health_label(rpc_health.is_ok()), health_detail(rpc_health.as_ref().err())))
+                (metric_card("Payment backend", "Listening", format!("{}:{}", state.config.endpoints.processor_grpc_addr.as_str(), state.config.endpoints.processor_grpc_port)))
+                (metric_card("Active quotes", active_count.to_string(), "Waiting or pending teller work"))
+                (metric_card("Mints processed", summary.mint_count.to_string(), amount_text(summary.minted_amount, &state.config.mint.unit)))
+                (metric_card("Melts processed", summary.melt_count.to_string(), amount_text(summary.melted_amount, &state.config.mint.unit)))
+                (metric_card("Estimated circulation", signed_amount_text(summary.net_issued, &state.config.mint.unit), "Completed mints minus completed melts"))
+                (metric_card("Unit", state.config.mint.unit.as_str(), format!("method {}", state.config.mint.method.as_str())))
+            }
+
+            section class="split-grid" {
+                div.card {
+                    div.card-header {
+                        div {
+                            h2.card-title { "Keyset state" }
+                            p.card-subtitle { "Expiry is immutable per keyset; rollover creates the next active keyset." }
+                        }
+                        @match active_keyset {
+                            Some(ks) => { (keyset_status_pill(ks.active, ks.final_expiry, now)) }
+                            None => { span.pill.pill-pending { "Waiting" } }
+                        }
+                    }
+                    div.card-body {
+                        @match keysets_result.as_ref() {
+                            Ok(keysets) => {
+                                @if let Some(ks) = active_keyset {
+                                    div.detail-list {
+                                        div { span.muted { "Active keyset" } strong.mono { (ks.id) } }
+                                        div { span.muted { "Final expiry" } strong { (fmt_expiry(ks.final_expiry, now)) } }
+                                        div { span.muted { "Input fee" } strong.mono { (ks.input_fee_ppk) " ppk" } }
+                                        div { span.muted { "Total keysets" } strong { (keysets.len()) } }
+                                    }
+                                } @else {
+                                    div.empty {
+                                        div.empty-title { "No active keyset yet" }
+                                        div { "The rollover worker will create the first expiring keyset once the mint management RPC is reachable." }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                div.alert.alert-error { "Could not read keysets: " (e) }
+                            }
+                        }
+                    }
+                }
+
+                div.card {
+                    div.card-header {
+                        div {
+                            h2.card-title { "Rollover policy" }
+                            p.card-subtitle { "Configured during provisioning." }
+                        }
+                        @if state.config.rollover.enabled {
+                            span.pill.pill-active { "Enabled" }
+                        } @else {
+                            span.pill.pill-inactive { "Disabled" }
+                        }
+                    }
+                    div.card-body {
+                        div.detail-list {
+                            div { span.muted { "Lifetime" } strong { (state.config.rollover.keyset_lifetime_days) " days" } }
+                            div { span.muted { "Rotate before expiry" } strong { (state.config.rollover.rotate_before_expiry_days) " days" } }
+                            div { span.muted { "Denominations" } strong { (state.config.rollover.amounts.len()) " amounts" } }
+                            div { span.muted { "Public URL" } strong.mono.wrap { (state.config.endpoints.public_url.as_str()) } }
+                        }
+                    }
+                }
+            }
+
+            section {
+                div.card {
+                    div.card-header {
+                        h2.card-title { "Recent settled activity" }
+                        span.muted { (recent_done.len()) " rows" }
+                    }
+                    @if recent_done.is_empty() {
+                        div.empty {
+                            div.empty-title { "No settled operations yet" }
+                            div { "Completed mints and melts will appear here." }
+                        }
+                    } @else {
+                        div.card-body.zero {
+                            table {
+                                thead { tr {
+                                    th { "Ticket" } th { "Kind" } th { "Amount" } th { "Status" } th { "When" }
+                                } }
+                                tbody {
+                                    @for t in &recent_done {
+                                        tr {
+                                            td { span.id-chip { (short_id(&t.id)) } }
+                                            td.muted { (kind_label(t.kind)) }
+                                            td { (amount_cell(t.amount, &t.unit)) }
+                                            td { (status_pill(t.status)) }
+                                            td.muted { (relative_age(t.paid_at.unwrap_or(t.created_at), now)) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .into_response()
+}
+
+struct MintSummary {
+    mint_count: usize,
+    melt_count: usize,
+    minted_amount: u64,
+    melted_amount: u64,
+    net_issued: i128,
+}
+
+impl MintSummary {
+    fn from_tickets(tickets: &[Ticket]) -> Self {
+        let mut summary = Self {
+            mint_count: 0,
+            melt_count: 0,
+            minted_amount: 0,
+            melted_amount: 0,
+            net_issued: 0,
+        };
+        for ticket in tickets {
+            if ticket.status != TicketStatus::Paid {
+                continue;
+            }
+            match ticket.kind {
+                TicketKind::Incoming => {
+                    summary.mint_count += 1;
+                    summary.minted_amount = summary.minted_amount.saturating_add(ticket.amount);
+                    summary.net_issued += ticket.amount as i128;
+                }
+                TicketKind::Outgoing => {
+                    summary.melt_count += 1;
+                    summary.melted_amount = summary.melted_amount.saturating_add(ticket.amount);
+                    summary.net_issued -= ticket.amount as i128;
+                }
+            }
+        }
+        summary
+    }
+}
 
 async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Response {
     if let Err(r) = require_auth(&state, &headers).await {
@@ -162,7 +897,7 @@ async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Respons
         .collect();
 
     layout(
-        "Dashboard",
+        "Teller",
         html! {
             section {
                 div.card {
@@ -300,7 +1035,7 @@ struct LoginForm {
 }
 
 async fn login_submit(State(state): State<WebState>, Form(form): Form<LoginForm>) -> Response {
-    if form.password != *state.password {
+    if !state.config.verify_password(&form.password) {
         return (
             StatusCode::UNAUTHORIZED,
             layout_no_chrome(
@@ -329,7 +1064,12 @@ async fn login_submit(State(state): State<WebState>, Form(form): Form<LoginForm>
             .into_response();
     }
     let sid = uuid::Uuid::new_v4().to_string();
-    state.sessions.write().await.insert(sid.clone());
+    state.sessions.write().await.insert(
+        sid.clone(),
+        Session {
+            expires_at: unix_now() + 12 * 60 * 60,
+        },
+    );
     let mut resp = Redirect::to("/").into_response();
     resp.headers_mut().insert(
         header::SET_COOKIE,
@@ -416,7 +1156,7 @@ async fn create_quote(
         return error_response(&format!("store quote id: {e}"));
     }
 
-    Redirect::to("/").into_response()
+    Redirect::to("/teller").into_response()
 }
 
 #[derive(Deserialize)]
@@ -442,7 +1182,7 @@ async fn mark_paid(
     if let Err(e) = state.branch.mark_paid(&id, notes).await {
         return error_response(&format!("mark_paid: {e}"));
     }
-    Redirect::to("/").into_response()
+    Redirect::to("/teller").into_response()
 }
 
 async fn mark_failed(
@@ -603,7 +1343,120 @@ async fn rotate_keyset(
     Redirect::to("/keysets").into_response()
 }
 
+async fn settings_page(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_auth(&state, &headers).await {
+        return r;
+    }
+
+    layout(
+        "Settings",
+        html! {
+            section {
+                div.card {
+                    div.card-header {
+                        div {
+                            h2.card-title { "Mint configuration" }
+                            p.card-subtitle { "These values were committed during first-run setup." }
+                        }
+                        span.pill.pill-inactive { "Read-only" }
+                    }
+                    div.card-body {
+                        div.detail-list {
+                            div { span.muted { "Name" } strong { (state.config.mint.name.as_str()) } }
+                            div { span.muted { "Unit" } strong.mono { (state.config.mint.unit.as_str()) } }
+                            div { span.muted { "Method" } strong.mono { (state.config.mint.method.as_str()) } }
+                            div { span.muted { "Public URL" } strong.mono.wrap { (state.config.endpoints.public_url.as_str()) } }
+                            div { span.muted { "Mint HTTP" } strong.mono.wrap { (state.config.endpoints.mint_http_url.as_str()) } }
+                            div { span.muted { "Management RPC" } strong.mono.wrap { (state.config.endpoints.mint_rpc_url.as_str()) } }
+                        }
+                    }
+                }
+            }
+
+            section {
+                div.card {
+                    div.card-header {
+                        div {
+                            h2.card-title { "Keyset rollover" }
+                            p.card-subtitle { "Expiry policy used by the background rollover worker." }
+                        }
+                        @if state.config.rollover.enabled {
+                            span.pill.pill-active { "Enabled" }
+                        } @else {
+                            span.pill.pill-inactive { "Disabled" }
+                        }
+                    }
+                    div.card-body {
+                        div.detail-list {
+                            div { span.muted { "Lifetime" } strong { (state.config.rollover.keyset_lifetime_days) " days" } }
+                            div { span.muted { "Rotate before expiry" } strong { (state.config.rollover.rotate_before_expiry_days) " days" } }
+                            div { span.muted { "Input fee" } strong.mono { (state.config.rollover.input_fee_ppk) " ppk" } }
+                            div { span.muted { "Denominations" } strong.mono.wrap { (default_amounts_str(&state.config.rollover.amounts)) } }
+                        }
+                    }
+                }
+            }
+
+            section {
+                div.card {
+                    div.card-header {
+                        div {
+                            h2.card-title { "Reset guidance" }
+                            p.card-subtitle { "Immutable settings are protected by the data volumes." }
+                        }
+                    }
+                    div.card-body {
+                        div.alert.alert-warning { "Changing the unit, method, or recovery phrase requires a deliberate reset of the processor, config, and mint data volumes. Do not reset a production mint without first draining and backing up operational records." }
+                    }
+                }
+            }
+        },
+    )
+    .into_response()
+}
+
 // ---------------- helpers ----------------
+
+fn metric_card(
+    label: impl std::fmt::Display,
+    value: impl std::fmt::Display,
+    detail: impl std::fmt::Display,
+) -> Markup {
+    html! {
+        div.metric {
+            span.metric-label { (label) }
+            strong.metric-value { (value) }
+            span.metric-detail { (detail) }
+        }
+    }
+}
+
+fn health_label(ok: bool) -> &'static str {
+    if ok {
+        "Healthy"
+    } else {
+        "Offline"
+    }
+}
+
+fn health_detail(err: Option<&anyhow::Error>) -> String {
+    match err {
+        Some(e) => e.to_string(),
+        None => "Responding normally".to_string(),
+    }
+}
+
+fn amount_text(amount: u64, unit: &str) -> String {
+    format!("{amount} {}", unit.to_ascii_uppercase())
+}
+
+fn signed_amount_text(amount: i128, unit: &str) -> String {
+    if amount < 0 {
+        format!("-{} {}", amount.abs(), unit.to_ascii_uppercase())
+    } else {
+        format!("{amount} {}", unit.to_ascii_uppercase())
+    }
+}
 
 fn active_quote_panel(ticket: &Ticket, now: u64, state: &WebState) -> Markup {
     let (title, subtitle) = match (ticket.kind, ticket.status) {
@@ -771,8 +1624,10 @@ fn layout_with_chrome(title: &str, body: Markup, chrome: bool) -> Markup {
                             span.brand-name { "Branch" }
                         }
                         nav.topnav {
-                            a href="/" { "Dashboard" }
+                            a href="/" { "Overview" }
+                            a href="/teller" { "Teller" }
                             a href="/keysets" { "Keysets" }
+                            a href="/settings" { "Settings" }
                             form method="post" action="/logout" class="inline" {
                                 button type="submit" class="btn btn-ghost btn-sm" { "Sign out" }
                             }
@@ -1014,6 +1869,24 @@ tbody tr:hover { background: var(--surface-2); }
 .btn-ghost:hover { background: var(--surface-2); color: var(--fg); }
 .btn-outline { background: transparent; border-color: var(--border-strong); }
 .btn-outline:hover { background: var(--surface-2); }
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: .55;
+  cursor: not-allowed;
+  transform: none;
+}
+.btn:disabled:hover,
+.btn[aria-disabled="true"]:hover {
+  filter: none;
+}
+.btn-primary:disabled:hover,
+.btn-primary[aria-disabled="true"]:hover {
+  background: var(--accent);
+}
+.btn-outline:disabled:hover,
+.btn-outline[aria-disabled="true"]:hover {
+  background: transparent;
+}
 
 /* Forms */
 form.inline { display: inline; margin: 0; }
@@ -1031,6 +1904,14 @@ input[type=text], input[type=password], input[type=number] {
   background: var(--surface); color: var(--fg);
   width: 100%;
 }
+textarea {
+  font: inherit; font-size: 14px; line-height: 1.45;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--fg);
+  width: 100%;
+  resize: vertical;
+}
 select {
   font: inherit; font-size: 14px;
   padding: 9px 12px;
@@ -1039,8 +1920,86 @@ select {
   width: 100%;
 }
 input::placeholder { color: var(--fg-subtle); }
-input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 input[readonly] { background: var(--surface-2); color: var(--fg-muted); }
+input:invalid:not(:focus),
+textarea:invalid:not(:focus) {
+  box-shadow: none;
+}
+
+/* Overview */
+.overview-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+.overview-hero h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 650;
+}
+.overview-hero p {
+  margin: 6px 0 0;
+  color: var(--fg-muted);
+  max-width: 70ch;
+}
+.hero-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+.metric {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  min-width: 0;
+}
+.metric-label {
+  display: block;
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.metric-value {
+  display: block;
+  margin-top: 4px;
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.metric-detail {
+  display: block;
+  margin-top: 5px;
+  color: var(--fg-subtle);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.detail-list {
+  display: grid;
+  gap: 12px;
+}
+.detail-list > div {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 14px;
+  align-items: baseline;
+}
+.wrap { overflow-wrap: anywhere; }
+@media (max-width: 820px) {
+  .overview-hero { align-items: flex-start; flex-direction: column; }
+  .split-grid { grid-template-columns: 1fr; }
+  .detail-list > div { grid-template-columns: 1fr; gap: 3px; }
+}
 
 /* Row of inline action buttons in a table cell */
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
@@ -1118,6 +2077,139 @@ input[readonly] { background: var(--surface-2); color: var(--fg-muted); }
   .settlement-actions input { width: 100%; }
 }
 
+/* Setup */
+.setup-shell {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  padding: 44px 20px;
+  background: var(--bg);
+}
+.setup-panel {
+  width: min(900px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+}
+.setup-panel.compact { max-width: 560px; align-self: center; }
+.setup-head {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+}
+.setup-head .brand, .setup-panel.compact .brand { margin-bottom: 16px; }
+.setup-head h1, .setup-panel.compact h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 650;
+}
+.lede {
+  margin: 8px 0 0;
+  max-width: 74ch;
+  color: var(--fg-muted);
+}
+.setup-form { display: grid; gap: 22px; }
+.setup-section {
+  display: grid;
+  gap: 14px;
+}
+.setup-section h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.password-control {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.password-control input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.password-control .btn {
+  flex: 0 0 auto;
+}
+.password-rules {
+  list-style: none;
+  padding: 0;
+  margin: -2px 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 12px;
+}
+.password-rules li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.password-rules li[data-valid="true"] {
+  color: var(--success);
+}
+.rule-status {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 52px;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.password-rules li[data-valid="true"] .rule-status {
+  background: var(--success-soft);
+  border-color: transparent;
+  color: var(--success);
+}
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--fg);
+}
+.checkbox-row input {
+  width: auto;
+  margin-top: 3px;
+}
+.setup-review {
+  padding: 12px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.setup-submit-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.setup-submit-hint {
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+.setup-submit-hint[data-valid="true"] {
+  color: var(--success);
+}
+.status-list { display: grid; gap: 12px; margin: 18px 0; }
+.status-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.status-row p { margin: 2px 0 0; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .password-control { flex-direction: column; }
+  .password-control .btn { width: 100%; }
+  .setup-submit-row .btn { width: 100%; }
+}
+
 /* Login */
 .auth-shell {
   min-height: 100vh; display: grid; place-items: center; padding: 40px 20px;
@@ -1144,9 +2236,11 @@ input[readonly] { background: var(--surface-2); color: var(--fg-muted); }
   border: 1px solid transparent;
 }
 .alert-error { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+.alert-warning { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
 
 /* Tweaks */
 hr.sep { border: 0; border-top: 1px solid var(--border); margin: 20px 0; }
+
 "#;
 
 fn error_response(msg: &str) -> Response {
