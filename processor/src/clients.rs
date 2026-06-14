@@ -11,7 +11,7 @@ use cdk_common::grpc::{VersionInterceptor, VERSION_HEADER};
 use cdk_common::nuts::CurrencyUnit;
 use cdk_mint_rpc::cdk_mint_client::CdkMintClient;
 use cdk_mint_rpc::RotateNextKeysetRequest;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tonic::transport::Channel;
 use tonic::Request;
@@ -92,7 +92,7 @@ pub struct MintHttpClient {
     http: reqwest::Client,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct KeysetEntry {
     pub id: String,

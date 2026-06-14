@@ -4,10 +4,11 @@
 //! invalidated on restart). All other routes require a valid session cookie.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Form, Path as AxumPath, State};
+use axum::extract::{Form, Json, Path as AxumPath, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -18,7 +19,7 @@ use futures::stream::{Stream, StreamExt};
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use qrcode::render::svg;
 use qrcode::QrCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
@@ -86,19 +87,28 @@ pub struct Session {
 
 pub fn router(state: WebState) -> Router {
     Router::new()
-        .route("/", get(overview))
-        .route("/teller", get(dashboard))
-        .route("/login", get(login_page).post(login_submit))
+        .route("/", get(spa_page))
+        .route("/teller", get(spa_page))
+        .route("/keysets", get(spa_page))
+        .route("/settings", get(spa_page))
+        .route("/login", get(spa_page).post(login_submit))
         .route("/logout", post(logout))
+        .route("/api/app", get(api_app))
+        .route("/api/login", post(api_login))
+        .route("/api/logout", post(api_logout))
+        .route("/api/quotes", post(api_create_quote))
+        .route("/api/tickets/{id}/mark-paid", post(api_mark_paid))
+        .route("/api/tickets/{id}/mark-failed", post(api_mark_failed))
+        .route("/api/keysets/rotate", post(api_rotate_keyset))
         .route("/quotes", post(create_quote))
         .route("/tickets/{id}/mark-paid", post(mark_paid))
         .route("/tickets/{id}/mark-failed", post(mark_failed))
-        .route("/keysets", get(keysets_page))
         .route("/keysets/rotate", post(rotate_keyset))
-        .route("/settings", get(settings_page))
-        .route("/setup", get(setup_already_done))
+        .route("/setup", get(spa_page))
         // Server-sent events: the dashboard listens here and reloads when state changes.
         .route("/events", get(sse_events))
+        .route("/assets/{*path}", get(spa_asset))
+        .route("/favicon.svg", get(spa_favicon))
         // Self-hosted fonts (embedded in the binary so the UI works offline / behind
         // content blockers).
         .route("/static/inter.woff2", get(font_inter))
@@ -108,8 +118,12 @@ pub fn router(state: WebState) -> Router {
 
 pub fn setup_router(state: SetupState) -> Router {
     Router::new()
-        .route("/", get(setup_page))
-        .route("/setup", get(setup_page).post(setup_submit))
+        .route("/", get(spa_page))
+        .route("/setup", get(spa_page).post(setup_submit))
+        .route("/api/setup/defaults", get(api_setup_defaults))
+        .route("/api/setup", post(api_setup_submit))
+        .route("/assets/{*path}", get(spa_asset))
+        .route("/favicon.svg", get(spa_favicon))
         .route("/static/inter.woff2", get(font_inter))
         .route("/static/jbm.woff2", get(font_jbm))
         .with_state(state)
@@ -169,6 +183,544 @@ fn font_response(bytes: &'static [u8]) -> Response {
         .into_response()
 }
 
+// ---------------- SPA assets ----------------
+
+async fn spa_page() -> Response {
+    match read_spa_file("index.html").await {
+        Ok(bytes) => bytes_response(bytes, "text/html; charset=utf-8"),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("content-type", "text/html; charset=utf-8")],
+            r#"<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Branch</title></head>
+  <body style="font-family: Inter, system-ui, sans-serif; margin: 40px; color: #0a0a0a">
+    <h1>Operator UI assets are not built</h1>
+    <p>Run <code>npm --prefix web run build</code> or set <code>CDK_BRANCH_PROCESSOR_WEB_DIST</code> to a built Vite dist directory.</p>
+  </body>
+</html>"#,
+        )
+            .into_response(),
+    }
+}
+
+async fn spa_asset(AxumPath(path): AxumPath<String>) -> Response {
+    if !is_safe_asset_path(&path) {
+        return (StatusCode::BAD_REQUEST, "bad asset path").into_response();
+    }
+    let asset_path = format!("assets/{path}");
+    match read_spa_file(&asset_path).await {
+        Ok(bytes) => bytes_response(bytes, content_type_for(&asset_path)),
+        Err(_) => (StatusCode::NOT_FOUND, "asset not found").into_response(),
+    }
+}
+
+async fn spa_favicon() -> Response {
+    match read_spa_file("favicon.svg").await {
+        Ok(bytes) => bytes_response(bytes, "image/svg+xml"),
+        Err(_) => (StatusCode::NOT_FOUND, "asset not found").into_response(),
+    }
+}
+
+async fn read_spa_file(rel: &str) -> std::io::Result<Vec<u8>> {
+    let rel = Path::new(rel);
+    for dir in web_dist_candidates() {
+        let path = dir.join(rel);
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return tokio::fs::read(path).await;
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "web dist not found",
+    ))
+}
+
+fn web_dist_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = std::env::var("CDK_BRANCH_PROCESSOR_WEB_DIST") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(PathBuf::from("web/dist"));
+    candidates.push(PathBuf::from("../web/dist"));
+    candidates.push(PathBuf::from("/usr/local/share/custom-unit-mint/web"));
+    candidates
+}
+
+fn is_safe_asset_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+}
+
+fn content_type_for(path: &str) -> &'static str {
+    match Path::new(path).extension().and_then(|ext| ext.to_str()) {
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("woff2") => "font/woff2",
+        Some("json") => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn bytes_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
+    ([("content-type", content_type)], bytes).into_response()
+}
+
+// ---------------- JSON API ----------------
+
+#[derive(Serialize)]
+struct ApiError {
+    error: String,
+}
+
+#[derive(Serialize)]
+struct ApiMessage {
+    message: &'static str,
+}
+
+fn api_error(status: StatusCode, msg: impl Into<String>) -> Response {
+    (status, Json(ApiError { error: msg.into() })).into_response()
+}
+
+async fn require_api_auth(state: &WebState, headers: &HeaderMap) -> Result<(), Response> {
+    if is_authenticated(state, headers).await {
+        Ok(())
+    } else {
+        Err(api_error(StatusCode::UNAUTHORIZED, "unauthorized"))
+    }
+}
+
+#[derive(Serialize)]
+struct ApiAppSnapshot {
+    now: u64,
+    mint: ApiMintConfig,
+    endpoints: ApiEndpoints,
+    rollover: ApiRollover,
+    default_amounts: Vec<u64>,
+    health: ApiHealth,
+    keysets: ApiKeysetsSnapshot,
+    active_keyset: Option<crate::clients::KeysetEntry>,
+    summary: MintSummary,
+    circulation: Vec<CirculationPoint>,
+    tickets: Vec<ApiTicket>,
+    active_tickets: Vec<ApiTicket>,
+    recent_done: Vec<ApiTicket>,
+}
+
+#[derive(Serialize)]
+struct ApiMintConfig {
+    name: String,
+    description: String,
+    description_long: String,
+    unit: String,
+    method: String,
+}
+
+#[derive(Serialize)]
+struct ApiEndpoints {
+    public_url: String,
+    mint_http_url: String,
+    mint_rpc_url: String,
+    processor_grpc_addr: String,
+    processor_grpc_port: u16,
+}
+
+#[derive(Serialize)]
+struct ApiRollover {
+    enabled: bool,
+    keyset_lifetime_days: u64,
+    rotate_before_expiry_days: u64,
+    input_fee_ppk: u64,
+    amounts: Vec<u64>,
+}
+
+#[derive(Serialize)]
+struct ApiHealth {
+    mint_http: ApiHealthItem,
+    management_rpc: ApiHealthItem,
+    payment_backend: ApiHealthItem,
+}
+
+#[derive(Serialize)]
+struct ApiHealthItem {
+    ok: bool,
+    label: String,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct ApiKeysetsSnapshot {
+    ok: bool,
+    items: Vec<crate::clients::KeysetEntry>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ApiTicket {
+    id: String,
+    short_id: String,
+    quote_id: Option<String>,
+    kind: TicketKind,
+    kind_label: &'static str,
+    amount: u64,
+    unit: String,
+    status: TicketStatus,
+    status_label: &'static str,
+    created_at: u64,
+    paid_at: Option<u64>,
+    description: Option<String>,
+    notes: Option<String>,
+    quote_url: Option<String>,
+    qr_svg: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CirculationPoint {
+    ts: u64,
+    ticket_id: String,
+    kind: TicketKind,
+    amount: u64,
+    delta: i128,
+    circulation: i128,
+}
+
+async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+
+    let mut tickets = state.branch.list_all().await;
+    tickets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let summary = MintSummary::from_tickets(&tickets);
+    let now = unix_now();
+
+    let info_health = state.mint_http.get_info().await;
+    let rpc_health = state.mint_rpc.health().await;
+    let keysets_result = state.mint_http.list_keysets().await;
+    let active_keyset = keysets_result.as_ref().ok().and_then(|keysets| {
+        keysets
+            .iter()
+            .find(|ks| ks.unit == state.config.mint.unit.as_str() && ks.active)
+            .cloned()
+    });
+    let keysets = match keysets_result {
+        Ok(items) => ApiKeysetsSnapshot {
+            ok: true,
+            items,
+            error: None,
+        },
+        Err(e) => ApiKeysetsSnapshot {
+            ok: false,
+            items: Vec::new(),
+            error: Some(e.to_string()),
+        },
+    };
+
+    let active_tickets = tickets
+        .iter()
+        .filter(|t| t.status.is_active())
+        .map(|ticket| ApiTicket::from_ticket(ticket, &state))
+        .collect();
+    let recent_done = tickets
+        .iter()
+        .filter(|t| !t.status.is_active())
+        .take(50)
+        .map(|ticket| ApiTicket::from_ticket(ticket, &state))
+        .collect();
+    let api_tickets = tickets
+        .iter()
+        .map(|ticket| ApiTicket::from_ticket(ticket, &state))
+        .collect();
+
+    Json(ApiAppSnapshot {
+        now,
+        mint: ApiMintConfig {
+            name: state.config.mint.name.clone(),
+            description: state.config.mint.description.clone(),
+            description_long: state.config.mint.description_long.clone(),
+            unit: state.config.mint.unit.clone(),
+            method: state.config.mint.method.clone(),
+        },
+        endpoints: ApiEndpoints {
+            public_url: state.config.endpoints.public_url.clone(),
+            mint_http_url: state.config.endpoints.mint_http_url.clone(),
+            mint_rpc_url: state.config.endpoints.mint_rpc_url.clone(),
+            processor_grpc_addr: state.config.endpoints.processor_grpc_addr.clone(),
+            processor_grpc_port: state.config.endpoints.processor_grpc_port,
+        },
+        rollover: ApiRollover {
+            enabled: state.config.rollover.enabled,
+            keyset_lifetime_days: state.config.rollover.keyset_lifetime_days,
+            rotate_before_expiry_days: state.config.rollover.rotate_before_expiry_days,
+            input_fee_ppk: state.config.rollover.input_fee_ppk,
+            amounts: state.config.rollover.amounts.clone(),
+        },
+        default_amounts: (*state.default_amounts).clone(),
+        health: ApiHealth {
+            mint_http: health_item(info_health.as_ref().map(|_| ())),
+            management_rpc: health_item(rpc_health.as_ref().map(|_| ())),
+            payment_backend: ApiHealthItem {
+                ok: true,
+                label: "Listening".to_string(),
+                detail: format!(
+                    "{}:{}",
+                    state.config.endpoints.processor_grpc_addr,
+                    state.config.endpoints.processor_grpc_port
+                ),
+            },
+        },
+        keysets,
+        active_keyset,
+        summary,
+        circulation: circulation_points(&tickets),
+        tickets: api_tickets,
+        active_tickets,
+        recent_done,
+    })
+    .into_response()
+}
+
+fn health_item<T>(result: Result<T, &anyhow::Error>) -> ApiHealthItem {
+    let ok = result.is_ok();
+    ApiHealthItem {
+        ok,
+        label: health_label(ok).to_string(),
+        detail: match result {
+            Ok(_) => "Responding normally".to_string(),
+            Err(e) => e.to_string(),
+        },
+    }
+}
+
+impl ApiTicket {
+    fn from_ticket(ticket: &Ticket, state: &WebState) -> Self {
+        let quote_url = quote_status_url(ticket, state);
+        Self {
+            id: ticket.id.clone(),
+            short_id: short_id(&ticket.id),
+            quote_id: ticket.quote_id.clone(),
+            kind: ticket.kind,
+            kind_label: kind_label(ticket.kind),
+            amount: ticket.amount,
+            unit: ticket.unit.clone(),
+            status: ticket.status,
+            status_label: status_label(ticket.status),
+            created_at: ticket.created_at,
+            paid_at: ticket.paid_at,
+            description: ticket.description.clone(),
+            notes: ticket.notes.clone(),
+            qr_svg: quote_url.as_deref().and_then(qr_code_svg),
+            quote_url,
+        }
+    }
+}
+
+fn circulation_points(tickets: &[Ticket]) -> Vec<CirculationPoint> {
+    let mut paid: Vec<_> = tickets
+        .iter()
+        .filter(|ticket| ticket.status == TicketStatus::Paid)
+        .collect();
+    paid.sort_by(|a, b| {
+        let a_ts = a.paid_at.unwrap_or(a.created_at);
+        let b_ts = b.paid_at.unwrap_or(b.created_at);
+        a_ts.cmp(&b_ts)
+    });
+
+    let mut circulation = 0i128;
+    paid.into_iter()
+        .map(|ticket| {
+            let delta = match ticket.kind {
+                TicketKind::Incoming => ticket.amount as i128,
+                TicketKind::Outgoing => -(ticket.amount as i128),
+            };
+            circulation += delta;
+            CirculationPoint {
+                ts: ticket.paid_at.unwrap_or(ticket.created_at),
+                ticket_id: ticket.id.clone(),
+                kind: ticket.kind,
+                amount: ticket.amount,
+                delta,
+                circulation,
+            }
+        })
+        .collect()
+}
+
+async fn api_login(State(state): State<WebState>, Json(form): Json<LoginForm>) -> Response {
+    if !state.config.verify_password(&form.password) {
+        return api_error(StatusCode::UNAUTHORIZED, "incorrect password");
+    }
+    let sid = uuid::Uuid::new_v4().to_string();
+    state.sessions.write().await.insert(
+        sid.clone(),
+        Session {
+            expires_at: unix_now() + 12 * 60 * 60,
+        },
+    );
+    let mut resp = Json(ApiMessage {
+        message: "signed_in",
+    })
+    .into_response();
+    resp.headers_mut().insert(
+        header::SET_COOKIE,
+        format!("{COOKIE_NAME}={sid}; Path=/; HttpOnly; SameSite=Lax")
+            .parse()
+            .unwrap(),
+    );
+    resp
+}
+
+async fn api_logout(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if let Some(c) = cookie_value(&headers) {
+        state.sessions.write().await.remove(&c);
+    }
+    let mut resp = Json(ApiMessage {
+        message: "signed_out",
+    })
+    .into_response();
+    resp.headers_mut().insert(
+        header::SET_COOKIE,
+        format!("{COOKIE_NAME}=deleted; Path=/; Max-Age=0")
+            .parse()
+            .unwrap(),
+    );
+    resp
+}
+
+async fn api_create_quote(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(form): Json<CreateQuoteForm>,
+) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    match create_quote_inner(&state, form).await {
+        Ok(ticket) => Json(ApiTicket::from_ticket(&ticket, &state)).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn api_mark_paid(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(form): Json<NotesForm>,
+) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    match mark_paid_inner(&state, &id, form.notes).await {
+        Ok(ticket) => Json(ApiTicket::from_ticket(&ticket, &state)).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn api_mark_failed(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(form): Json<NotesForm>,
+) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    match mark_failed_inner(&state, &id, form.notes).await {
+        Ok(ticket) => Json(ApiTicket::from_ticket(&ticket, &state)).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn api_rotate_keyset(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(form): Json<RotateForm>,
+) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    match rotate_keyset_inner(&state, form).await {
+        Ok(()) => Json(ApiMessage { message: "rotated" }).into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Serialize)]
+struct ApiSetupDefaults {
+    name: String,
+    description: String,
+    description_long: String,
+    unit: String,
+    method: String,
+    public_url: String,
+    password_min_length: usize,
+    mnemonic: String,
+    rollover_enabled: bool,
+    keyset_lifetime_days: u64,
+    rotate_before_expiry_days: u64,
+    input_fee_ppk: u64,
+    amounts: String,
+}
+
+async fn api_setup_defaults(State(state): State<SetupState>) -> Response {
+    let amounts = default_amounts();
+    let mnemonic = generate_mnemonic().unwrap_or_else(|_| {
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+            .to_string()
+    });
+    Json(ApiSetupDefaults {
+        name: "Custom Unit Mint".to_string(),
+        description: "Cashu mint for a custom unit with branch settlement.".to_string(),
+        description_long: "A stock cdk-mintd instance managed from the browser UI. Mint and melt quotes settle manually through the branch operator workflow.".to_string(),
+        unit: "ora".to_string(),
+        method: "branch".to_string(),
+        public_url: state.default_public_url,
+        password_min_length: PASSWORD_MIN_LENGTH,
+        mnemonic,
+        rollover_enabled: true,
+        keyset_lifetime_days: 90,
+        rotate_before_expiry_days: 14,
+        input_fee_ppk: 0,
+        amounts: default_amounts_str(&amounts),
+    })
+    .into_response()
+}
+
+#[derive(Serialize)]
+struct ApiSetupSaved {
+    message: &'static str,
+    app_config_path: String,
+    mint_config_path: String,
+}
+
+async fn api_setup_submit(
+    State(state): State<SetupState>,
+    Json(form): Json<SetupForm>,
+) -> Response {
+    match save_setup(&state, &form).await {
+        Ok(saved) => {
+            tokio::spawn(async {
+                sleep(Duration::from_millis(900)).await;
+                std::process::exit(0);
+            });
+            Json(ApiSetupSaved {
+                message: "saved",
+                app_config_path: saved.app_config_path,
+                mint_config_path: saved.mint_config_path,
+            })
+            .into_response()
+        }
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 // ---------------- session ----------------
 
 const COOKIE_NAME: &str = "branch_session";
@@ -213,12 +765,14 @@ async fn require_auth(state: &WebState, headers: &HeaderMap) -> Result<(), Respo
     }
 }
 
+#[allow(dead_code)]
 async fn setup_already_done() -> Response {
     Redirect::to("/teller").into_response()
 }
 
 // ---------------- pages ----------------
 
+#[allow(dead_code)]
 async fn setup_page(State(state): State<SetupState>) -> Markup {
     let mnemonic = generate_mnemonic().unwrap_or_else(|_| {
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
@@ -250,12 +804,15 @@ struct SetupForm {
     backup_confirmed: Option<String>,
 }
 
-async fn setup_submit(State(state): State<SetupState>, Form(form): Form<SetupForm>) -> Response {
+struct SavedSetup {
+    app_config_path: String,
+    mint_config_path: String,
+}
+
+async fn save_setup(state: &SetupState, form: &SetupForm) -> Result<SavedSetup, String> {
     let amounts = match parse_amounts(&form.amounts) {
         Ok(v) => v,
-        Err(e) => {
-            return setup_error_response(&state, &form, &format!("amounts: {e}"));
-        }
+        Err(e) => return Err(format!("amounts: {e}")),
     };
     let description_long = if form.description_long.trim().is_empty() {
         form.description.clone()
@@ -288,15 +845,25 @@ async fn setup_submit(State(state): State<SetupState>, Form(form): Form<SetupFor
         state.grpc_port,
     ) {
         Ok(config) => config,
-        Err(e) => return setup_error_response(&state, &form, &e.to_string()),
+        Err(e) => return Err(e.to_string()),
     };
     if let Err(e) = state.config_store.save(&config).await {
-        return setup_error_response(&state, &form, &format!("save setup: {e}"));
+        return Err(format!("save setup: {e}"));
     }
     if let Err(e) = state.config_store.write_mint_config(&config).await {
-        return setup_error_response(&state, &form, &format!("write mint config: {e}"));
+        return Err(format!("write mint config: {e}"));
     }
+    Ok(SavedSetup {
+        app_config_path: state.config_store.app_config_path().display().to_string(),
+        mint_config_path: state.config_store.mint_config_path().display().to_string(),
+    })
+}
 
+async fn setup_submit(State(state): State<SetupState>, Form(form): Form<SetupForm>) -> Response {
+    let saved = match save_setup(&state, &form).await {
+        Ok(saved) => saved,
+        Err(e) => return setup_error_response(&state, &form, &e),
+    };
     tokio::spawn(async {
         sleep(Duration::from_millis(900)).await;
         std::process::exit(0);
@@ -318,14 +885,14 @@ async fn setup_submit(State(state): State<SetupState>, Form(form): Form<SetupFor
                             span.pill.pill-paid { "Saved" }
                             div {
                                 strong { "Lifecycle config" }
-                                p.muted { (state.config_store.app_config_path().display().to_string()) }
+                                p.muted { (saved.app_config_path.as_str()) }
                             }
                         }
                         div.status-row {
                             span.pill.pill-paid { "Generated" }
                             div {
                                 strong { "Mint config" }
-                                p.muted { (state.config_store.mint_config_path().display().to_string()) }
+                                p.muted { (saved.mint_config_path.as_str()) }
                             }
                         }
                     }
@@ -695,6 +1262,7 @@ const SETUP_VALIDATION_JS: &str = r#"
 })();
 "#;
 
+#[allow(dead_code)]
 async fn overview(State(state): State<WebState>, headers: HeaderMap) -> Response {
     if let Err(r) = require_auth(&state, &headers).await {
         return r;
@@ -843,6 +1411,7 @@ async fn overview(State(state): State<WebState>, headers: HeaderMap) -> Response
     .into_response()
 }
 
+#[derive(Serialize)]
 struct MintSummary {
     mint_count: usize,
     melt_count: usize,
@@ -881,6 +1450,7 @@ impl MintSummary {
     }
 }
 
+#[allow(dead_code)]
 async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Response {
     if let Err(r) = require_auth(&state, &headers).await {
         return r;
@@ -1004,6 +1574,7 @@ async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Respons
     .into_response()
 }
 
+#[allow(dead_code)]
 async fn login_page() -> Markup {
     layout_no_chrome(
         "Sign in",
@@ -1102,19 +1673,12 @@ struct CreateQuoteForm {
     description: String,
 }
 
-async fn create_quote(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-    Form(form): Form<CreateQuoteForm>,
-) -> Response {
-    if let Err(r) = require_auth(&state, &headers).await {
-        return r;
-    }
+async fn create_quote_inner(state: &WebState, form: CreateQuoteForm) -> Result<Ticket, String> {
     if form.amount == 0 {
-        return error_response("amount must be greater than zero");
+        return Err("amount must be greater than zero".to_string());
     }
     if !state.branch.active_tickets().await.is_empty() {
-        return error_response("finish the active quote before creating another");
+        return Err("finish the active quote before creating another".to_string());
     }
 
     let description = match form.description.trim() {
@@ -1124,36 +1688,41 @@ async fn create_quote(
 
     let result = match form.kind.as_str() {
         "mint" => {
-            let quote = match state
+            let quote = state
                 .mint_http
                 .create_mint_quote(state.method.as_str(), form.amount, &state.unit, description)
                 .await
-            {
-                Ok(quote) => quote,
-                Err(e) => return error_response(&format!("create mint quote: {e}")),
-            };
+                .map_err(|e| format!("create mint quote: {e}"))?;
             state
                 .branch
                 .attach_quote_id(&quote.request, quote.quote)
                 .await
         }
         "melt" => {
-            let quote = match state
+            let quote = state
                 .mint_http
                 .create_melt_quote(state.method.as_str(), form.amount, &state.unit)
                 .await
-            {
-                Ok(quote) => quote,
-                Err(e) => return error_response(&format!("create melt quote: {e}")),
-            };
+                .map_err(|e| format!("create melt quote: {e}"))?;
             let ticket_id = format!("MELT-{}", quote.quote);
             state.branch.attach_quote_id(&ticket_id, quote.quote).await
         }
-        other => return error_response(&format!("unknown quote flow: {other}")),
+        other => return Err(format!("unknown quote flow: {other}")),
     };
 
-    if let Err(e) = result {
-        return error_response(&format!("store quote id: {e}"));
+    result.map_err(|e| format!("store quote id: {e}"))
+}
+
+async fn create_quote(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Form(form): Form<CreateQuoteForm>,
+) -> Response {
+    if let Err(r) = require_auth(&state, &headers).await {
+        return r;
+    }
+    if let Err(e) = create_quote_inner(&state, form).await {
+        return error_response(&e);
     }
 
     Redirect::to("/teller").into_response()
@@ -1165,6 +1734,31 @@ struct NotesForm {
     notes: String,
 }
 
+fn clean_notes(notes: String) -> Option<String> {
+    let notes = notes.trim().to_string();
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes)
+    }
+}
+
+async fn mark_paid_inner(state: &WebState, id: &str, notes: String) -> Result<Ticket, String> {
+    state
+        .branch
+        .mark_paid(id, clean_notes(notes))
+        .await
+        .map_err(|e| format!("mark_paid: {e}"))
+}
+
+async fn mark_failed_inner(state: &WebState, id: &str, notes: String) -> Result<Ticket, String> {
+    state
+        .branch
+        .mark_failed(id, clean_notes(notes))
+        .await
+        .map_err(|e| format!("mark_failed: {e}"))
+}
+
 async fn mark_paid(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1174,13 +1768,8 @@ async fn mark_paid(
     if let Err(r) = require_auth(&state, &headers).await {
         return r;
     }
-    let notes = if form.notes.trim().is_empty() {
-        None
-    } else {
-        Some(form.notes)
-    };
-    if let Err(e) = state.branch.mark_paid(&id, notes).await {
-        return error_response(&format!("mark_paid: {e}"));
+    if let Err(e) = mark_paid_inner(&state, &id, form.notes).await {
+        return error_response(&e);
     }
     Redirect::to("/teller").into_response()
 }
@@ -1194,17 +1783,13 @@ async fn mark_failed(
     if let Err(r) = require_auth(&state, &headers).await {
         return r;
     }
-    let notes = if form.notes.trim().is_empty() {
-        None
-    } else {
-        Some(form.notes)
-    };
-    if let Err(e) = state.branch.mark_failed(&id, notes).await {
-        return error_response(&format!("mark_failed: {e}"));
+    if let Err(e) = mark_failed_inner(&state, &id, form.notes).await {
+        return error_response(&e);
     }
     Redirect::to("/").into_response()
 }
 
+#[allow(dead_code)]
 async fn keysets_page(State(state): State<WebState>, headers: HeaderMap) -> Response {
     if let Err(r) = require_auth(&state, &headers).await {
         return r;
@@ -1316,6 +1901,21 @@ where
     }
 }
 
+async fn rotate_keyset_inner(state: &WebState, form: RotateForm) -> Result<(), String> {
+    let amounts: Result<Vec<u64>, _> = form
+        .amounts
+        .split(',')
+        .map(|s| s.trim().parse::<u64>())
+        .collect();
+    let amounts = amounts.map_err(|e| format!("amounts: {e}"))?;
+    state
+        .mint_rpc
+        .rotate_next_keyset(form.unit, amounts, form.input_fee_ppk, form.final_expiry)
+        .await
+        .map_err(|e| format!("rotate: {e}"))?;
+    Ok(())
+}
+
 async fn rotate_keyset(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -1324,25 +1924,13 @@ async fn rotate_keyset(
     if let Err(r) = require_auth(&state, &headers).await {
         return r;
     }
-    let amounts: Result<Vec<u64>, _> = form
-        .amounts
-        .split(',')
-        .map(|s| s.trim().parse::<u64>())
-        .collect();
-    let amounts = match amounts {
-        Ok(v) => v,
-        Err(e) => return error_response(&format!("amounts: {e}")),
-    };
-    if let Err(e) = state
-        .mint_rpc
-        .rotate_next_keyset(form.unit, amounts, form.input_fee_ppk, form.final_expiry)
-        .await
-    {
-        return error_response(&format!("rotate: {e}"));
+    if let Err(e) = rotate_keyset_inner(&state, form).await {
+        return error_response(&e);
     }
     Redirect::to("/keysets").into_response()
 }
 
+#[allow(dead_code)]
 async fn settings_page(State(state): State<WebState>, headers: HeaderMap) -> Response {
     if let Err(r) = require_auth(&state, &headers).await {
         return r;
@@ -1417,6 +2005,7 @@ async fn settings_page(State(state): State<WebState>, headers: HeaderMap) -> Res
 
 // ---------------- helpers ----------------
 
+#[allow(dead_code)]
 fn metric_card(
     label: impl std::fmt::Display,
     value: impl std::fmt::Display,
@@ -1439,6 +2028,7 @@ fn health_label(ok: bool) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn health_detail(err: Option<&anyhow::Error>) -> String {
     match err {
         Some(e) => e.to_string(),
@@ -1446,10 +2036,12 @@ fn health_detail(err: Option<&anyhow::Error>) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn amount_text(amount: u64, unit: &str) -> String {
     format!("{amount} {}", unit.to_ascii_uppercase())
 }
 
+#[allow(dead_code)]
 fn signed_amount_text(amount: i128, unit: &str) -> String {
     if amount < 0 {
         format!("-{} {}", amount.abs(), unit.to_ascii_uppercase())
@@ -1458,6 +2050,7 @@ fn signed_amount_text(amount: i128, unit: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn active_quote_panel(ticket: &Ticket, now: u64, state: &WebState) -> Markup {
     let (title, subtitle) = match (ticket.kind, ticket.status) {
         (TicketKind::Incoming, TicketStatus::Pending) => {
@@ -1531,6 +2124,7 @@ fn active_quote_panel(ticket: &Ticket, now: u64, state: &WebState) -> Markup {
     }
 }
 
+#[allow(dead_code)]
 fn active_quote_actions(ticket: &Ticket) -> Markup {
     html! {
         div.settlement-actions {
@@ -1579,7 +2173,15 @@ fn quote_status_url(ticket: &Ticket, state: &WebState) -> Option<String> {
     ))
 }
 
+#[allow(dead_code)]
 fn qr_code_markup(data: &str) -> Markup {
+    match qr_code_svg(data) {
+        Some(image) => html! { div.qr-frame { (PreEscaped(image)) } },
+        None => html! { div.alert.alert-error { "QR error" } },
+    }
+}
+
+fn qr_code_svg(data: &str) -> Option<String> {
     match QrCode::new(data.as_bytes()) {
         Ok(code) => {
             let mut image = code
@@ -1591,9 +2193,9 @@ fn qr_code_markup(data: &str) -> Markup {
             if let Some(svg) = image.strip_prefix(r#"<?xml version="1.0" standalone="yes"?>"#) {
                 image = svg.to_string();
             }
-            html! { div.qr-frame { (PreEscaped(image)) } }
+            Some(image)
         }
-        Err(e) => html! { div.alert.alert-error { "QR error: " (e) } },
+        Err(_) => None,
     }
 }
 
@@ -2277,6 +2879,7 @@ fn short_id(id: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn amount_cell(amount: u64, unit: &str) -> Markup {
     html! {
         span.amount { (amount) span.unit { (unit) } }
@@ -2290,16 +2893,27 @@ fn kind_label(k: TicketKind) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn status_pill(s: TicketStatus) -> Markup {
     let (cls, label) = match s {
-        TicketStatus::Waiting => ("pill pill-waiting", "Waiting"),
-        TicketStatus::Pending => ("pill pill-pending", "Pending"),
-        TicketStatus::Paid => ("pill pill-paid", "Paid"),
-        TicketStatus::Failed => ("pill pill-failed", "Failed"),
+        TicketStatus::Waiting => ("pill pill-waiting", status_label(s)),
+        TicketStatus::Pending => ("pill pill-pending", status_label(s)),
+        TicketStatus::Paid => ("pill pill-paid", status_label(s)),
+        TicketStatus::Failed => ("pill pill-failed", status_label(s)),
     };
     html! { span class=(cls) { (label) } }
 }
 
+fn status_label(s: TicketStatus) -> &'static str {
+    match s {
+        TicketStatus::Waiting => "Waiting",
+        TicketStatus::Pending => "Pending",
+        TicketStatus::Paid => "Paid",
+        TicketStatus::Failed => "Failed",
+    }
+}
+
+#[allow(dead_code)]
 fn keyset_status_pill(active: bool, final_expiry: Option<u64>, now: u64) -> Markup {
     let expired = matches!(final_expiry, Some(t) if t <= now);
     html! {
@@ -2313,6 +2927,7 @@ fn keyset_status_pill(active: bool, final_expiry: Option<u64>, now: u64) -> Mark
     }
 }
 
+#[allow(dead_code)]
 fn fmt_expiry(expiry: Option<u64>, now: u64) -> String {
     match expiry {
         None => "—".to_string(),
@@ -2337,6 +2952,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+#[allow(dead_code)]
 fn relative_age(then: u64, now: u64) -> String {
     if then >= now {
         return "just now".into();

@@ -11,6 +11,13 @@
 
 ARG CDK_REV=bc7e441ef2fc4cb0d57b84c4757ee023704c922f
 
+FROM node:22-bookworm-slim AS web-builder
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
+
 FROM rust:slim-bookworm AS builder
 ARG CDK_REV
 
@@ -53,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /out/bin/cdk-mintd /usr/local/bin/cdk-mintd
 COPY --from=builder /out/bin/cdk-branch-processor /usr/local/bin/cdk-branch-processor
+COPY --from=web-builder /src/web/dist /usr/local/share/custom-unit-mint/web
 
 # default command is overridden per-service in docker-compose.yml
 CMD ["cdk-mintd"]
