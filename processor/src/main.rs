@@ -12,6 +12,7 @@
 mod backend;
 mod clients;
 mod config;
+mod offer;
 mod state;
 mod web;
 

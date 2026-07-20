@@ -1,5 +1,5 @@
 export type TicketKind = "incoming" | "outgoing"
-export type TicketStatus = "waiting" | "pending" | "paid" | "failed"
+export type TicketStatus = "offered" | "waiting" | "pending" | "paid" | "failed"
 
 export interface HealthItem {
   ok: boolean
@@ -18,7 +18,6 @@ export interface KeysetEntry {
 export interface Ticket {
   id: string
   short_id: string
-  quote_id?: string | null
   kind: TicketKind
   kind_label: string
   amount: number
@@ -27,10 +26,15 @@ export interface Ticket {
   status_label: string
   created_at: number
   paid_at?: number | null
+  expires_at?: number | null
   description?: string | null
   notes?: string | null
-  quote_url?: string | null
+  /** Serialized NUT-XX quote offer (`cquoteA...`) — the only thing shown to the wallet. */
+  offer?: string | null
+  /** QR of the offer; present while the offer is unclaimed. */
   qr_svg?: string | null
+  /** Payout verification code for funded cash-dispense tickets. */
+  verification_code?: string | null
 }
 
 export interface CirculationPoint {

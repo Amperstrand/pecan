@@ -409,7 +409,7 @@ function TellerPage({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh:
     <>
       <PageHeader
         title="Teller"
-        description="Create one branch quote at a time, scan it with the wallet, then confirm settlement after cash changes hands."
+        description="Create one quote offer at a time, let the customer's wallet scan and claim it, then confirm settlement after cash changes hands."
       />
       <section className="dashboard-grid">
         <QuotePanel snapshot={snapshot} active={active} onRefresh={onRefresh} />
@@ -503,8 +503,10 @@ function CreateQuoteCard({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRef
     <Card>
       <CardHeader>
         <div>
-          <CardTitle>Create quote</CardTitle>
-          <CardDescription>The teller starts each branch quote from this screen.</CardDescription>
+          <CardTitle>Create quote offer</CardTitle>
+          <CardDescription>
+            The wallet claims the offer and creates the quote itself — no quote ID ever leaves this screen.
+          </CardDescription>
         </div>
         <Badge variant="success">Ready</Badge>
       </CardHeader>
@@ -558,10 +560,10 @@ function CreateQuoteCard({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRef
           <div className="flex flex-wrap items-center gap-2">
             <Button type="submit" variant="primary" loading={busy} disabled={busy}>
               <Banknote />
-              Create quote
+              Create offer
             </Button>
             <span className="text-xs text-muted-foreground">
-              The processor allows one active quote at a time.
+              One active offer at a time; offers are single-use and expire after 15 minutes.
             </span>
           </div>
         </form>
@@ -582,18 +584,25 @@ function ActiveQuoteCard({
   const [notes, setNotes] = useState("")
   const [busy, setBusy] = useState<"paid" | "failed" | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const copyUrl = async () => {
-    if (!ticket.quote_url) return
-    await navigator.clipboard?.writeText(ticket.quote_url)
+  const [confirmed, setConfirmed] = useState(false)
+  const copyOffer = async () => {
+    if (!ticket.offer) return
+    await navigator.clipboard?.writeText(ticket.offer)
   }
   const incoming = ticket.kind === "incoming"
+  const offered = ticket.status === "offered"
   const waiting = ticket.status === "waiting"
+  const expired = offered && ticket.expires_at != null && ticket.expires_at <= now
   const title = incoming ? "Cash deposit" : "Cash dispense"
-  const subtitle = incoming
-    ? "Customer pays cash before ecash is issued."
-    : waiting
-      ? "Waiting for the wallet to lock ecash."
-      : "Ecash is locked; cash can be handed over."
+  const subtitle = offered
+    ? expired
+      ? "The offer expired before a wallet claimed it. Void it and create a new one."
+      : "Show the offer to the customer's wallet. It can be claimed exactly once."
+    : incoming
+      ? "A wallet claimed this offer. Verify, take the cash, then release the funds."
+      : waiting
+        ? "A wallet claimed this offer but has NOT committed funds yet."
+        : "Funds are locked at the mint. Verify the payment code, then dispense cash."
 
   async function mutate(kind: "paid" | "failed") {
     setBusy(kind)
@@ -601,6 +610,7 @@ function ActiveQuoteCard({
     try {
       await apiPost<Ticket>(`/api/tickets/${encodeURIComponent(ticket.id)}/mark-${kind}`, { notes })
       setNotes("")
+      setConfirmed(false)
       await onRefresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update the quote.")
@@ -625,66 +635,125 @@ function ActiveQuoteCard({
               {formatAmount(ticket.amount, ticket.unit)}
             </div>
             <div className="mt-5 grid gap-3 sm:grid-cols-2">
-              <DetailBlock label="Quote">
-                <span className="mono-chip">{ticket.quote_id ?? ticket.id}</span>
-              </DetailBlock>
               <DetailBlock label="Ticket">
-                <span className="mono-chip">{ticket.id}</span>
+                <span className="mono-chip">{ticket.short_id}</span>
               </DetailBlock>
               <DetailBlock label="Created">{formatAge(ticket.created_at, now)}</DetailBlock>
+              {offered && ticket.expires_at != null && (
+                <DetailBlock label="Offer valid">
+                  {expired ? "Expired" : `${formatCountdown(ticket.expires_at, now)} left`}
+                </DetailBlock>
+              )}
               {ticket.description && <DetailBlock label="Note">{ticket.description}</DetailBlock>}
             </div>
-            {ticket.quote_url && (
+            {offered && ticket.offer && (
               <div className="mt-4 grid gap-2">
-                <Label>Fetch URL</Label>
+                <Label>Quote offer</Label>
                 <div className="flex min-w-0 gap-2">
                   <div className="min-w-0 flex-1 rounded-sm border border-border bg-surface-muted px-3 py-2 font-mono text-xs text-muted-foreground break-all">
-                    {ticket.quote_url}
+                    {ticket.offer}
                   </div>
-                  <Button type="button" size="icon" onClick={() => void copyUrl()} aria-label="Copy fetch URL">
+                  <Button type="button" size="icon" onClick={() => void copyOffer()} aria-label="Copy quote offer">
                     <Copy />
                   </Button>
                 </div>
               </div>
             )}
-          </div>
-          <div className="qr-box grid place-items-center rounded-md border border-border bg-white p-3">
-            {ticket.qr_svg ? (
-              <div dangerouslySetInnerHTML={{ __html: ticket.qr_svg }} />
-            ) : (
-              <div className="grid aspect-square w-full place-items-center rounded-sm border border-dashed border-border-strong text-sm text-muted-foreground">
-                No quote id
+            {!incoming && ticket.status === "pending" && ticket.verification_code && (
+              <div className="mt-4 grid gap-2">
+                <Label>Payment code</Label>
+                <div className="rounded-md border border-border bg-surface-muted px-4 py-3 text-center font-mono text-3xl font-semibold tracking-[0.3em]">
+                  {ticket.verification_code}
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  The customer's wallet shows the same code while the payment is pending.
+                </span>
               </div>
             )}
           </div>
+          {offered ? (
+            <div className="qr-box grid place-items-center rounded-md border border-border bg-white p-3">
+              {ticket.qr_svg ? (
+                <div dangerouslySetInnerHTML={{ __html: ticket.qr_svg }} />
+              ) : (
+                <div className="grid aspect-square w-full place-items-center rounded-sm border border-dashed border-border-strong text-sm text-muted-foreground">
+                  No offer
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="grid place-items-center rounded-md border border-dashed border-border-strong p-6 text-center text-sm text-muted-foreground">
+              {incoming
+                ? "Offer claimed — the QR is no longer needed."
+                : waiting
+                  ? "Waiting for the wallet to commit funds."
+                  : "Compare the payment code before handing out cash."}
+            </div>
+          )}
         </div>
 
         {error && <Alert variant="danger">{error}</Alert>}
 
         <div className="border-t border-border pt-4">
-          {ticket.status === "waiting" ? (
-            <div className="flex flex-wrap gap-2">
+          {offered ? (
+            <div className="flex flex-wrap items-center gap-2">
               <Button variant="danger" loading={busy === "failed"} onClick={() => void mutate("failed")}>
                 <XCircle />
-                Cancel quote
+                Void offer
               </Button>
+              <span className="text-xs text-muted-foreground">
+                Voiding an unclaimed offer is always safe — no wallet holds a quote for it.
+              </span>
             </div>
-          ) : (
-            <div className="settlement-grid">
-              <Input
-                value={notes}
-                onChange={(event) => setNotes(event.target.value)}
-                placeholder="Receipt note (optional)"
-              />
+          ) : waiting ? (
+            <div className="grid gap-3">
+              <Alert variant="danger">
+                Do not pay out. The wallet created a quote but has not committed funds. This card updates
+                automatically once funds are locked.
+              </Alert>
               <div className="flex flex-wrap gap-2">
-                <Button variant="success" loading={busy === "paid"} onClick={() => void mutate("paid")}>
-                  <CheckCircle2 />
-                  {incoming ? "Cash received" : "Cash handed over"}
-                </Button>
                 <Button variant="danger" loading={busy === "failed"} onClick={() => void mutate("failed")}>
                   <XCircle />
-                  Cancel
+                  Cancel quote
                 </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-3">
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={confirmed}
+                  onChange={(event) => setConfirmed(event.target.checked)}
+                />
+                <span>
+                  {incoming
+                    ? "The customer's wallet shows this claimed deposit (matching amount and mint) and the cash is on the counter."
+                    : "The payment code above matches the code in the customer's wallet."}
+                </span>
+              </label>
+              <div className="settlement-grid">
+                <Input
+                  value={notes}
+                  onChange={(event) => setNotes(event.target.value)}
+                  placeholder="Receipt note (optional)"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="success"
+                    loading={busy === "paid"}
+                    disabled={!confirmed || busy !== null}
+                    onClick={() => void mutate("paid")}
+                  >
+                    <CheckCircle2 />
+                    {incoming ? "Cash received — release funds" : "Cash dispensed — confirm"}
+                  </Button>
+                  <Button variant="danger" loading={busy === "failed"} onClick={() => void mutate("failed")}>
+                    <XCircle />
+                    {incoming ? "Void" : "Mark failed"}
+                  </Button>
+                </div>
               </div>
             </div>
           )}
@@ -1607,6 +1676,13 @@ function formatExpiry(expiry: number | null | undefined, now: number) {
   if (delta < 3600) return `in ${Math.floor(delta / 60)}m`
   if (delta < 86_400) return `in ${Math.floor(delta / 3600)}h`
   return `in ${Math.floor(delta / 86_400)}d`
+}
+
+function formatCountdown(until: number, now: number) {
+  const delta = Math.max(until - now, 0)
+  if (delta >= 3600) return `${Math.floor(delta / 3600)}h ${Math.floor((delta % 3600) / 60)}m`
+  if (delta >= 60) return `${Math.floor(delta / 60)}m ${delta % 60}s`
+  return `${delta}s`
 }
 
 function formatDateTime(ts: number) {

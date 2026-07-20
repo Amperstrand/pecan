@@ -30,6 +30,7 @@ use crate::config::{
     default_amounts, generate_mnemonic, parse_amounts, AppConfig, ConfigStore, SetupDraft,
     PASSWORD_MIN_LENGTH,
 };
+use crate::offer::QuoteOffer;
 use crate::state::{BranchState, Ticket, TicketKind, TicketStatus};
 
 #[derive(Clone)]
@@ -366,7 +367,6 @@ struct ApiKeysetsSnapshot {
 struct ApiTicket {
     id: String,
     short_id: String,
-    quote_id: Option<String>,
     kind: TicketKind,
     kind_label: &'static str,
     amount: u64,
@@ -375,10 +375,17 @@ struct ApiTicket {
     status_label: &'static str,
     created_at: u64,
     paid_at: Option<u64>,
+    expires_at: Option<u64>,
     description: Option<String>,
     notes: Option<String>,
-    quote_url: Option<String>,
+    /// Serialized NUT-XX quote offer; the only thing shown to the wallet.
+    offer: Option<String>,
+    /// QR of the offer, present while the ticket is unclaimed.
     qr_svg: Option<String>,
+    /// Payout verification code for funded melt tickets: last 6 characters of
+    /// the (otherwise secret) melt quote id, uppercased. The customer's wallet
+    /// shows the same code; the operator compares before dispensing cash.
+    verification_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -500,12 +507,20 @@ fn health_item<T>(result: Result<T, &anyhow::Error>) -> ApiHealthItem {
 }
 
 impl ApiTicket {
-    fn from_ticket(ticket: &Ticket, state: &WebState) -> Self {
-        let quote_url = quote_status_url(ticket, state);
+    fn from_ticket(ticket: &Ticket, _state: &WebState) -> Self {
+        let qr_svg = match ticket.status {
+            TicketStatus::Offered => ticket.offer.as_deref().and_then(qr_code_svg),
+            _ => None,
+        };
+        let verification_code = match (ticket.kind, ticket.status) {
+            (TicketKind::Outgoing, TicketStatus::Pending) => {
+                ticket.quote_id.as_deref().map(verification_code)
+            }
+            _ => None,
+        };
         Self {
             id: ticket.id.clone(),
             short_id: short_id(&ticket.id),
-            quote_id: ticket.quote_id.clone(),
             kind: ticket.kind,
             kind_label: kind_label(ticket.kind),
             amount: ticket.amount,
@@ -514,12 +529,27 @@ impl ApiTicket {
             status_label: status_label(ticket.status),
             created_at: ticket.created_at,
             paid_at: ticket.paid_at,
+            expires_at: ticket.expires_at,
             description: ticket.description.clone(),
             notes: ticket.notes.clone(),
-            qr_svg: quote_url.as_deref().and_then(qr_code_svg),
-            quote_url,
+            offer: ticket.offer.clone(),
+            qr_svg,
+            verification_code,
         }
     }
+}
+
+/// Last 6 characters of the melt quote id, uppercased — mirrored by the wallet.
+fn verification_code(quote_id: &str) -> String {
+    let tail: String = quote_id
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    tail.to_uppercase()
 }
 
 fn circulation_points(tickets: &[Ticket]) -> Vec<CirculationPoint> {
@@ -1673,6 +1703,9 @@ struct CreateQuoteForm {
     description: String,
 }
 
+/// How long a displayed offer can be claimed before the teller must reissue.
+const OFFER_TTL_SECS: u64 = 15 * 60;
+
 async fn create_quote_inner(state: &WebState, form: CreateQuoteForm) -> Result<Ticket, String> {
     if form.amount == 0 {
         return Err("amount must be greater than zero".to_string());
@@ -1686,31 +1719,40 @@ async fn create_quote_inner(state: &WebState, form: CreateQuoteForm) -> Result<T
         s => Some(s.to_string()),
     };
 
-    let result = match form.kind.as_str() {
-        "mint" => {
-            let quote = state
-                .mint_http
-                .create_mint_quote(state.method.as_str(), form.amount, &state.unit, description)
-                .await
-                .map_err(|e| format!("create mint quote: {e}"))?;
-            state
-                .branch
-                .attach_quote_id(&quote.request, quote.quote)
-                .await
-        }
-        "melt" => {
-            let quote = state
-                .mint_http
-                .create_melt_quote(state.method.as_str(), form.amount, &state.unit)
-                .await
-                .map_err(|e| format!("create melt quote: {e}"))?;
-            let ticket_id = format!("MELT-{}", quote.quote);
-            state.branch.attach_quote_id(&ticket_id, quote.quote).await
-        }
+    let (kind, operation) = match form.kind.as_str() {
+        "mint" => (TicketKind::Incoming, "mint"),
+        "melt" => (TicketKind::Outgoing, "melt"),
         other => return Err(format!("unknown quote flow: {other}")),
     };
 
-    result.map_err(|e| format!("store quote id: {e}"))
+    // Register the ticket and hand out the serialized offer. The wallet creates
+    // the actual mint/melt quote itself by claiming the ticket (NUT-XX); the
+    // processor no longer pre-creates quotes through the mint's public API.
+    let expires_at = unix_now() + OFFER_TTL_SECS;
+    let mut ticket = Ticket::new_offer(
+        kind,
+        form.amount,
+        state.config.mint.unit.clone(),
+        description.clone(),
+        Some(expires_at),
+    );
+    let offer = QuoteOffer {
+        mint_url: state.mint_public_url.trim_end_matches('/').to_string(),
+        operation,
+        method: state.method.as_str().to_string(),
+        unit: state.config.mint.unit.clone(),
+        ticket: ticket.id.clone(),
+        amount: Some(form.amount),
+        description,
+        expiry: Some(expires_at),
+    };
+    ticket.offer = Some(offer.encode());
+
+    state
+        .branch
+        .insert_active(ticket)
+        .await
+        .map_err(|e| format!("register offer: {e}"))
 }
 
 async fn create_quote(
@@ -2051,7 +2093,7 @@ fn signed_amount_text(amount: i128, unit: &str) -> String {
 }
 
 #[allow(dead_code)]
-fn active_quote_panel(ticket: &Ticket, now: u64, state: &WebState) -> Markup {
+fn active_quote_panel(ticket: &Ticket, now: u64, _state: &WebState) -> Markup {
     let (title, subtitle) = match (ticket.kind, ticket.status) {
         (TicketKind::Incoming, TicketStatus::Pending) => {
             ("Cash deposit", "Customer pays cash before ecash is issued.")
@@ -2064,7 +2106,8 @@ fn active_quote_panel(ticket: &Ticket, now: u64, state: &WebState) -> Markup {
         }
         _ => ("Quote", "Quote is no longer active."),
     };
-    let quote_url = quote_status_url(ticket, state);
+    // Legacy no-JS panel: the only thing displayed to the wallet is the offer.
+    let quote_url = ticket.offer.clone();
 
     html! {
         div.card-body {
@@ -2156,21 +2199,6 @@ fn active_quote_actions(ticket: &Ticket) -> Markup {
             }
         }
     }
-}
-
-fn quote_status_url(ticket: &Ticket, state: &WebState) -> Option<String> {
-    let quote_id = ticket.quote_id.as_ref()?;
-    let quote_kind = match ticket.kind {
-        TicketKind::Incoming => "mint",
-        TicketKind::Outgoing => "melt",
-    };
-    Some(format!(
-        "{}/v1/{}/quote/{}/{}",
-        state.mint_public_url.trim_end_matches('/'),
-        quote_kind,
-        state.method.as_str(),
-        quote_id
-    ))
 }
 
 #[allow(dead_code)]
@@ -2896,6 +2924,7 @@ fn kind_label(k: TicketKind) -> &'static str {
 #[allow(dead_code)]
 fn status_pill(s: TicketStatus) -> Markup {
     let (cls, label) = match s {
+        TicketStatus::Offered => ("pill pill-waiting", status_label(s)),
         TicketStatus::Waiting => ("pill pill-waiting", status_label(s)),
         TicketStatus::Pending => ("pill pill-pending", status_label(s)),
         TicketStatus::Paid => ("pill pill-paid", status_label(s)),
@@ -2906,7 +2935,8 @@ fn status_pill(s: TicketStatus) -> Markup {
 
 fn status_label(s: TicketStatus) -> &'static str {
     match s {
-        TicketStatus::Waiting => "Waiting",
+        TicketStatus::Offered => "Offered",
+        TicketStatus::Waiting => "Claimed",
         TicketStatus::Pending => "Pending",
         TicketStatus::Paid => "Paid",
         TicketStatus::Failed => "Failed",
