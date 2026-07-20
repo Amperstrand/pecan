@@ -33,6 +33,11 @@ engine = "sqlite"
 # Route the custom unit "ora" to our processor instead of a Lightning backend.
 [ln]
 ln_backend = "grpcprocessor"
+unit = "ora"
+min_mint = 1
+max_mint = 500000
+min_melt = 1
+max_melt = 500000
 
 [grpc_processor]
 supported_units = ["ora"]

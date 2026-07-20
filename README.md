@@ -128,7 +128,7 @@ The image builds `cdk-mintd` and the processor against the same pinned CDK
 commit:
 
 ```text
-bc7e441ef2fc4cb0d57b84c4757ee023704c922f
+6132607495ae0741e412a63f2acc34e4ccddfc55
 ```
 
 Keep `Dockerfile` and `processor/Cargo.toml` in sync when updating CDK.

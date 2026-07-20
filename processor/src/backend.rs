@@ -115,6 +115,7 @@ impl MintPayment for BranchBackend {
             // advertising None for both is intentional — bolt is not a valid rail here.
             bolt11: None::<Bolt11Settings>,
             bolt12: None::<Bolt12Settings>,
+            onchain: None,
             custom,
         })
     }
@@ -152,9 +153,9 @@ impl MintPayment for BranchBackend {
                     extra_json: None,
                 })
             }
-            IncomingPaymentOptions::Bolt11(_) | IncomingPaymentOptions::Bolt12(_) => {
-                Err(Error::UnsupportedPaymentOption)
-            }
+            IncomingPaymentOptions::Bolt11(_)
+            | IncomingPaymentOptions::Bolt12(_)
+            | IncomingPaymentOptions::Onchain(_) => Err(Error::UnsupportedPaymentOption),
         }
     }
 
@@ -189,11 +190,13 @@ impl MintPayment for BranchBackend {
                     fee: Amount::new(0, self.unit.clone()),
                     state: MeltQuoteState::Unpaid,
                     extra_json: None,
+                    estimated_blocks: None,
+                    fee_options: None,
                 })
             }
-            OutgoingPaymentOptions::Bolt11(_) | OutgoingPaymentOptions::Bolt12(_) => {
-                Err(Error::UnsupportedPaymentOption)
-            }
+            OutgoingPaymentOptions::Bolt11(_)
+            | OutgoingPaymentOptions::Bolt12(_)
+            | OutgoingPaymentOptions::Onchain(_) => Err(Error::UnsupportedPaymentOption),
         }
     }
 
@@ -229,9 +232,9 @@ impl MintPayment for BranchBackend {
                     total_spent: Amount::new(ticket.amount, self.unit.clone()),
                 })
             }
-            OutgoingPaymentOptions::Bolt11(_) | OutgoingPaymentOptions::Bolt12(_) => {
-                Err(Error::UnsupportedPaymentOption)
-            }
+            OutgoingPaymentOptions::Bolt11(_)
+            | OutgoingPaymentOptions::Bolt12(_)
+            | OutgoingPaymentOptions::Onchain(_) => Err(Error::UnsupportedPaymentOption),
         }
     }
 

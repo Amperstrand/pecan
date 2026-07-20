@@ -351,6 +351,11 @@ engine = "sqlite"
 
 [ln]
 ln_backend = "grpcprocessor"
+unit = "{unit}"
+min_mint = 1
+max_mint = 500000
+min_melt = 1
+max_melt = 500000
 
 [grpc_processor]
 supported_units = ["{unit}"]

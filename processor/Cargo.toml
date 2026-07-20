@@ -12,20 +12,19 @@ name = "cdk-branch-processor"
 path = "src/main.rs"
 
 # ---------------------------------------------------------------------------
-# cdk is consumed unmodified from upstream, pinned to the commit that merged
-# PR #1973 (propagate mint quote_id to the payment processor). That change is
-# what lets this backend correlate `get_payment_quote` with `make_payment`
-# without relying on wallet-supplied uniqueness — see src/backend.rs.
+# cdk is consumed unmodified from upstream, pinned to the latest stable release
+# commit. The payment-processor APIs used here propagate quote_id, which lets
+# this backend correlate `get_payment_quote` with `make_payment` without
+# relying on wallet-supplied uniqueness — see src/backend.rs.
 #
-# It also bumped PAYMENT_PROCESSOR_PROTOCOL_VERSION to 3.0.0. The version check
-# is strict-equality, so the mint (cdk-mintd) MUST be built from this same rev.
-# The Dockerfile installs cdk-mintd from CDK_REV; keep the two in sync.
-# crates.io 0.16.0 predates this and speaks protocol 2.0.0 — do not use it.
+# The payment-processor protocol version check is strict-equality, so the mint
+# (cdk-mintd) MUST be built from this same rev. The Dockerfile installs
+# cdk-mintd from CDK_REV; keep the two in sync.
 # ---------------------------------------------------------------------------
 [dependencies]
-cdk-common = { git = "https://github.com/cashubtc/cdk", rev = "bc7e441ef2fc4cb0d57b84c4757ee023704c922f", default-features = false, features = ["mint", "grpc"] }
-cdk-payment-processor = { git = "https://github.com/cashubtc/cdk", rev = "bc7e441ef2fc4cb0d57b84c4757ee023704c922f", default-features = false }
-cdk-mint-rpc = { git = "https://github.com/cashubtc/cdk", rev = "bc7e441ef2fc4cb0d57b84c4757ee023704c922f" }
+cdk-common = { git = "https://github.com/cashubtc/cdk", rev = "6132607495ae0741e412a63f2acc34e4ccddfc55", default-features = false, features = ["mint", "grpc"] }
+cdk-payment-processor = { git = "https://github.com/cashubtc/cdk", rev = "6132607495ae0741e412a63f2acc34e4ccddfc55", default-features = false }
+cdk-mint-rpc = { git = "https://github.com/cashubtc/cdk", rev = "6132607495ae0741e412a63f2acc34e4ccddfc55" }
 
 anyhow = "1"
 async-trait = "0.1"
