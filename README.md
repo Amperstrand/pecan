@@ -1,8 +1,9 @@
 # Custom Unit Mint
 
-Browser-managed [Cashu](https://cashu.space) mint for a custom unit. It runs
-stock `cdk-mintd` and a separate `cdk-branch-processor` that settles mint/melt
-quotes manually through an operator web UI.
+Browser-managed [Cashu](https://cashu.space) mint for custom units. It runs a
+pinned `cdk-mintd` with the managed-unit compatibility patch in this repository
+and a separate `cdk-branch-processor` that settles mint/melt quotes manually
+through an operator web UI.
 
 ## Quick Start
 
@@ -41,6 +42,9 @@ docker compose up --build --force-recreate -d
 - Teller workflow for one active branch quote at a time.
 - Manual cash settlement for mints and melts.
 - Keyset inventory and rotation through `cdk-mintd` management RPC.
+- Multi-unit branch configuration with explicit **Active**, **Redemption only**,
+  and **Retired** lifecycle migrations.
+- Read-only discovery of every method/unit pair advertised by the mint.
 - Dashboard health, settled activity, and circulating ecash over time.
 
 ## Settlement Flow
@@ -78,8 +82,10 @@ fresh local demo:
 docker compose down -v
 ```
 
-Do not reset a production mint without backing up and draining operational
-records.
+Do not reset a production mint without a backup. Move managed units to
+**Redemption only** first: issuance stops while holders can still melt existing
+ecash. A unit can be retired only after every historical keyset has reached its
+final expiry.
 
 ## Security Notes
 
@@ -119,6 +125,8 @@ docker compose up --build
 ├── Dockerfile
 ├── web/                 # React/Vite operator UI, built into the image
 ├── processor/           # branch payment processor and web/API server
+├── patches/             # narrow patch applied to the pinned cdk-mintd source
+├── scripts/             # container lifecycle helpers
 └── config/mint.toml     # reference config; default deploy generates its own
 ```
 
@@ -128,7 +136,8 @@ The image builds `cdk-mintd` and the processor against the same pinned CDK
 commit:
 
 ```text
-bc7e441ef2fc4cb0d57b84c4757ee023704c922f
+6132607495ae0741e412a63f2acc34e4ccddfc55
 ```
 
 Keep `Dockerfile` and `processor/Cargo.toml` in sync when updating CDK.
+Rebase and revalidate `patches/cdk-managed-units.patch` at the same time.

@@ -1,15 +1,14 @@
 # syntax=docker/dockerfile:1
 #
 # Single image containing two binaries:
-#   * cdk-mintd            — STOCK upstream cdk, installed from a pinned commit.
+#   * cdk-mintd            — pinned upstream cdk with a narrow managed-unit patch.
 #   * cdk-branch-processor — this repo's custom payment processor + operator UI.
 #
-# Both are pinned to the same cdk commit (CDK_REV). They must match: the merge
-# that added quote_id propagation also bumped the payment-processor wire
-# protocol to 3.0.0, and the version check between mint and processor is
+# Both are pinned to the same cdk commit (CDK_REV). They must match because the
+# payment-processor wire protocol check between mint and processor is
 # strict-equality. processor/Cargo.toml pins the same rev as a git dependency.
 
-ARG CDK_REV=bc7e441ef2fc4cb0d57b84c4757ee023704c922f
+ARG CDK_REV=6132607495ae0741e412a63f2acc34e4ccddfc55
 
 FROM node:22-bookworm-slim AS web-builder
 WORKDIR /src/web
@@ -30,14 +29,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-# --- stock cdk-mintd, pinned, lean feature set (no cln/lnd/lnbits/fakewallet) ---
+# --- cdk-mintd, pinned, lean feature set (no cln/lnd/lnbits/fakewallet) ---
 # grpc-processor: talk to our processor over gRPC
 # management-rpc: keyset rotation from the operator UI
 # sqlite:         persistent mint DB
 # info-page:      human-readable mint info at the root URL
-RUN cargo install \
-        --git https://github.com/cashubtc/cdk \
-        --rev ${CDK_REV} \
+WORKDIR /src
+RUN git clone https://github.com/cashubtc/cdk /src/cdk \
+    && cd /src/cdk \
+    && git checkout ${CDK_REV}
+COPY patches/cdk-managed-units.patch /src/cdk-managed-units.patch
+RUN cd /src/cdk \
+    && git apply /src/cdk-managed-units.patch \
+    && cargo install \
+        --path crates/cdk-mintd \
         --locked \
         --no-default-features \
         --features "management-rpc,grpc-processor,sqlite,info-page" \
@@ -61,6 +66,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /out/bin/cdk-mintd /usr/local/bin/cdk-mintd
 COPY --from=builder /out/bin/cdk-branch-processor /usr/local/bin/cdk-branch-processor
 COPY --from=web-builder /src/web/dist /usr/local/share/custom-unit-mint/web
+COPY scripts/mint-supervisor.sh /usr/local/bin/mint-supervisor
+RUN chmod 0755 /usr/local/bin/mint-supervisor
 
 # default command is overridden per-service in docker-compose.yml
 CMD ["cdk-mintd"]
