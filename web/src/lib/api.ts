@@ -15,6 +15,49 @@ export interface KeysetEntry {
   final_expiry?: number | null
 }
 
+export type UnitLifecycle = "active" | "redemption_only" | "retired"
+
+export interface RolloverPolicy {
+  enabled: boolean
+  keyset_lifetime_days: number
+  rotate_before_expiry_days: number
+  input_fee_ppk: number
+  amounts: number[]
+}
+
+export interface ManagedUnit {
+  unit: string
+  lifecycle: UnitLifecycle
+  configured_at: number
+  rollover: RolloverPolicy
+  keyset_count: number
+  active_keyset?: KeysetEntry | null
+  can_mint: boolean
+  can_melt: boolean
+}
+
+export interface Capability {
+  unit: string
+  method: string
+  mint: boolean
+  melt: boolean
+  managed: boolean
+}
+
+export interface ConsistencyState {
+  ok: boolean
+  issues: string[]
+}
+
+export interface UnitSummary {
+  unit: string
+  mint_count: number
+  melt_count: number
+  minted_amount: number
+  melted_amount: number
+  net_issued: number
+}
+
 export interface Ticket {
   id: string
   short_id: string
@@ -62,13 +105,7 @@ export interface AppSnapshot {
     processor_grpc_addr: string
     processor_grpc_port: number
   }
-  rollover: {
-    enabled: boolean
-    keyset_lifetime_days: number
-    rotate_before_expiry_days: number
-    input_fee_ppk: number
-    amounts: number[]
-  }
+  rollover: RolloverPolicy
   default_amounts: number[]
   health: {
     mint_http: HealthItem
@@ -88,10 +125,14 @@ export interface AppSnapshot {
     melted_amount: number
     net_issued: number
   }
+  unit_summaries: UnitSummary[]
   circulation: CirculationPoint[]
   tickets: Ticket[]
   active_tickets: Ticket[]
   recent_done: Ticket[]
+  units: ManagedUnit[]
+  capabilities: Capability[]
+  consistency: ConsistencyState
 }
 
 export interface SetupDefaults {

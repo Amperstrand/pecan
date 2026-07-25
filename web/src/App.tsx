@@ -11,8 +11,10 @@ import {
   Database,
   Gauge,
   KeyRound,
+  Layers3,
   LockKeyhole,
   LogOut,
+  Plus,
   RefreshCw,
   RotateCw,
   Settings,
@@ -40,6 +42,7 @@ import {
   Ticket,
   TicketKind,
   TicketStatus,
+  UnitLifecycle,
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { Alert } from "@/components/ui/alert"
@@ -48,6 +51,7 @@ import { Button, buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
@@ -208,8 +212,8 @@ function AppShell({
 
         <div className="mt-7 grid gap-2 rounded-md border border-border bg-surface p-3">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-medium text-muted-foreground">Unit</span>
-            <span className="font-mono text-xs font-medium uppercase">{snapshot.mint.unit}</span>
+            <span className="text-xs font-medium text-muted-foreground">Managed units</span>
+            <span className="font-mono text-xs font-medium">{snapshot.units.length}</span>
           </div>
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-muted-foreground">Method</span>
@@ -281,7 +285,7 @@ function OverviewPage({ snapshot }: { snapshot: AppSnapshot }) {
           />
         ))}
         <MetricTile
-          label="Estimated circulation"
+          label={`Estimated circulation · ${snapshot.mint.unit}`}
           value={formatSignedAmount(snapshot.summary.net_issued, snapshot.mint.unit)}
           detail="Completed mints minus completed melts"
           icon={<WalletCards className="size-4" />}
@@ -398,6 +402,47 @@ function OverviewPage({ snapshot }: { snapshot: AppSnapshot }) {
         </Card>
       </section>
 
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>Unit balances</CardTitle>
+            <CardDescription>
+              Per-unit activity is kept separate; values from unlike units are never summed.
+            </CardDescription>
+          </div>
+          <Layers3 className="size-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="table-scroll">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Unit</TableHead>
+                  <TableHead>Lifecycle</TableHead>
+                  <TableHead>Mints</TableHead>
+                  <TableHead>Melts</TableHead>
+                  <TableHead>Net issued</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {snapshot.unit_summaries.map((summary) => {
+                  const managed = snapshot.units.find((unit) => unit.unit === summary.unit)
+                  return (
+                    <TableRow key={summary.unit}>
+                      <TableCell className="font-mono font-medium uppercase">{summary.unit}</TableCell>
+                      <TableCell>{managed ? <LifecycleBadge lifecycle={managed.lifecycle} /> : <Badge>Observed</Badge>}</TableCell>
+                      <TableCell>{summary.mint_count}</TableCell>
+                      <TableCell>{summary.melt_count}</TableCell>
+                      <TableCell className="font-mono">{formatSignedAmount(summary.net_issued, summary.unit)}</TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
       <ActivityTable title="Recent settled activity" tickets={snapshot.recent_done.slice(0, 8)} now={snapshot.now} />
     </>
   )
@@ -422,8 +467,10 @@ function TellerPage({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh:
             <Badge variant={active.length ? "warning" : "success"}>{active.length ? "Busy" : "Ready"}</Badge>
           </CardHeader>
           <CardContent className="detail-grid">
-            <DetailRow label="Unit">
-              <span className="font-mono uppercase">{snapshot.mint.unit}</span>
+            <DetailRow label="Units">
+              <span className="font-mono uppercase">
+                {snapshot.units.filter((unit) => unit.can_mint || unit.can_melt).map((unit) => unit.unit).join(", ") || "None"}
+              </span>
             </DetailRow>
             <DetailRow label="Method">
               <span className="font-mono">{snapshot.mint.method}</span>
@@ -474,10 +521,20 @@ function QuotePanel({
 
 function CreateQuoteCard({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh: () => Promise<void> }) {
   const [kind, setKind] = useState<TicketKind>("incoming")
+  const availableUnits = snapshot.units.filter((unit) =>
+    kind === "incoming" ? unit.can_mint : unit.can_melt,
+  )
+  const [unit, setUnit] = useState(availableUnits[0]?.unit ?? "")
   const [amount, setAmount] = useState("")
   const [description, setDescription] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!availableUnits.some((item) => item.unit === unit)) {
+      setUnit(availableUnits[0]?.unit ?? "")
+    }
+  }, [availableUnits, unit])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -486,6 +543,7 @@ function CreateQuoteCard({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRef
     try {
       await apiPost<Ticket>("/api/quotes", {
         kind: kind === "incoming" ? "mint" : "melt",
+        unit,
         amount: Number(amount),
         description,
       })
@@ -546,9 +604,20 @@ function CreateQuoteCard({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRef
               />
             </Field>
             <Field label="Unit">
-              <Input value={`${snapshot.mint.unit} · ${snapshot.mint.method}`} readOnly />
+              <Select value={unit} onChange={(event) => setUnit(event.target.value)} required>
+                {availableUnits.map((item) => (
+                  <option key={item.unit} value={item.unit}>
+                    {item.unit.toUpperCase()} · {snapshot.mint.method}
+                  </option>
+                ))}
+              </Select>
             </Field>
           </div>
+          {availableUnits.length === 0 && (
+            <Alert variant="warning">
+              No unit currently supports this operation. Update unit lifecycle in Settings.
+            </Alert>
+          )}
           <Field label="Note">
             <Input
               value={description}
@@ -558,7 +627,7 @@ function CreateQuoteCard({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRef
           </Field>
           {error && <Alert variant="danger">{error}</Alert>}
           <div className="flex flex-wrap items-center gap-2">
-            <Button type="submit" variant="primary" loading={busy} disabled={busy}>
+            <Button type="submit" variant="primary" loading={busy} disabled={busy || !unit}>
               <Banknote />
               Create offer
             </Button>
@@ -764,12 +833,29 @@ function ActiveQuoteCard({
 }
 
 function KeysetsPage({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh: () => Promise<void> }) {
-  const [unit, setUnit] = useState(snapshot.mint.unit)
-  const [amounts, setAmounts] = useState(snapshot.default_amounts.join(","))
-  const [fee, setFee] = useState("0")
-  const [finalExpiry, setFinalExpiry] = useState("")
+  const rotatableUnits = snapshot.units.filter((item) => item.lifecycle === "active")
+  const [unit, setUnit] = useState(rotatableUnits[0]?.unit ?? "")
+  const selectedUnit = snapshot.units.find((item) => item.unit === unit)
+  const [amounts, setAmounts] = useState(
+    selectedUnit?.rollover.amounts.join(",") ?? snapshot.default_amounts.join(","),
+  )
+  const [fee, setFee] = useState(String(selectedUnit?.rollover.input_fee_ppk ?? 0))
+  const [finalExpiry, setFinalExpiry] = useState(
+    selectedUnit
+      ? String(snapshot.now + selectedUnit.rollover.keyset_lifetime_days * 86_400)
+      : "",
+  )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  function chooseUnit(nextUnit: string) {
+    setUnit(nextUnit)
+    const managed = snapshot.units.find((item) => item.unit === nextUnit)
+    if (!managed) return
+    setAmounts(managed.rollover.amounts.join(","))
+    setFee(String(managed.rollover.input_fee_ppk))
+    setFinalExpiry(String(snapshot.now + managed.rollover.keyset_lifetime_days * 86_400))
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -793,7 +879,7 @@ function KeysetsPage({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh
   return (
     <>
       <PageHeader
-        title={`Keysets · ${snapshot.mint.unit}`}
+        title="Keysets"
         description="Active is the keyset the mint signs new ecash with. Expiry is enforced by the mint once final_expiry passes."
       />
 
@@ -818,6 +904,7 @@ function KeysetsPage({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh
                 <TableHeader>
                   <TableRow>
                     <TableHead>Keyset ID</TableHead>
+                    <TableHead>Unit</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Final expiry</TableHead>
                     <TableHead>Fee ppk</TableHead>
@@ -829,6 +916,7 @@ function KeysetsPage({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh
                       <TableCell>
                         <span className="mono-chip">{keyset.id}</span>
                       </TableCell>
+                      <TableCell className="font-mono uppercase">{keyset.unit}</TableCell>
                       <TableCell>
                         <KeysetBadge keyset={keyset} now={snapshot.now} />
                       </TableCell>
@@ -858,30 +946,36 @@ function KeysetsPage({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh
           <form className="grid gap-4" onSubmit={submit}>
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Unit">
-                <Input value={unit} onChange={(event) => setUnit(event.target.value)} />
+                <Select value={unit} onChange={(event) => chooseUnit(event.target.value)} required>
+                  {rotatableUnits.map((item) => (
+                    <option key={item.unit} value={item.unit}>
+                      {item.unit.toUpperCase()}
+                    </option>
+                  ))}
+                </Select>
               </Field>
               <Field label="Input fee (ppk)">
-                <Input type="number" min="0" value={fee} onChange={(event) => setFee(event.target.value)} />
+                <Input type="number" min="0" value={fee} readOnly />
               </Field>
             </div>
-            <Field label="Amounts" help="Comma-separated powers of 2 for the denominations this keyset will sign.">
-              <Input value={amounts} onChange={(event) => setAmounts(event.target.value)} />
+            <Field label="Amounts" help="Inherited from the persisted unit policy so restarts cannot rotate back to a conflicting keyset.">
+              <Input value={amounts} readOnly />
             </Field>
             <Field
               label="Final expiry · unix seconds"
-              help="Immutable once created. Leave blank for no expiry."
+              help="Immutable once created. Managed keysets require a future expiry so the unit can eventually be retired."
             >
               <Input
                 type="number"
                 min="0"
                 value={finalExpiry}
-                placeholder="leave blank for no expiry"
+                required
                 onChange={(event) => setFinalExpiry(event.target.value)}
               />
             </Field>
             {error && <Alert variant="danger">{error}</Alert>}
             <div className="flex flex-wrap gap-2">
-              <Button type="submit" variant="primary" loading={busy} disabled={busy}>
+              <Button type="submit" variant="primary" loading={busy} disabled={busy || !unit}>
                 <RotateCw />
                 Rotate keyset
               </Button>
@@ -894,71 +988,358 @@ function KeysetsPage({ snapshot, onRefresh }: { snapshot: AppSnapshot; onRefresh
 }
 
 function SettingsPage({ snapshot }: { snapshot: AppSnapshot }) {
+  const unitNames = Array.from(
+    new Set([...snapshot.units.map((unit) => unit.unit), ...snapshot.capabilities.map((pair) => pair.unit)]),
+  )
+  const [selectedName, setSelectedName] = useState(unitNames[0] ?? "")
+  const [adding, setAdding] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const selected = snapshot.units.find((unit) => unit.unit === selectedName)
+  const selectedCapabilities = snapshot.capabilities.filter((pair) => pair.unit === selectedName)
+  const selectedKeysets = snapshot.keysets.items.filter((keyset) => keyset.unit === selectedName)
+  const defaults = snapshot.units[0]?.rollover ?? snapshot.rollover
+  const [newUnit, setNewUnit] = useState("")
+  const [newLifetime, setNewLifetime] = useState(String(defaults.keyset_lifetime_days))
+  const [newLeadTime, setNewLeadTime] = useState(String(defaults.rotate_before_expiry_days))
+  const [newFee, setNewFee] = useState(String(defaults.input_fee_ppk))
+  const [newAmounts, setNewAmounts] = useState(defaults.amounts.join(","))
+  const [identity, setIdentity] = useState({
+    name: snapshot.mint.name,
+    description: snapshot.mint.description,
+    description_long: snapshot.mint.description_long,
+    public_url: snapshot.endpoints.public_url,
+  })
+
+  function expectRestart() {
+    setRestarting(true)
+    window.setTimeout(() => window.location.reload(), 3200)
+  }
+
+  async function changeLifecycle(lifecycle: UnitLifecycle) {
+    if (!selected) return
+    setBusy(true)
+    setError(null)
+    try {
+      await apiPost(`/api/units/${encodeURIComponent(selected.unit)}/lifecycle`, { lifecycle })
+      expectRestart()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update unit lifecycle.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function addUnit(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    try {
+      await apiPost("/api/units", {
+        unit: newUnit,
+        keyset_lifetime_days: Number(newLifetime),
+        rotate_before_expiry_days: Number(newLeadTime),
+        input_fee_ppk: Number(newFee),
+        amounts: newAmounts,
+      })
+      expectRestart()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add unit.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function updateIdentity(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    try {
+      await apiPost("/api/settings/identity", identity)
+      expectRestart()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update mint identity.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (restarting) {
+    return (
+      <CenteredSurface>
+        <div className="grid max-w-[520px] justify-items-center gap-3 text-center">
+          <RefreshCw className="size-7 animate-spin text-primary" />
+          <h1 className="m-0 text-xl font-semibold">Applying mint configuration</h1>
+          <p className="m-0 text-sm text-muted-foreground">
+            The processor and mint are restarting together. This page will reconnect automatically.
+          </p>
+        </div>
+      </CenteredSurface>
+    )
+  }
+
   return (
     <>
       <PageHeader
-        title="Settings"
-        description="Committed mint configuration and rollover policy. Immutable values require a deliberate reset."
+        title="Units & methods"
+        description="Review the mint's complete advertised capability space and migrate the branch-managed units safely."
+        actions={
+          <Button variant="primary" onClick={() => setAdding((value) => !value)}>
+            <Plus />
+            Add unit
+          </Button>
+        }
       />
-      <section className="two-column-grid">
+
+      {!snapshot.consistency.ok && (
+        <Alert variant="danger">
+          <strong className="font-semibold">Configuration is not yet consistent.</strong>
+          <ul className="mb-0 mt-2 pl-5">
+            {snapshot.consistency.issues.map((issue) => <li key={issue}>{issue}</li>)}
+          </ul>
+        </Alert>
+      )}
+
+      {adding && (
         <Card>
           <CardHeader>
             <div>
-              <CardTitle>Mint configuration</CardTitle>
-              <CardDescription>Values committed during first-run setup.</CardDescription>
+              <CardTitle>Add a branch unit</CardTitle>
+              <CardDescription>
+                This creates a new signing keyset and advertises branch mint and melt support after restart.
+              </CardDescription>
             </div>
-            <Badge>Read-only</Badge>
+            <Badge variant="info">Migration</Badge>
           </CardHeader>
-          <CardContent className="detail-grid">
-            <DetailRow label="Name">{snapshot.mint.name}</DetailRow>
-            <DetailRow label="Unit">
-              <span className="font-mono">{snapshot.mint.unit}</span>
-            </DetailRow>
-            <DetailRow label="Method">
-              <span className="font-mono">{snapshot.mint.method}</span>
-            </DetailRow>
-            <DetailRow label="Public URL">
-              <span className="font-mono text-xs break-all">{snapshot.endpoints.public_url}</span>
-            </DetailRow>
-            <DetailRow label="Mint HTTP">
-              <span className="font-mono text-xs break-all">{snapshot.endpoints.mint_http_url}</span>
-            </DetailRow>
-            <DetailRow label="Management RPC">
-              <span className="font-mono text-xs break-all">{snapshot.endpoints.mint_rpc_url}</span>
-            </DetailRow>
+          <CardContent>
+            <form className="grid gap-4" onSubmit={addUnit}>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <Field label="Unit code">
+                  <Input
+                    value={newUnit}
+                    pattern="[a-z0-9_-]+"
+                    placeholder="usd"
+                    onChange={(event) => setNewUnit(event.target.value.toLowerCase())}
+                    required
+                    autoFocus
+                  />
+                </Field>
+                <Field label="Keyset lifetime · days">
+                  <Input type="number" min="2" value={newLifetime} onChange={(event) => setNewLifetime(event.target.value)} required />
+                </Field>
+                <Field label="Rotate before · days">
+                  <Input type="number" min="1" value={newLeadTime} onChange={(event) => setNewLeadTime(event.target.value)} required />
+                </Field>
+                <Field label="Input fee · ppk">
+                  <Input type="number" min="0" value={newFee} onChange={(event) => setNewFee(event.target.value)} required />
+                </Field>
+              </div>
+              <Field label="Denominations" help="Comma-separated positive amounts used by the first and future keysets.">
+                <Input value={newAmounts} onChange={(event) => setNewAmounts(event.target.value)} required />
+              </Field>
+              {error && <Alert variant="danger">{error}</Alert>}
+              <div className="flex flex-wrap gap-2">
+                <Button type="submit" variant="primary" loading={busy} disabled={busy}>
+                  <Plus />
+                  Add active unit
+                </Button>
+                <Button type="button" onClick={() => setAdding(false)}>Cancel</Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      )}
+
+      <section className="unit-workspace">
+        <Card className="unit-master-card">
+          <CardHeader>
+            <div>
+              <CardTitle>Units</CardTitle>
+              <CardDescription>{unitNames.length} discovered</CardDescription>
+            </div>
+          </CardHeader>
+          <CardContent className="unit-master-list">
+            {unitNames.map((unitName) => {
+              const managed = snapshot.units.find((unit) => unit.unit === unitName)
+              const selectedRow = unitName === selectedName
+              return (
+                <button
+                  key={unitName}
+                  type="button"
+                  className={cn("unit-master-button", selectedRow && "is-selected")}
+                  onClick={() => setSelectedName(unitName)}
+                >
+                  <span className="grid min-w-0 gap-1 text-left">
+                    <span className="font-mono text-sm font-semibold uppercase">{unitName}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {managed ? `${managed.keyset_count} keyset${managed.keyset_count === 1 ? "" : "s"}` : "Observed only"}
+                    </span>
+                  </span>
+                  {managed ? <LifecycleBadge lifecycle={managed.lifecycle} /> : <Badge>External</Badge>}
+                </button>
+              )
+            })}
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <div>
-              <CardTitle>Keyset rollover</CardTitle>
-              <CardDescription>Expiry policy used by the background worker.</CardDescription>
-            </div>
-            <Badge variant={snapshot.rollover.enabled ? "info" : "neutral"}>
-              {snapshot.rollover.enabled ? "Enabled" : "Disabled"}
-            </Badge>
-          </CardHeader>
-          <CardContent className="detail-grid">
-            <DetailRow label="Lifetime">{snapshot.rollover.keyset_lifetime_days} days</DetailRow>
-            <DetailRow label="Rotate before expiry">
-              {snapshot.rollover.rotate_before_expiry_days} days
-            </DetailRow>
-            <DetailRow label="Input fee">
-              <span className="font-mono">{snapshot.rollover.input_fee_ppk} ppk</span>
-            </DetailRow>
-            <DetailRow label="Denominations">
-              <span className="font-mono text-xs break-all">{snapshot.rollover.amounts.join(",")}</span>
-            </DetailRow>
-          </CardContent>
-        </Card>
+        <div className="grid min-w-0 gap-4">
+          <Card>
+            <CardHeader>
+              <div>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <CardTitle className="font-mono uppercase">{selectedName || "No unit"}</CardTitle>
+                  {selected ? <LifecycleBadge lifecycle={selected.lifecycle} /> : <Badge>Observed only</Badge>}
+                </div>
+                <CardDescription>
+                  {selected
+                    ? `Managed by the ${snapshot.mint.method} teller workflow.`
+                    : "Advertised by the mint but outside the teller workflow; shown read-only."}
+                </CardDescription>
+              </div>
+            </CardHeader>
+            <CardContent className="detail-grid">
+              <DetailRow label="Mint operations">
+                <CapabilityBadge enabled={selectedCapabilities.some((pair) => pair.mint)} label="Mint" />
+              </DetailRow>
+              <DetailRow label="Melt operations">
+                <CapabilityBadge enabled={selectedCapabilities.some((pair) => pair.melt)} label="Melt" />
+              </DetailRow>
+              <DetailRow label="Active keyset">
+                {selected?.active_keyset
+                  ? <span className="mono-chip">{selected.active_keyset.id}</span>
+                  : <span className="text-muted-foreground">None reported</span>}
+              </DetailRow>
+              <DetailRow label="Keyset inventory">{selectedKeysets.length}</DetailRow>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <div>
+                <CardTitle>Method capabilities</CardTitle>
+                <CardDescription>Protocol-visible NUT-04 mint and NUT-05 melt pairs.</CardDescription>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              {selectedCapabilities.length === 0 ? (
+                <EmptyState title="No advertised methods" body="Retired units intentionally have no active payment methods." />
+              ) : (
+                <div className="table-scroll">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Method</TableHead>
+                        <TableHead>Ownership</TableHead>
+                        <TableHead>Mint</TableHead>
+                        <TableHead>Melt</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {selectedCapabilities.map((pair) => (
+                        <TableRow key={`${pair.unit}:${pair.method}`}>
+                          <TableCell className="font-mono">{pair.method}</TableCell>
+                          <TableCell>{pair.managed ? <Badge variant="info">Branch managed</Badge> : <Badge>Read-only</Badge>}</TableCell>
+                          <TableCell><CapabilityBadge enabled={pair.mint} label={pair.mint ? "Enabled" : "Off"} /></TableCell>
+                          <TableCell><CapabilityBadge enabled={pair.melt} label={pair.melt ? "Enabled" : "Off"} /></TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {selected && (
+            <Card>
+              <CardHeader>
+                <div>
+                  <CardTitle>Lifecycle migration</CardTitle>
+                  <CardDescription>
+                    Lifecycle changes update request handling, advertised methods, and mint configuration together.
+                  </CardDescription>
+                </div>
+              </CardHeader>
+              <CardContent className="grid gap-4">
+                {selected.lifecycle === "active" && (
+                  <>
+                    <Alert variant="warning">
+                      Redemption only removes this unit from mint operations. Existing ecash can still be melted until every keyset reaches final expiry.
+                    </Alert>
+                    <Button className="justify-self-start" variant="danger" loading={busy} onClick={() => void changeLifecycle("redemption_only")}>
+                      Stop issuing · keep redemptions
+                    </Button>
+                  </>
+                )}
+                {selected.lifecycle === "redemption_only" && (
+                  <>
+                    <Alert variant="neutral">
+                      No new ecash is issued. Melts remain available so holders can redeem outstanding value. Retirement is blocked while any keyset can still be valid.
+                    </Alert>
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="primary" loading={busy} onClick={() => void changeLifecycle("active")}>Resume issuing</Button>
+                      <Button variant="danger" loading={busy} onClick={() => void changeLifecycle("retired")}>Retire after expiry</Button>
+                    </div>
+                  </>
+                )}
+                {selected.lifecycle === "retired" && (
+                  <Alert variant="neutral">
+                    This unit has no mint or melt payment method. Historical keysets stay visible for protocol records.
+                  </Alert>
+                )}
+                {error && <Alert variant="danger">{error}</Alert>}
+              </CardContent>
+            </Card>
+          )}
+        </div>
       </section>
-      <Alert variant="warning">
-        Changing the unit, method, or recovery phrase requires a deliberate reset of processor,
-        config, and mint data volumes. Drain and back up operational records before resetting a production mint.
-      </Alert>
+
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>Mint identity</CardTitle>
+            <CardDescription>Wallet-facing metadata can change; the recovery seed remains immutable.</CardDescription>
+          </div>
+          <Badge variant="success">Seed protected</Badge>
+        </CardHeader>
+        <CardContent>
+          <form className="grid gap-4" onSubmit={updateIdentity}>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Mint name">
+                <Input value={identity.name} onChange={(event) => setIdentity({ ...identity, name: event.target.value })} required />
+              </Field>
+              <Field label="Wallet-facing URL">
+                <Input type="url" value={identity.public_url} onChange={(event) => setIdentity({ ...identity, public_url: event.target.value })} required />
+              </Field>
+            </div>
+            <Field label="Short description">
+              <Input value={identity.description} onChange={(event) => setIdentity({ ...identity, description: event.target.value })} required />
+            </Field>
+            <Field label="Long description">
+              <Textarea rows={3} value={identity.description_long} onChange={(event) => setIdentity({ ...identity, description_long: event.target.value })} />
+            </Field>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button type="submit" loading={busy} disabled={busy}>Save identity</Button>
+              <span className="text-xs text-muted-foreground">
+                Recovery seed fingerprint is stored and verified on startup; the seed cannot be edited here.
+              </span>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
     </>
   )
+}
+
+function LifecycleBadge({ lifecycle }: { lifecycle: UnitLifecycle }) {
+  if (lifecycle === "active") return <Badge variant="success">Active</Badge>
+  if (lifecycle === "redemption_only") return <Badge variant="warning">Redemption only</Badge>
+  return <Badge>Retired</Badge>
+}
+
+function CapabilityBadge({ enabled, label }: { enabled: boolean; label: string }) {
+  return <Badge variant={enabled ? "success" : "neutral"}>{label}</Badge>
 }
 
 function LoginPage() {
@@ -1058,21 +1439,21 @@ function SetupPage() {
     return parts.length > 0 && parts.every((part) => /^\d+$/.test(part) && BigInt(part) > 0n)
   }
 
-  const valid =
+  const identityReady =
+    !!form && !!form.name.trim() && !!form.description.trim() && validHttpUrl(form.public_url)
+  const unitReady =
+    !!form && validSetupSlug(form.unit.trim()) && validSetupSlug(form.method.trim())
+  const accessReady = Object.values(rules).every(Boolean)
+  const recoveryReady = !!form?.mnemonic.trim() && backupConfirmed
+  const keysetReady =
     !!form &&
-    !!form.name.trim() &&
-    !!form.description.trim() &&
-    validSetupSlug(form.unit.trim()) &&
-    validSetupSlug(form.method.trim()) &&
-    validHttpUrl(form.public_url) &&
-    !!form.mnemonic.trim() &&
     form.keyset_lifetime_days >= 2 &&
     form.rotate_before_expiry_days >= 1 &&
     form.rotate_before_expiry_days < form.keyset_lifetime_days &&
     form.input_fee_ppk >= 0 &&
-    validAmounts(form.amounts) &&
-    Object.values(rules).every(Boolean) &&
-    backupConfirmed
+    validAmounts(form.amounts)
+  const valid = identityReady && unitReady && accessReady && recoveryReady && keysetReady
+  const completedSections = [identityReady, unitReady, accessReady, recoveryReady, keysetReady].filter(Boolean).length
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -1140,35 +1521,76 @@ function SetupPage() {
   }
 
   return (
-    <div className="min-h-screen px-4 py-8">
-      <form className="mx-auto grid w-full max-w-[980px] gap-5" onSubmit={submit}>
-        <div className="rounded-md border border-border bg-surface p-6 shadow-[var(--shadow-low)]">
-          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
-            <div className="max-w-[74ch]">
-              <div className="mb-4 flex items-center gap-3">
-                <div className="grid size-8 place-items-center rounded-sm bg-primary font-bold text-primary-foreground">
-                  ◐
-                </div>
-                <div className="font-semibold">Branch</div>
-              </div>
-              <h1 className="m-0 text-2xl font-semibold leading-tight tracking-normal">
-                Set up your custom unit mint
-              </h1>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                This writes the mint configuration, locks irreversible choices, and brings the mint online.
-              </p>
-            </div>
-            <Badge variant="info">First run</Badge>
+    <div className="setup-frame">
+      <aside className="setup-sidebar">
+        <div className="flex items-center gap-3 px-2">
+          <div className="grid size-8 place-items-center rounded-sm bg-primary text-sm font-bold text-primary-foreground">
+            ◐
           </div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold">Branch</div>
+            <div className="text-xs text-muted-foreground">Mint management</div>
+          </div>
+        </div>
 
-          <div className="mt-5 grid gap-6">
-            <SetupSection title="Mint identity">
+        <div className="mt-8 px-2">
+          <Badge variant="info">First run</Badge>
+          <h2 className="mt-3 text-[15px] font-semibold">Provisioning checklist</h2>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Review every section before the mint writes its first keyset.
+          </p>
+        </div>
+
+        <nav className="setup-progress" aria-label="Setup sections">
+          <SetupProgressItem href="#setup-identity" label="Mint identity" complete={identityReady} />
+          <SetupProgressItem href="#setup-unit" label="Unit and method" complete={unitReady} />
+          <SetupProgressItem href="#setup-access" label="Operator access" complete={accessReady} />
+          <SetupProgressItem href="#setup-recovery" label="Recovery phrase" complete={recoveryReady} />
+          <SetupProgressItem href="#setup-keysets" label="Keyset policy" complete={keysetReady} />
+        </nav>
+
+        <div className="setup-sidebar-note">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-medium text-muted-foreground">Setup progress</span>
+            <span className="font-mono text-xs font-medium">{completedSections}/5</span>
+          </div>
+          <div className="setup-progress-track" aria-hidden="true">
+            <span style={{ width: `${completedSections * 20}%` }} />
+          </div>
+          <p className="m-0 text-xs leading-5 text-muted-foreground">
+            The recovery phrase and existing unit codes cannot be replaced after provisioning.
+          </p>
+        </div>
+      </aside>
+
+      <main className="setup-main">
+        <form className="setup-form" onSubmit={submit}>
+          <PageHeader
+            title="Set up your custom unit mint"
+            description="Configure the operator-facing identity, first branch unit, recovery controls, and keyset policy. The mint starts automatically after review."
+            actions={<Badge variant={valid ? "success" : "neutral"}>{valid ? "Ready" : "Draft"}</Badge>}
+          />
+
+          <Card id="setup-identity" className="scroll-mt-6">
+            <SetupCardHeader
+              icon={<WalletCards />}
+              title="Mint identity"
+              description="These details are published to wallets and remain editable from Settings."
+              complete={identityReady}
+            />
+            <CardContent className="grid gap-4">
               <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Mint name">
-                  <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
-                </Field>
-                <Field label="Wallet-facing URL" help="Use the URL wallets will scan or paste.">
+                <Field label="Mint name" htmlFor="setup-name">
                   <Input
+                    id="setup-name"
+                    value={form.name}
+                    onChange={(event) => setForm({ ...form, name: event.target.value })}
+                    required
+                  />
+                </Field>
+                <Field label="Wallet-facing URL" help="Use the URL wallets will scan or paste." htmlFor="setup-url">
+                  <Input
+                    id="setup-url"
                     type="url"
                     value={form.public_url}
                     onChange={(event) => setForm({ ...form, public_url: event.target.value })}
@@ -1176,47 +1598,75 @@ function SetupPage() {
                   />
                 </Field>
               </div>
-              <Field label="Short description">
+              <Field label="Short description" htmlFor="setup-description">
                 <Input
+                  id="setup-description"
                   value={form.description}
                   onChange={(event) => setForm({ ...form, description: event.target.value })}
                   required
                 />
               </Field>
-              <Field label="Long description">
+              <Field label="Long description" htmlFor="setup-description-long">
                 <Textarea
+                  id="setup-description-long"
                   rows={3}
                   value={form.description_long}
                   onChange={(event) => setForm({ ...form, description_long: event.target.value })}
                 />
               </Field>
-            </SetupSection>
+            </CardContent>
+          </Card>
 
-            <SetupSection title="Immutable unit settings">
+          <Card id="setup-unit" className="scroll-mt-6">
+            <SetupCardHeader
+              icon={<Layers3 />}
+              title="Unit and payment method"
+              description="Create the first method-unit pair for the branch teller workflow."
+              complete={unitReady}
+            />
+            <CardContent className="grid gap-4">
               <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Custom unit" help="Lowercase unit code. This cannot be changed after provisioning.">
+                <Field
+                  label="Custom unit"
+                  help="Lowercase unit code. It cannot be renamed; additional units can be added later."
+                  htmlFor="setup-unit-code"
+                >
                   <Input
+                    id="setup-unit-code"
+                    className="font-mono"
                     value={form.unit}
                     pattern="[a-z0-9_-]+"
                     onChange={(event) => setForm({ ...form, unit: event.target.value })}
                     required
                   />
                 </Field>
-                <Field label="Payment method" help="Use branch unless a wallet integration expects a different method.">
-                  <Input
-                    value={form.method}
-                    pattern="[a-z0-9_-]+"
-                    onChange={(event) => setForm({ ...form, method: event.target.value })}
-                    required
-                  />
+                <Field
+                  label="Payment method"
+                  help="The managed teller workflow supports the branch method."
+                  htmlFor="setup-method"
+                >
+                  <Input id="setup-method" className="font-mono" value={form.method} readOnly />
                 </Field>
               </div>
-            </SetupSection>
+              <Alert variant="neutral">
+                Unit additions and lifecycle changes use the migration workflow after setup. Existing unit codes are never
+                rewritten in place.
+              </Alert>
+            </CardContent>
+          </Card>
 
-            <SetupSection title="Operator access">
+          <Card id="setup-access" className="scroll-mt-6">
+            <SetupCardHeader
+              icon={<LockKeyhole />}
+              title="Operator access"
+              description="Protect the browser management interface with a dedicated operator password."
+              complete={accessReady}
+            />
+            <CardContent className="grid gap-4">
               <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Operator password">
+                <Field label="Operator password" htmlFor="setup-password">
                   <Input
+                    id="setup-password"
                     type="password"
                     minLength={defaults.password_min_length}
                     value={password}
@@ -1225,8 +1675,9 @@ function SetupPage() {
                     required
                   />
                 </Field>
-                <Field label="Confirm password">
+                <Field label="Confirm password" htmlFor="setup-password-confirm">
                   <Input
+                    id="setup-password-confirm"
                     type="password"
                     minLength={defaults.password_min_length}
                     value={passwordConfirm}
@@ -1236,7 +1687,7 @@ function SetupPage() {
                   />
                 </Field>
               </div>
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="flex flex-wrap gap-2" aria-label="Password requirements">
                 {[
                   ["length", `At least ${defaults.password_min_length} characters`],
                   ["letter", "Contains a letter"],
@@ -1249,47 +1700,72 @@ function SetupPage() {
                   </Badge>
                 ))}
               </div>
-            </SetupSection>
+            </CardContent>
+          </Card>
 
-            <SetupSection title="Recovery phrase">
+          <Card id="setup-recovery" className="scroll-mt-6">
+            <SetupCardHeader
+              icon={<ShieldCheck />}
+              title="Recovery phrase"
+              description="This seed deterministically restores the mint's signing keys and is immutable."
+              complete={recoveryReady}
+            />
+            <CardContent className="grid gap-4">
               <Field
                 label="Mint seed phrase"
-                help="This restores Cashu mint signing keys and keysets. It does not control bitcoin funds in this processor."
+                help="It restores Cashu keysets. It does not control bitcoin funds in this processor."
+                htmlFor="setup-mnemonic"
               >
                 <Textarea
+                  id="setup-mnemonic"
+                  className="font-mono text-xs"
                   rows={4}
                   value={form.mnemonic}
                   onChange={(event) => setForm({ ...form, mnemonic: event.target.value })}
+                  spellCheck={false}
                   required
                 />
               </Field>
-              <label className="flex items-start gap-3 text-sm">
+              <label className="setup-checkbox">
                 <input
-                  className="mt-1 accent-primary"
+                  className="mt-0.5 accent-primary"
                   type="checkbox"
                   checked={backupConfirmed}
                   onChange={(event) => setBackupConfirmed(event.target.checked)}
                   required
                 />
                 <span>
-                  I have saved the recovery phrase and understand it is required to recover this mint's signing keys.
+                  <strong className="block font-medium text-foreground">Recovery copy saved</strong>
+                  I understand this phrase is required to recover the mint's signing keys.
                 </span>
               </label>
-            </SetupSection>
+            </CardContent>
+          </Card>
 
-            <SetupSection title="Keyset expiry">
-              <label className="flex items-start gap-3 text-sm">
+          <Card id="setup-keysets" className="scroll-mt-6">
+            <SetupCardHeader
+              icon={<KeyRound />}
+              title="Keyset policy"
+              description="Define how the first unit creates and rotates its signing keysets."
+              complete={keysetReady}
+            />
+            <CardContent className="grid gap-4">
+              <label className="setup-checkbox">
                 <input
-                  className="mt-1 accent-primary"
+                  className="mt-0.5 accent-primary"
                   type="checkbox"
                   checked={form.rollover_enabled}
                   onChange={(event) => setForm({ ...form, rollover_enabled: event.target.checked })}
                 />
-                <span>Automatically rotate keysets before they expire.</span>
+                <span>
+                  <strong className="block font-medium text-foreground">Automatic rollover</strong>
+                  Rotate to a new keyset before the active keyset reaches final expiry.
+                </span>
               </label>
               <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Keyset lifetime · days">
+                <Field label="Keyset lifetime · days" htmlFor="setup-lifetime">
                   <Input
+                    id="setup-lifetime"
                     type="number"
                     min="2"
                     value={form.keyset_lifetime_days}
@@ -1297,8 +1773,9 @@ function SetupPage() {
                     required
                   />
                 </Field>
-                <Field label="Rotate before expiry · days">
+                <Field label="Rotate before expiry · days" htmlFor="setup-lead-time">
                   <Input
+                    id="setup-lead-time"
                     type="number"
                     min="1"
                     value={form.rotate_before_expiry_days}
@@ -1308,8 +1785,9 @@ function SetupPage() {
                 </Field>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Input fee (ppk)">
+                <Field label="Input fee (ppk)" htmlFor="setup-fee">
                   <Input
+                    id="setup-fee"
                     type="number"
                     min="0"
                     value={form.input_fee_ppk}
@@ -1317,29 +1795,36 @@ function SetupPage() {
                     required
                   />
                 </Field>
-                <Field label="Denominations">
-                  <Input value={form.amounts} onChange={(event) => setForm({ ...form, amounts: event.target.value })} required />
+                <Field label="Denominations" help="Comma-separated positive values." htmlFor="setup-amounts">
+                  <Input
+                    id="setup-amounts"
+                    className="font-mono text-xs"
+                    value={form.amounts}
+                    onChange={(event) => setForm({ ...form, amounts: event.target.value })}
+                    required
+                  />
                 </Field>
               </div>
-            </SetupSection>
+            </CardContent>
+          </Card>
 
-            <Alert variant="neutral">
-              <strong className="font-semibold text-foreground">Locked after setup.</strong> Unit, method, recovery phrase,
-              and initial mint identity become read-only after provisioning.
-            </Alert>
-            {error && <Alert variant="danger">{error}</Alert>}
-            <div className="flex flex-wrap items-center gap-3">
-              <Button type="submit" variant="primary" loading={busy} disabled={!valid || busy}>
-                <ShieldCheck />
-                Provision mint
-              </Button>
-              <span className={cn("text-sm text-muted-foreground", valid && "text-success")}>
-                {valid ? "Ready to write configuration." : "Complete the required fields to continue."}
-              </span>
+          {error && <Alert variant="danger">{error}</Alert>}
+          <div className="setup-action-bar">
+            <div className="min-w-0">
+              <div className={cn("text-sm font-medium", valid ? "text-success" : "text-foreground")}>
+                {valid ? "Configuration ready" : `${completedSections} of 5 sections complete`}
+              </div>
+              <div className="mt-0.5 text-xs leading-5 text-muted-foreground">
+                Provisioning writes the configuration and starts the mint.
+              </div>
             </div>
+            <Button type="submit" variant="primary" size="lg" loading={busy} disabled={!valid || busy}>
+              <ShieldCheck />
+              Provision mint
+            </Button>
           </div>
-        </div>
-      </form>
+        </form>
+      </main>
     </div>
   )
 }
@@ -1587,27 +2072,66 @@ function DetailBlock({ label, children }: { label: string; children: ReactNode }
 function Field({
   label,
   help,
+  htmlFor,
   children,
 }: {
   label: string
   help?: string
+  htmlFor?: string
   children: ReactNode
 }) {
   return (
     <div className="grid gap-2">
-      <Label>{label}</Label>
+      <Label htmlFor={htmlFor}>{label}</Label>
       {children}
       {help && <p className="m-0 text-xs leading-5 text-muted-foreground">{help}</p>}
     </div>
   )
 }
 
-function SetupSection({ title, children }: { title: string; children: ReactNode }) {
+function SetupProgressItem({
+  href,
+  label,
+  complete,
+}: {
+  href: string
+  label: string
+  complete: boolean
+}) {
+  const Icon = complete ? CheckCircle2 : CircleDot
   return (
-    <section className="grid gap-3">
-      <h2 className="m-0 text-[15px] font-semibold">{title}</h2>
-      {children}
-    </section>
+    <a className={cn("setup-progress-item", complete && "is-complete")} href={href}>
+      <Icon className="size-4 shrink-0" />
+      <span>{label}</span>
+      <span className="ml-auto text-xs">{complete ? "Done" : "Required"}</span>
+    </a>
+  )
+}
+
+function SetupCardHeader({
+  icon,
+  title,
+  description,
+  complete,
+}: {
+  icon: ReactNode
+  title: string
+  description: string
+  complete: boolean
+}) {
+  return (
+    <CardHeader className="setup-card-header">
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-surface-muted text-muted-foreground [&_svg]:size-4">
+          {icon}
+        </span>
+        <div className="min-w-0">
+          <CardTitle>{title}</CardTitle>
+          <CardDescription>{description}</CardDescription>
+        </div>
+      </div>
+      <Badge variant={complete ? "success" : "neutral"}>{complete ? "Complete" : "Required"}</Badge>
+    </CardHeader>
   )
 }
 

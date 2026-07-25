@@ -16,6 +16,7 @@ mod offer;
 mod state;
 mod web;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -31,7 +32,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::backend::BranchBackend;
 use crate::clients::{KeysetEntry, MintHttpClient, MintRpcClient};
-use crate::config::{AppConfig, ConfigStore};
+use crate::config::{AppConfig, ConfigStore, UnitLifecycle};
 use crate::state::BranchState;
 
 const ENV_WORK_DIR: &str = "CDK_BRANCH_PROCESSOR_WORK_DIR";
@@ -76,7 +77,8 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(&config_dir)
         .await
         .with_context(|| format!("create config_dir {}", config_dir.display()))?;
-    let config_store = ConfigStore::new(config_dir);
+    let config_store =
+        ConfigStore::new(config_dir).with_backup_path(work_dir.join("managed-stack-backup.json"));
 
     let grpc_addr = std::env::var(ENV_GRPC_ADDR).unwrap_or_else(|_| DEFAULT_GRPC_ADDR.into());
     let grpc_port: u16 = std::env::var(ENV_GRPC_PORT)
@@ -103,17 +105,31 @@ async fn main() -> Result<()> {
     let mut grpc_server = None;
 
     let app = if let Some(app_config) = config_store.load().await? {
+        config_store.save(&app_config).await?;
         config_store.write_mint_config(&app_config).await?;
+        let mut units = HashMap::new();
+        for managed in app_config
+            .units
+            .iter()
+            .filter(|unit| unit.lifecycle != UnitLifecycle::Retired)
+        {
+            let unit: CurrencyUnit = managed
+                .unit
+                .parse()
+                .map_err(|e| anyhow!("bad configured unit {}: {e}", managed.unit))?;
+            units.insert(unit, managed.lifecycle);
+        }
         let unit: CurrencyUnit = app_config
             .mint
             .unit
             .parse()
-            .map_err(|e| anyhow!("bad configured unit: {e}"))?;
+            .map_err(|e| anyhow!("bad primary unit: {e}"))?;
         let method = app_config.mint.method.clone();
         let branch = BranchState::load(state_path).await?;
 
         let backend = Arc::new(BranchBackend::new(
             branch.clone(),
+            units,
             unit.clone(),
             method.clone(),
         ));
@@ -138,7 +154,12 @@ async fn main() -> Result<()> {
         );
 
         web::router(web::WebState::new(
-            branch, mint_rpc, mint_http, app_config, unit,
+            branch,
+            mint_rpc,
+            mint_http,
+            app_config,
+            unit,
+            config_store.clone(),
         ))
     } else {
         tracing::info!(
@@ -178,7 +199,11 @@ fn spawn_rollover_worker(
     mint_http: MintHttpClient,
     branch: BranchState,
 ) {
-    if !config.rollover.enabled {
+    if !config
+        .units
+        .iter()
+        .any(|unit| unit.lifecycle == UnitLifecycle::Active && unit.rollover.enabled)
+    {
         return;
     }
     tokio::spawn(async move {
@@ -200,39 +225,44 @@ async fn reconcile_rollover(
 ) -> Result<()> {
     let keysets = mint_http.list_keysets().await?;
     let now = unix_now();
-    let threshold = config.rollover.rotate_before_expiry_days * 86_400;
-    let active = keysets
+    for managed in config
+        .units
         .iter()
-        .find(|ks| ks.unit == config.mint.unit && ks.active);
+        .filter(|unit| unit.lifecycle == UnitLifecycle::Active && unit.rollover.enabled)
+    {
+        let threshold = managed.rollover.rotate_before_expiry_days * 86_400;
+        let active = keysets
+            .iter()
+            .find(|ks| ks.unit == managed.unit && ks.active);
+        let should_rotate = match active {
+            None => true,
+            Some(KeysetEntry {
+                final_expiry: None, ..
+            }) => true,
+            Some(KeysetEntry {
+                final_expiry: Some(expiry),
+                ..
+            }) => *expiry <= now.saturating_add(threshold),
+        };
 
-    let should_rotate = match active {
-        None => true,
-        Some(KeysetEntry {
-            final_expiry: None, ..
-        }) => true,
-        Some(KeysetEntry {
-            final_expiry: Some(expiry),
-            ..
-        }) => *expiry <= now.saturating_add(threshold),
-    };
-
-    if should_rotate {
-        let final_expiry = now + config.rollover.keyset_lifetime_days * 86_400;
-        let result = mint_rpc
-            .rotate_next_keyset(
-                config.mint.unit.clone(),
-                config.rollover.amounts.clone(),
-                Some(config.rollover.input_fee_ppk),
-                Some(final_expiry),
-            )
-            .await?;
-        tracing::info!(
-            "rotated keyset {} for unit {} with final_expiry {}",
-            result.id,
-            config.mint.unit,
-            final_expiry
-        );
-        branch.notify_ui_change();
+        if should_rotate {
+            let final_expiry = now + managed.rollover.keyset_lifetime_days * 86_400;
+            let result = mint_rpc
+                .rotate_next_keyset(
+                    managed.unit.clone(),
+                    managed.rollover.amounts.clone(),
+                    Some(managed.rollover.input_fee_ppk),
+                    Some(final_expiry),
+                )
+                .await?;
+            tracing::info!(
+                "rotated keyset {} for unit {} with final_expiry {}",
+                result.id,
+                managed.unit,
+                final_expiry
+            );
+            branch.notify_ui_change();
+        }
     }
     Ok(())
 }

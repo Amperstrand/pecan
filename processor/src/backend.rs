@@ -7,6 +7,7 @@
 //! match the ticket are rejected. Requests without a valid ticket are rejected
 //! outright, preserving the operator-initiated-only property of this backend.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,17 +24,20 @@ use serde_json::Value;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
+use crate::config::UnitLifecycle;
 use crate::state::{BranchState, TicketStatus};
 
 /// Top-level field of the wallet's NUT-04 quote request (flattened into
 /// `extra_json` by cdk) that carries the NUT-XX offer ticket.
 pub const TICKET_FIELD: &str = "ticket";
 
-/// Single-method, single-unit payment backend. Everything not matching the
-/// configured `method` is rejected with `UnsupportedPaymentOption`.
+/// Single-method, multi-unit payment backend. Unit lifecycle gates mint and
+/// melt independently so a unit can remain redeemable while new issuance is
+/// disabled.
 pub struct BranchBackend {
     state: BranchState,
-    unit: CurrencyUnit,
+    units: HashMap<CurrencyUnit, UnitLifecycle>,
+    primary_unit: CurrencyUnit,
     method: String,
     stream_active: AtomicBool,
 }
@@ -41,29 +45,49 @@ pub struct BranchBackend {
 impl std::fmt::Debug for BranchBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BranchBackend")
-            .field("unit", &self.unit)
+            .field("units", &self.units)
             .field("method", &self.method)
             .finish()
     }
 }
 
 impl BranchBackend {
-    pub fn new(state: BranchState, unit: CurrencyUnit, method: String) -> Self {
+    pub fn new(
+        state: BranchState,
+        units: HashMap<CurrencyUnit, UnitLifecycle>,
+        primary_unit: CurrencyUnit,
+        method: String,
+    ) -> Self {
         Self {
             state,
-            unit,
+            units,
+            primary_unit,
             method,
             stream_active: AtomicBool::new(false),
         }
     }
 
-    fn check_unit(&self, unit: &CurrencyUnit) -> Result<(), Error> {
-        if unit != &self.unit {
+    fn lifecycle(&self, unit: &CurrencyUnit) -> Result<UnitLifecycle, Error> {
+        let Some(lifecycle) = self.units.get(unit).copied() else {
             tracing::warn!(
-                "rejecting request for unit {unit:?}, this backend serves only {:?}",
-                self.unit
+                "rejecting request for unmanaged unit {unit:?}; managed units are {:?}",
+                self.units.keys().collect::<Vec<_>>()
             );
             return Err(Error::UnsupportedUnit);
+        };
+        Ok(lifecycle)
+    }
+
+    fn check_mint_unit(&self, unit: &CurrencyUnit) -> Result<(), Error> {
+        if !self.lifecycle(unit)?.can_mint() {
+            return Err(Error::UnsupportedPaymentOption);
+        }
+        Ok(())
+    }
+
+    fn check_melt_unit(&self, unit: &CurrencyUnit) -> Result<(), Error> {
+        if !self.lifecycle(unit)?.can_melt() {
+            return Err(Error::UnsupportedPaymentOption);
         }
         Ok(())
     }
@@ -73,7 +97,9 @@ impl BranchBackend {
     /// rejected — quotes exist only by claiming a teller-issued offer.
     fn ticket_from_extra(&self, extra_json: Option<&str>) -> Result<String, Error> {
         let raw = extra_json.ok_or_else(|| {
-            Error::Custom("20010: branch quotes are claimed from a teller offer; missing ticket".into())
+            Error::Custom(
+                "20010: branch quotes are claimed from a teller offer; missing ticket".into(),
+            )
         })?;
         let value: Value = serde_json::from_str(raw)
             .map_err(|e| Error::Custom(format!("quote request metadata is invalid JSON: {e}")))?;
@@ -97,7 +123,10 @@ impl MintPayment for BranchBackend {
         let mut custom = std::collections::HashMap::new();
         custom.insert(self.method.clone(), "{}".to_string());
         Ok(SettingsResponse {
-            unit: self.unit.to_string(),
+            // The pinned CDK gRPC settings message has a legacy singleton unit.
+            // cdk-mintd is patched at build time to register this backend for
+            // every configured [[ln]] unit while requests remain unit-checked.
+            unit: self.primary_unit.to_string(),
             // Mint requires either bolt11 or bolt12 settings in some code paths;
             // advertising None for both is intentional — bolt is not a valid rail here.
             bolt11: None::<Bolt11Settings>,
@@ -121,11 +150,12 @@ impl MintPayment for BranchBackend {
                 // NOTE: the wallet's NUT-20 `pubkey` is consumed by cdk before this call,
                 // so the spec's "MUST NOT create a quote for a ticket without a pubkey"
                 // cannot be enforced here with a stock mint.
-                self.check_unit(opts.amount.unit())?;
+                self.check_mint_unit(opts.amount.unit())?;
                 let ticket_id = self.ticket_from_extra(opts.extra_json.as_deref())?;
+                let unit = opts.amount.unit().to_string();
                 let ticket = self
                     .state
-                    .claim_incoming(&ticket_id, opts.amount.value(), &self.unit.to_string())
+                    .claim_incoming(&ticket_id, opts.amount.value(), &unit)
                     .await
                     .map_err(|e| Error::Custom(e.to_string()))?;
                 Ok(CreateIncomingPaymentResponse {
@@ -148,7 +178,7 @@ impl MintPayment for BranchBackend {
         unit: &CurrencyUnit,
         options: OutgoingPaymentOptions,
     ) -> Result<PaymentQuoteResponse, Self::Err> {
-        self.check_unit(unit)?;
+        self.check_melt_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
                 // See note in create_incoming_payment_request — method not on the wire.
@@ -158,13 +188,13 @@ impl MintPayment for BranchBackend {
                 let ticket_id = opts.request.trim().to_string();
                 let ticket = self
                     .state
-                    .claim_outgoing(&ticket_id, &self.unit.to_string(), opts.quote_id.to_string())
+                    .claim_outgoing(&ticket_id, &unit.to_string(), opts.quote_id.to_string())
                     .await
                     .map_err(|e| Error::Custom(e.to_string()))?;
                 Ok(PaymentQuoteResponse {
                     request_lookup_id: Some(PaymentIdentifier::CustomId(ticket.id)),
-                    amount: Amount::new(ticket.amount, self.unit.clone()),
-                    fee: Amount::new(0, self.unit.clone()),
+                    amount: Amount::new(ticket.amount, unit.clone()),
+                    fee: Amount::new(0, unit.clone()),
                     state: MeltQuoteState::Unpaid,
                     extra_json: None,
                     estimated_blocks: None,
@@ -182,7 +212,7 @@ impl MintPayment for BranchBackend {
         unit: &CurrencyUnit,
         options: OutgoingPaymentOptions,
     ) -> Result<MakePaymentResponse, Self::Err> {
-        self.check_unit(unit)?;
+        self.check_melt_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
                 // See note in create_incoming_payment_request — method not on the wire.
@@ -213,7 +243,7 @@ impl MintPayment for BranchBackend {
                     // The mint will poll check_outgoing_payment until the operator
                     // confirms cash handover via the UI.
                     status,
-                    total_spent: Amount::new(ticket.amount, self.unit.clone()),
+                    total_spent: Amount::new(ticket.amount, unit.clone()),
                 })
             }
             OutgoingPaymentOptions::Bolt11(_)

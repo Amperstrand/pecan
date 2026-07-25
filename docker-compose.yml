@@ -3,7 +3,7 @@
 #   processor — implements the "branch" custom payment method over gRPC and
 #               serves the operator web UI on :9090. cdk-mintd routes all
 #               mint/melt for the custom unit (ora, by default) to it.
-#   mint      — stock cdk-mintd on :8089. Talks to the processor's gRPC and,
+#   mint      — pinned cdk-mintd on :8089. Talks to the processor's gRPC and,
 #               for keyset management, exposes its management RPC on :8091.
 #
 # Both run from one image (two binaries). Bring it up with:
@@ -40,12 +40,7 @@ services:
   mint:
     image: custom-unit-mint:latest
     container_name: custom-unit-mint
-    command:
-      [
-        "sh",
-        "-c",
-        "while [ ! -s /var/lib/custom-unit-mint/config/mint.toml ]; do echo 'waiting for browser setup at http://localhost:${UI_PORT:-9090}'; sleep 2; done; exec cdk-mintd --config /var/lib/custom-unit-mint/config/mint.toml --work-dir /var/lib/cdk-mintd",
-      ]
+    command: ["mint-supervisor"]
     ports:
       - "${MINT_PORT:-8089}:8089"        # mint HTTP API (NUT endpoints)
     environment:

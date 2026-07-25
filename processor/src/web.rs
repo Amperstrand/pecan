@@ -27,8 +27,8 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::clients::{MintHttpClient, MintRpcClient};
 use crate::config::{
-    default_amounts, generate_mnemonic, parse_amounts, AppConfig, ConfigStore, SetupDraft,
-    PASSWORD_MIN_LENGTH,
+    default_amounts, generate_mnemonic, parse_amounts, AppConfig, ConfigStore, RolloverPolicy,
+    SetupDraft, UnitLifecycle, PASSWORD_MIN_LENGTH,
 };
 use crate::offer::QuoteOffer;
 use crate::state::{BranchState, Ticket, TicketKind, TicketStatus};
@@ -44,6 +44,7 @@ pub struct WebState {
     pub method: Arc<String>,
     pub mint_public_url: Arc<String>,
     pub default_amounts: Arc<Vec<u64>>,
+    pub config_store: ConfigStore,
 }
 
 impl WebState {
@@ -53,6 +54,7 @@ impl WebState {
         mint_http: MintHttpClient,
         config: AppConfig,
         unit: CurrencyUnit,
+        config_store: ConfigStore,
     ) -> Self {
         let method = config.mint.method.clone();
         let mint_public_url = config.endpoints.public_url.clone();
@@ -67,6 +69,7 @@ impl WebState {
             method: Arc::new(method),
             mint_public_url: Arc::new(mint_public_url),
             default_amounts: Arc::new(default_amounts),
+            config_store,
         }
     }
 }
@@ -101,6 +104,9 @@ pub fn router(state: WebState) -> Router {
         .route("/api/tickets/{id}/mark-paid", post(api_mark_paid))
         .route("/api/tickets/{id}/mark-failed", post(api_mark_failed))
         .route("/api/keysets/rotate", post(api_rotate_keyset))
+        .route("/api/units", post(api_add_unit))
+        .route("/api/units/{unit}/lifecycle", post(api_set_unit_lifecycle))
+        .route("/api/settings/identity", post(api_update_identity))
         .route("/quotes", post(create_quote))
         .route("/tickets/{id}/mark-paid", post(mark_paid))
         .route("/tickets/{id}/mark-failed", post(mark_failed))
@@ -309,10 +315,14 @@ struct ApiAppSnapshot {
     keysets: ApiKeysetsSnapshot,
     active_keyset: Option<crate::clients::KeysetEntry>,
     summary: MintSummary,
+    unit_summaries: Vec<ApiUnitSummary>,
     circulation: Vec<CirculationPoint>,
     tickets: Vec<ApiTicket>,
     active_tickets: Vec<ApiTicket>,
     recent_done: Vec<ApiTicket>,
+    units: Vec<ApiManagedUnit>,
+    capabilities: Vec<ApiCapability>,
+    consistency: ApiConsistency,
 }
 
 #[derive(Serialize)]
@@ -340,6 +350,43 @@ struct ApiRollover {
     rotate_before_expiry_days: u64,
     input_fee_ppk: u64,
     amounts: Vec<u64>,
+}
+
+#[derive(Serialize)]
+struct ApiManagedUnit {
+    unit: String,
+    lifecycle: UnitLifecycle,
+    configured_at: u64,
+    rollover: ApiRollover,
+    keyset_count: usize,
+    active_keyset: Option<crate::clients::KeysetEntry>,
+    can_mint: bool,
+    can_melt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct ApiCapability {
+    unit: String,
+    method: String,
+    mint: bool,
+    melt: bool,
+    managed: bool,
+}
+
+#[derive(Serialize)]
+struct ApiConsistency {
+    ok: bool,
+    issues: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ApiUnitSummary {
+    unit: String,
+    mint_count: usize,
+    melt_count: usize,
+    minted_amount: u64,
+    melted_amount: u64,
+    net_issued: i128,
 }
 
 #[derive(Serialize)]
@@ -405,12 +452,18 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
 
     let mut tickets = state.branch.list_all().await;
     tickets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let summary = MintSummary::from_tickets(&tickets);
+    let primary_tickets = tickets
+        .iter()
+        .filter(|ticket| ticket.unit == state.config.mint.unit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let summary = MintSummary::from_tickets(&primary_tickets);
     let now = unix_now();
 
     let info_health = state.mint_http.get_info().await;
     let rpc_health = state.mint_rpc.health().await;
     let keysets_result = state.mint_http.list_keysets().await;
+    let keyset_items = keysets_result.as_ref().cloned().unwrap_or_default();
     let active_keyset = keysets_result.as_ref().ok().and_then(|keysets| {
         keysets
             .iter()
@@ -446,6 +499,112 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         .map(|ticket| ApiTicket::from_ticket(ticket, &state))
         .collect();
 
+    let observed_capabilities = info_health
+        .as_ref()
+        .map(|info| capabilities_from_info(info))
+        .unwrap_or_default();
+    let mut capabilities = observed_capabilities.clone();
+    for managed in &state.config.units {
+        if managed.lifecycle == UnitLifecycle::Retired {
+            continue;
+        }
+        let expected_mint = managed.lifecycle.can_mint();
+        let expected_melt = managed.lifecycle.can_melt();
+        if let Some(existing) = capabilities
+            .iter_mut()
+            .find(|pair| pair.unit == managed.unit && pair.method == state.config.mint.method)
+        {
+            existing.managed = true;
+        } else {
+            capabilities.push(ApiCapability {
+                unit: managed.unit.clone(),
+                method: state.config.mint.method.clone(),
+                mint: expected_mint,
+                melt: expected_melt,
+                managed: true,
+            });
+        }
+    }
+    capabilities.sort();
+
+    let units = state
+        .config
+        .units
+        .iter()
+        .map(|managed| {
+            let unit_keysets: Vec<_> = keyset_items
+                .iter()
+                .filter(|keyset| keyset.unit == managed.unit)
+                .cloned()
+                .collect();
+            ApiManagedUnit {
+                unit: managed.unit.clone(),
+                lifecycle: managed.lifecycle,
+                configured_at: managed.configured_at,
+                rollover: api_rollover(&managed.rollover),
+                keyset_count: unit_keysets.len(),
+                active_keyset: unit_keysets.into_iter().find(|keyset| keyset.active),
+                can_mint: managed.lifecycle.can_mint(),
+                can_melt: managed.lifecycle.can_melt(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut consistency_issues = Vec::new();
+    if info_health.is_ok() {
+        for managed in &state.config.units {
+            let observed = observed_capabilities
+                .iter()
+                .find(|pair| pair.unit == managed.unit && pair.method == state.config.mint.method);
+            let observed_mint = observed.is_some_and(|pair| pair.mint);
+            let observed_melt = observed.is_some_and(|pair| pair.melt);
+            if observed_mint != managed.lifecycle.can_mint()
+                || observed_melt != managed.lifecycle.can_melt()
+            {
+                consistency_issues.push(format!(
+                    "{} · {} is configured for mint={} melt={} but advertises mint={} melt={}",
+                    managed.unit,
+                    state.config.mint.method,
+                    managed.lifecycle.can_mint(),
+                    managed.lifecycle.can_melt(),
+                    observed_mint,
+                    observed_melt
+                ));
+            }
+            if managed.lifecycle != UnitLifecycle::Retired
+                && !keyset_items
+                    .iter()
+                    .any(|keyset| keyset.unit == managed.unit && keyset.active)
+            {
+                consistency_issues.push(format!(
+                    "{} has no active keyset; teller operations are unavailable",
+                    managed.unit
+                ));
+            }
+        }
+    }
+    let unit_summaries = state
+        .config
+        .units
+        .iter()
+        .map(|managed| {
+            let matching = tickets
+                .iter()
+                .filter(|ticket| ticket.unit == managed.unit)
+                .cloned()
+                .collect::<Vec<_>>();
+            let summary = MintSummary::from_tickets(&matching);
+            ApiUnitSummary {
+                unit: managed.unit.clone(),
+                mint_count: summary.mint_count,
+                melt_count: summary.melt_count,
+                minted_amount: summary.minted_amount,
+                melted_amount: summary.melted_amount,
+                net_issued: summary.net_issued,
+            }
+        })
+        .collect();
+
     Json(ApiAppSnapshot {
         now,
         mint: ApiMintConfig {
@@ -462,13 +621,7 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
             processor_grpc_addr: state.config.endpoints.processor_grpc_addr.clone(),
             processor_grpc_port: state.config.endpoints.processor_grpc_port,
         },
-        rollover: ApiRollover {
-            enabled: state.config.rollover.enabled,
-            keyset_lifetime_days: state.config.rollover.keyset_lifetime_days,
-            rotate_before_expiry_days: state.config.rollover.rotate_before_expiry_days,
-            input_fee_ppk: state.config.rollover.input_fee_ppk,
-            amounts: state.config.rollover.amounts.clone(),
-        },
+        rollover: api_rollover(&state.config.rollover),
         default_amounts: (*state.default_amounts).clone(),
         health: ApiHealth {
             mint_http: health_item(info_health.as_ref().map(|_| ())),
@@ -486,12 +639,66 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         keysets,
         active_keyset,
         summary,
-        circulation: circulation_points(&tickets),
+        unit_summaries,
+        circulation: circulation_points(&primary_tickets),
         tickets: api_tickets,
         active_tickets,
         recent_done,
+        units,
+        capabilities,
+        consistency: ApiConsistency {
+            ok: consistency_issues.is_empty(),
+            issues: consistency_issues,
+        },
     })
     .into_response()
+}
+
+fn api_rollover(policy: &RolloverPolicy) -> ApiRollover {
+    ApiRollover {
+        enabled: policy.enabled,
+        keyset_lifetime_days: policy.keyset_lifetime_days,
+        rotate_before_expiry_days: policy.rotate_before_expiry_days,
+        input_fee_ppk: policy.input_fee_ppk,
+        amounts: policy.amounts.clone(),
+    }
+}
+
+fn capabilities_from_info(info: &serde_json::Value) -> Vec<ApiCapability> {
+    let mut pairs = std::collections::BTreeMap::<(String, String), (bool, bool)>::new();
+    for (nut, mint_direction) in [("4", true), ("5", false)] {
+        let methods = info
+            .get("nuts")
+            .and_then(|nuts| nuts.get(nut))
+            .and_then(|settings| settings.get("methods"))
+            .and_then(serde_json::Value::as_array);
+        for method in methods.into_iter().flatten() {
+            let Some(unit) = method.get("unit").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(method_name) = method.get("method").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let entry = pairs
+                .entry((unit.to_string(), method_name.to_string()))
+                .or_insert((false, false));
+            if mint_direction {
+                entry.0 = true;
+            } else {
+                entry.1 = true;
+            }
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|((unit, method), (mint, melt))| ApiCapability {
+            unit,
+            method,
+            mint,
+            melt,
+            managed: false,
+        })
+        .collect()
 }
 
 fn health_item<T>(result: Result<T, &anyhow::Error>) -> ApiHealthItem {
@@ -680,6 +887,177 @@ async fn api_rotate_keyset(
         Ok(()) => Json(ApiMessage { message: "rotated" }).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
+}
+
+#[derive(Deserialize)]
+struct AddUnitForm {
+    unit: String,
+    keyset_lifetime_days: u64,
+    rotate_before_expiry_days: u64,
+    #[serde(default)]
+    input_fee_ppk: u64,
+    amounts: String,
+}
+
+#[derive(Deserialize)]
+struct UnitLifecycleForm {
+    lifecycle: UnitLifecycle,
+}
+
+#[derive(Deserialize)]
+struct IdentityForm {
+    name: String,
+    description: String,
+    #[serde(default)]
+    description_long: String,
+    public_url: String,
+}
+
+async fn api_add_unit(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(form): Json<AddUnitForm>,
+) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    let amounts = match parse_amounts(&form.amounts) {
+        Ok(amounts) => amounts,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, format!("amounts: {e}")),
+    };
+    let mut config = (*state.config).clone();
+    let policy = RolloverPolicy {
+        enabled: true,
+        keyset_lifetime_days: form.keyset_lifetime_days,
+        rotate_before_expiry_days: form.rotate_before_expiry_days,
+        input_fee_ppk: form.input_fee_ppk,
+        amounts,
+    };
+    if let Err(e) = config.add_unit(&form.unit, policy, unix_now()) {
+        return api_error(StatusCode::BAD_REQUEST, e.to_string());
+    }
+    match persist_config_and_restart(&state, &config).await {
+        Ok(()) => Json(ApiMessage {
+            message: "restarting",
+        })
+        .into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn api_set_unit_lifecycle(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath(unit): AxumPath<String>,
+    Json(form): Json<UnitLifecycleForm>,
+) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    if state
+        .branch
+        .active_tickets()
+        .await
+        .iter()
+        .any(|ticket| ticket.unit == unit)
+    {
+        return api_error(
+            StatusCode::CONFLICT,
+            format!("finish the active {unit} quote before changing its lifecycle"),
+        );
+    }
+    if form.lifecycle == UnitLifecycle::Retired {
+        let keysets = match state.mint_http.list_keysets().await {
+            Ok(keysets) => keysets,
+            Err(e) => {
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    format!("could not verify {unit} keyset expiry: {e}"),
+                )
+            }
+        };
+        let now = unix_now();
+        let blocking = keysets.iter().filter(|keyset| {
+            keyset.unit == unit && keyset.final_expiry.is_none_or(|expiry| expiry > now)
+        });
+        let count = blocking.count();
+        if count > 0 {
+            return api_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "{unit} cannot be retired: {count} keyset(s) have not reached a final expiry; keep the unit redemption-only"
+                ),
+            );
+        }
+    }
+    let mut config = (*state.config).clone();
+    if let Err(e) = config.set_unit_lifecycle(&unit, form.lifecycle) {
+        return api_error(StatusCode::BAD_REQUEST, e.to_string());
+    }
+    match persist_config_and_restart(&state, &config).await {
+        Ok(()) => Json(ApiMessage {
+            message: "restarting",
+        })
+        .into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn api_update_identity(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(form): Json<IdentityForm>,
+) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    if form.name.trim().is_empty() || form.description.trim().is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "mint name and short description are required",
+        );
+    }
+    let public_url = form.public_url.trim().trim_end_matches('/');
+    if !(public_url.starts_with("http://") || public_url.starts_with("https://")) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "wallet-facing URL must start with http:// or https://",
+        );
+    }
+    let mut config = (*state.config).clone();
+    config.mint.name = form.name.trim().to_string();
+    config.mint.description = form.description.trim().to_string();
+    config.mint.description_long = if form.description_long.trim().is_empty() {
+        config.mint.description.clone()
+    } else {
+        form.description_long.trim().to_string()
+    };
+    config.endpoints.public_url = public_url.to_string();
+    match persist_config_and_restart(&state, &config).await {
+        Ok(()) => Json(ApiMessage {
+            message: "restarting",
+        })
+        .into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn persist_config_and_restart(state: &WebState, config: &AppConfig) -> Result<(), String> {
+    state
+        .config_store
+        .save(config)
+        .await
+        .map_err(|e| format!("save lifecycle config: {e}"))?;
+    state
+        .config_store
+        .write_mint_config(config)
+        .await
+        .map_err(|e| format!("write mint config: {e}"))?;
+    tokio::spawn(async {
+        sleep(Duration::from_millis(900)).await;
+        std::process::exit(0);
+    });
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1700,6 +2078,8 @@ struct CreateQuoteForm {
     kind: String,
     amount: u64,
     #[serde(default)]
+    unit: String,
+    #[serde(default)]
     description: String,
 }
 
@@ -1719,9 +2099,24 @@ async fn create_quote_inner(state: &WebState, form: CreateQuoteForm) -> Result<T
         s => Some(s.to_string()),
     };
 
+    let unit = if form.unit.trim().is_empty() {
+        state.config.mint.unit.as_str()
+    } else {
+        form.unit.trim()
+    };
+    let managed = state
+        .config
+        .managed_unit(unit)
+        .ok_or_else(|| format!("unit {unit} is not managed by this stack"))?;
     let (kind, operation) = match form.kind.as_str() {
-        "mint" => (TicketKind::Incoming, "mint"),
-        "melt" => (TicketKind::Outgoing, "melt"),
+        "mint" if managed.lifecycle.can_mint() => (TicketKind::Incoming, "mint"),
+        "melt" if managed.lifecycle.can_melt() => (TicketKind::Outgoing, "melt"),
+        "mint" => {
+            return Err(format!(
+                "{unit} is redemption-only; new mint offers are disabled"
+            ))
+        }
+        "melt" => return Err(format!("{unit} is retired; melt offers are disabled")),
         other => return Err(format!("unknown quote flow: {other}")),
     };
 
@@ -1732,7 +2127,7 @@ async fn create_quote_inner(state: &WebState, form: CreateQuoteForm) -> Result<T
     let mut ticket = Ticket::new_offer(
         kind,
         form.amount,
-        state.config.mint.unit.clone(),
+        unit.to_string(),
         description.clone(),
         Some(expires_at),
     );
@@ -1740,7 +2135,7 @@ async fn create_quote_inner(state: &WebState, form: CreateQuoteForm) -> Result<T
         mint_url: state.mint_public_url.trim_end_matches('/').to_string(),
         operation,
         method: state.method.as_str().to_string(),
-        unit: state.config.mint.unit.clone(),
+        unit: unit.to_string(),
         ticket: ticket.id.clone(),
         amount: Some(form.amount),
         description,
@@ -1944,15 +2339,53 @@ where
 }
 
 async fn rotate_keyset_inner(state: &WebState, form: RotateForm) -> Result<(), String> {
+    let managed = state
+        .config
+        .managed_unit(form.unit.trim())
+        .ok_or_else(|| format!("unit {} is not managed by this stack", form.unit.trim()))?;
+    if managed.lifecycle != UnitLifecycle::Active {
+        return Err(format!(
+            "{} is not active; keyset rotation is disabled while redemption-only or retired",
+            managed.unit
+        ));
+    }
     let amounts: Result<Vec<u64>, _> = form
         .amounts
         .split(',')
         .map(|s| s.trim().parse::<u64>())
         .collect();
     let amounts = amounts.map_err(|e| format!("amounts: {e}"))?;
+    if amounts.is_empty() || amounts.contains(&0) {
+        return Err("amounts must contain positive denominations".to_string());
+    }
+    if amounts != managed.rollover.amounts {
+        return Err(format!(
+            "amounts must match the persisted {} unit policy",
+            managed.unit
+        ));
+    }
+    let input_fee_ppk = form.input_fee_ppk.unwrap_or(managed.rollover.input_fee_ppk);
+    if input_fee_ppk != managed.rollover.input_fee_ppk {
+        return Err(format!(
+            "input fee must match the persisted {} unit policy",
+            managed.unit
+        ));
+    }
+    let now = unix_now();
+    let final_expiry = form.final_expiry.unwrap_or_else(|| {
+        now.saturating_add(managed.rollover.keyset_lifetime_days.saturating_mul(86_400))
+    });
+    if final_expiry <= now {
+        return Err("final expiry must be in the future".to_string());
+    }
     state
         .mint_rpc
-        .rotate_next_keyset(form.unit, amounts, form.input_fee_ppk, form.final_expiry)
+        .rotate_next_keyset(
+            managed.unit.clone(),
+            amounts,
+            Some(input_fee_ppk),
+            Some(final_expiry),
+        )
         .await
         .map_err(|e| format!("rotate: {e}"))?;
     Ok(())
