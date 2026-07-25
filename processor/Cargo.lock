@@ -365,8 +365,8 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cashu"
-version = "0.16.0"
-source = "git+https://github.com/cashubtc/cdk?rev=bc7e441ef2fc4cb0d57b84c4757ee023704c922f#bc7e441ef2fc4cb0d57b84c4757ee023704c922f"
+version = "0.17.2"
+source = "git+https://github.com/cashubtc/cdk?rev=6132607495ae0741e412a63f2acc34e4ccddfc55#6132607495ae0741e412a63f2acc34e4ccddfc55"
 dependencies = [
  "bitcoin",
  "cbor-diag",
@@ -421,8 +421,8 @@ dependencies = [
 
 [[package]]
 name = "cdk"
-version = "0.16.0"
-source = "git+https://github.com/cashubtc/cdk?rev=bc7e441ef2fc4cb0d57b84c4757ee023704c922f#bc7e441ef2fc4cb0d57b84c4757ee023704c922f"
+version = "0.17.2"
+source = "git+https://github.com/cashubtc/cdk?rev=6132607495ae0741e412a63f2acc34e4ccddfc55#6132607495ae0741e412a63f2acc34e4ccddfc55"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -483,8 +483,8 @@ dependencies = [
 
 [[package]]
 name = "cdk-common"
-version = "0.16.0"
-source = "git+https://github.com/cashubtc/cdk?rev=bc7e441ef2fc4cb0d57b84c4757ee023704c922f#bc7e441ef2fc4cb0d57b84c4757ee023704c922f"
+version = "0.17.2"
+source = "git+https://github.com/cashubtc/cdk?rev=6132607495ae0741e412a63f2acc34e4ccddfc55#6132607495ae0741e412a63f2acc34e4ccddfc55"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -516,8 +516,8 @@ dependencies = [
 
 [[package]]
 name = "cdk-http-client"
-version = "0.16.0"
-source = "git+https://github.com/cashubtc/cdk?rev=bc7e441ef2fc4cb0d57b84c4757ee023704c922f#bc7e441ef2fc4cb0d57b84c4757ee023704c922f"
+version = "0.17.2"
+source = "git+https://github.com/cashubtc/cdk?rev=6132607495ae0741e412a63f2acc34e4ccddfc55#6132607495ae0741e412a63f2acc34e4ccddfc55"
 dependencies = [
  "futures",
  "futures-channel",
@@ -537,8 +537,8 @@ dependencies = [
 
 [[package]]
 name = "cdk-mint-rpc"
-version = "0.16.0"
-source = "git+https://github.com/cashubtc/cdk?rev=bc7e441ef2fc4cb0d57b84c4757ee023704c922f#bc7e441ef2fc4cb0d57b84c4757ee023704c922f"
+version = "0.17.2"
+source = "git+https://github.com/cashubtc/cdk?rev=6132607495ae0741e412a63f2acc34e4ccddfc55#6132607495ae0741e412a63f2acc34e4ccddfc55"
 dependencies = [
  "anyhow",
  "cdk",
@@ -560,8 +560,8 @@ dependencies = [
 
 [[package]]
 name = "cdk-payment-processor"
-version = "0.16.0"
-source = "git+https://github.com/cashubtc/cdk?rev=bc7e441ef2fc4cb0d57b84c4757ee023704c922f#bc7e441ef2fc4cb0d57b84c4757ee023704c922f"
+version = "0.17.2"
+source = "git+https://github.com/cashubtc/cdk?rev=6132607495ae0741e412a63f2acc34e4ccddfc55#6132607495ae0741e412a63f2acc34e4ccddfc55"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -591,8 +591,8 @@ dependencies = [
 
 [[package]]
 name = "cdk-signatory"
-version = "0.16.0"
-source = "git+https://github.com/cashubtc/cdk?rev=bc7e441ef2fc4cb0d57b84c4757ee023704c922f#bc7e441ef2fc4cb0d57b84c4757ee023704c922f"
+version = "0.17.2"
+source = "git+https://github.com/cashubtc/cdk?rev=6132607495ae0741e412a63f2acc34e4ccddfc55#6132607495ae0741e412a63f2acc34e4ccddfc55"
 dependencies = [
  "anyhow",
  "async-trait",

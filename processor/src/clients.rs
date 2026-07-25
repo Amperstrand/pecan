@@ -8,15 +8,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use cdk_common::grpc::{VersionInterceptor, VERSION_HEADER};
-use cdk_common::nuts::CurrencyUnit;
 use cdk_mint_rpc::cdk_mint_client::CdkMintClient;
 use cdk_mint_rpc::RotateNextKeysetRequest;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tonic::transport::Channel;
 use tonic::Request;
 
-use crate::backend::{TELLER_AMOUNT_FIELD, TELLER_MELT_REQUEST, TELLER_QUOTE_MARKER};
 
 #[derive(Clone, Debug)]
 pub struct MintRpcClient {
@@ -111,23 +109,6 @@ struct KeysetsResponse {
     keysets: Vec<KeysetEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct MintQuoteCreated {
-    pub quote: String,
-    pub request: String,
-    #[allow(dead_code)]
-    pub expiry: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MeltQuoteCreated {
-    pub quote: String,
-    #[allow(dead_code)]
-    pub request: Option<String>,
-    #[allow(dead_code)]
-    pub expiry: u64,
-}
-
 impl MintHttpClient {
     pub fn new(base: impl Into<String>) -> Self {
         Self {
@@ -165,69 +146,4 @@ impl MintHttpClient {
         Ok(r.json().await?)
     }
 
-    pub async fn create_mint_quote(
-        &self,
-        method: &str,
-        amount: u64,
-        unit: &CurrencyUnit,
-        description: Option<String>,
-    ) -> Result<MintQuoteCreated> {
-        let mut body = json!({
-            "amount": amount,
-            "unit": unit.to_string(),
-            TELLER_QUOTE_MARKER: true,
-        });
-        if let Some(description) = description {
-            body["description"] = Value::String(description);
-        }
-        self.post_json(
-            &format!("/v1/mint/quote/{method}"),
-            body,
-            "create_mint_quote",
-        )
-        .await
-    }
-
-    pub async fn create_melt_quote(
-        &self,
-        method: &str,
-        amount: u64,
-        unit: &CurrencyUnit,
-    ) -> Result<MeltQuoteCreated> {
-        let body = json!({
-            "method": method,
-            "request": TELLER_MELT_REQUEST,
-            "unit": unit.to_string(),
-            TELLER_AMOUNT_FIELD: amount,
-            TELLER_QUOTE_MARKER: true,
-        });
-        self.post_json(
-            &format!("/v1/melt/quote/{method}"),
-            body,
-            "create_melt_quote",
-        )
-        .await
-    }
-
-    async fn post_json<T: for<'de> Deserialize<'de>>(
-        &self,
-        path: &str,
-        body: Value,
-        op: &str,
-    ) -> Result<T> {
-        let base = self.base.trim_end_matches('/');
-        let r = self
-            .http
-            .post(format!("{base}{path}"))
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("POST {base}{path}"))?;
-        let status = r.status();
-        if !status.is_success() {
-            let detail = r.text().await.unwrap_or_default();
-            return Err(anyhow!("{op}: HTTP {status}: {detail}"));
-        }
-        Ok(r.json().await?)
-    }
 }

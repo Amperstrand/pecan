@@ -1,5 +1,5 @@
 export type TicketKind = "incoming" | "outgoing"
-export type TicketStatus = "waiting" | "pending" | "paid" | "failed"
+export type TicketStatus = "offered" | "waiting" | "pending" | "paid" | "failed"
 
 export interface HealthItem {
   ok: boolean
@@ -15,10 +15,52 @@ export interface KeysetEntry {
   final_expiry?: number | null
 }
 
+export type UnitLifecycle = "active" | "redemption_only" | "retired"
+
+export interface RolloverPolicy {
+  enabled: boolean
+  keyset_lifetime_days: number
+  rotate_before_expiry_days: number
+  input_fee_ppk: number
+  amounts: number[]
+}
+
+export interface ManagedUnit {
+  unit: string
+  lifecycle: UnitLifecycle
+  configured_at: number
+  rollover: RolloverPolicy
+  keyset_count: number
+  active_keyset?: KeysetEntry | null
+  can_mint: boolean
+  can_melt: boolean
+}
+
+export interface Capability {
+  unit: string
+  method: string
+  mint: boolean
+  melt: boolean
+  managed: boolean
+}
+
+export interface ConsistencyState {
+  ok: boolean
+  issues: string[]
+}
+
+export interface UnitSummary {
+  unit: string
+  mint_count: number
+  melt_count: number
+  minted_amount: number
+  melted_amount: number
+  net_issued: number
+}
+
 export interface Ticket {
   id: string
   short_id: string
-  quote_id?: string | null
   kind: TicketKind
   kind_label: string
   amount: number
@@ -27,10 +69,15 @@ export interface Ticket {
   status_label: string
   created_at: number
   paid_at?: number | null
+  expires_at?: number | null
   description?: string | null
   notes?: string | null
-  quote_url?: string | null
+  /** Serialized NUT-XX quote offer (`cquoteA...`) — the only thing shown to the wallet. */
+  offer?: string | null
+  /** QR of the offer; present while the offer is unclaimed. */
   qr_svg?: string | null
+  /** Payout verification code for funded cash-dispense tickets. */
+  verification_code?: string | null
 }
 
 export interface CirculationPoint {
@@ -58,13 +105,7 @@ export interface AppSnapshot {
     processor_grpc_addr: string
     processor_grpc_port: number
   }
-  rollover: {
-    enabled: boolean
-    keyset_lifetime_days: number
-    rotate_before_expiry_days: number
-    input_fee_ppk: number
-    amounts: number[]
-  }
+  rollover: RolloverPolicy
   default_amounts: number[]
   health: {
     mint_http: HealthItem
@@ -84,10 +125,14 @@ export interface AppSnapshot {
     melted_amount: number
     net_issued: number
   }
+  unit_summaries: UnitSummary[]
   circulation: CirculationPoint[]
   tickets: Ticket[]
   active_tickets: Ticket[]
   recent_done: Ticket[]
+  units: ManagedUnit[]
+  capabilities: Capability[]
+  consistency: ConsistencyState
 }
 
 export interface SetupDefaults {
