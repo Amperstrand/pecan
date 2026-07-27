@@ -15,12 +15,17 @@ Open:
 
 | Surface | URL | Purpose |
 |---|---|---|
-| Operator UI | http://localhost:9090 | setup, teller workflow, dashboard, keysets |
-| Mint API | http://localhost:8089 | wallet-facing Cashu API after setup |
+| Operator UI | http://localhost:9090 | operator console and teller workflow |
+| Mint API | http://localhost:8089 | wallet-facing Cashu API |
 
-First build compiles CDK from source. On first launch, open the operator UI and
-complete browser setup. The mint container waits until setup writes
-`mint.toml`, then starts automatically.
+First build compiles CDK from source. There is no setup wizard: the first boot
+bootstraps a complete configuration (generated recovery phrase, unit `ora`,
+method `branch`) and the mint starts automatically. Sign in with the demo
+credentials **`admin` / `admin`** and change the password from the console's
+**Access** tab before real use — the UI warns until you do. Everything chosen
+at bootstrap (identity, wallet-facing URL, keyset policy, users) stays editable
+from the console; only the recovery seed is immutable. Back up the recovery
+phrase from **Mint → Reveal recovery phrase**.
 
 To use different host ports:
 
@@ -37,33 +42,40 @@ docker compose up --build --force-recreate -d
 
 ## What The UI Does
 
-- First-run mint provisioning: name, unit, method, wallet-facing URL, recovery
-  phrase, operator password, and keyset expiry policy.
-- Teller workflow for one active branch quote at a time.
-- Manual cash settlement for mints and melts.
-- Keyset inventory and rotation through `cdk-mintd` management RPC.
-- Multi-unit branch configuration with explicit **Active**, **Redemption only**,
-  and **Retired** lifecycle migrations.
-- Read-only discovery of every method/unit pair advertised by the mint.
-- Dashboard health, settled activity, and circulating ecash over time.
+Two pages, monochrome:
+
+- **Teller** (`/teller`) — one quote offer at a time. Create a deposit or
+  withdrawal offer (NUT-XX `cquoteA…`), show the QR, and settle with at most
+  two big buttons per step: interrupt (outline, left) or proceed (solid,
+  right).
+- **Operator Console** (`/`) — everything else, in four tabs:
+  - **Overview**: health, circulating ecash, unit balances, settled activity.
+  - **Units**: add units, edit each unit's keyset policy, rotate keysets, and
+    migrate lifecycles (**Active**, **Redemption only**, **Retired**) for the
+    branch payment method. Units advertised by the mint but not managed here
+    appear read-only.
+  - **Access**: the user database — add or delete operators, reset passwords,
+    change your own.
+  - **Mint**: wallet-facing identity, fixed endpoints, and recovery-phrase
+    reveal (requires re-entering your password).
+
+Config changes restart the stack automatically; the console waits for it to
+come back and sessions survive the restart.
 
 ## Settlement Flow
 
-Minting:
+Deposit (mint):
 
-1. Teller creates a **Cash deposit** quote.
-2. Wallet scans the quote QR code.
-3. Customer pays cash.
-4. Teller clicks **Cash received**.
-5. Wallet receives ecash from the mint.
+1. Teller creates a **Deposit** offer; the wallet scans and claims it.
+2. Customer hands over cash.
+3. Teller presses **Cash received**; the wallet receives ecash.
 
-Melting:
+Withdrawal (melt):
 
-1. Teller creates a **Cash dispense** quote.
-2. Wallet scans the quote QR code and submits proofs.
-3. Proofs go pending.
-4. Teller hands over cash and clicks **Cash handed over**.
-5. The mint finalizes the melt.
+1. Teller creates a **Withdraw** offer; the wallet claims it and commits
+   proofs (the screen says when it is safe to pay out).
+2. Teller compares the payment code shown in the customer's wallet, hands
+   over cash, and presses **Cash paid out**; the mint finalizes the melt.
 
 ## Persistence
 
@@ -71,9 +83,9 @@ Docker Compose uses named volumes:
 
 | Volume | Data |
 |---|---|
-| `config-data` | generated setup config and `mint.toml` |
+| `config-data` | generated config (`setup.json`), `mint.toml`, user accounts (`users.json`) |
 | `mint-data` | `cdk-mintd` database |
-| `processor-data` | branch ticket JSON store |
+| `processor-data` | branch ticket store, login sessions, config backup |
 
 Normal rebuilds and recreates keep these volumes. To reset everything for a
 fresh local demo:
@@ -89,9 +101,13 @@ final expiry.
 
 ## Security Notes
 
-- Back up the recovery phrase from setup. It restores the mint signing keys.
-- Use a strong operator password. Sessions are single-operator and expire, but
-  this is not a multi-user admin system.
+- Change the demo `admin`/`admin` password immediately; the console banner
+  clears once you do. New and changed passwords must be at least 12 characters
+  with a letter, a number, and a symbol.
+- Back up the recovery phrase (**Mint → Reveal recovery phrase**). It restores
+  the mint signing keys and cannot be changed.
+- All users have full operator access; there are no roles. Instances upgraded
+  from the single-password era keep their old password as user `admin`.
 - The mint-to-processor gRPC link is plaintext inside the Compose network.
   Add TLS before running it across an untrusted network.
 

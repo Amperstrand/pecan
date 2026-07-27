@@ -1,55 +1,59 @@
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
+import { Loader2 } from "lucide-react"
+
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-sm text-sm font-medium transition-[background-color,border-color,color,transform] duration-150 ease-out disabled:pointer-events-none disabled:opacity-55 data-[loading=true]:pointer-events-none data-[loading=true]:opacity-75 [&_svg]:size-4 [&_svg]:shrink-0 active:translate-y-px",
+  "inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium outline-none transition-all focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
-        primary:
-          "border border-primary bg-primary text-primary-foreground hover:bg-primary/90",
-        secondary:
-          "border border-border-strong bg-surface text-foreground hover:bg-surface-muted",
-        ghost:
-          "border border-transparent bg-transparent text-muted-foreground hover:bg-surface-muted hover:text-foreground",
-        danger:
-          "border border-border-strong bg-transparent text-danger hover:border-danger hover:bg-danger hover:text-white",
-        success:
-          "border border-success bg-success text-white hover:bg-success/90",
+        default: "bg-primary text-primary-foreground shadow-xs hover:bg-primary/90",
+        outline:
+          "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
+        secondary: "bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
+        link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
-        sm: "h-8 px-3 text-xs",
-        md: "h-9 px-4",
-        lg: "h-10 px-5",
-        icon: "size-9 p-0",
+        default: "h-9 px-4 py-2 has-[>svg]:px-3",
+        sm: "h-8 gap-1.5 rounded-md px-3 has-[>svg]:px-2.5",
+        lg: "h-10 rounded-md px-6 has-[>svg]:px-4",
+        xl: "h-12 rounded-md px-6 text-base has-[>svg]:px-5",
+        icon: "size-9",
       },
     },
     defaultVariants: {
-      variant: "secondary",
-      size: "md",
+      variant: "default",
+      size: "default",
     },
   },
 )
 
-export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
-  loading?: boolean
-}
-
-const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, loading, children, ...props }, ref) => (
+function Button({
+  className,
+  variant,
+  size,
+  loading,
+  disabled,
+  children,
+  ...props
+}: React.ComponentProps<"button"> &
+  VariantProps<typeof buttonVariants> & {
+    loading?: boolean
+  }) {
+  return (
     <button
+      data-slot="button"
       className={cn(buttonVariants({ variant, size, className }))}
-      data-loading={loading ? "true" : "false"}
-      ref={ref}
+      disabled={disabled || loading}
       {...props}
     >
+      {loading && <Loader2 className="animate-spin" />}
       {children}
     </button>
-  ),
-)
-Button.displayName = "Button"
+  )
+}
 
 export { Button, buttonVariants }

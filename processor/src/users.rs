@@ -1,0 +1,474 @@
+//! Persistent operator accounts (username + password hash).
+//!
+//! Modeled on `state::BranchState`: `Arc<Inner>` around a `RwLock`ed map with
+//! whole-file atomic persistence. User CRUD mutates the live store and never
+//! restarts the process, unlike config changes.
+//!
+//! Seeding rules on load:
+//!   * missing file + legacy operator hash → migrate it as user "admin"
+//!   * missing file, no legacy hash → demo credentials admin/admin
+//!   * unparseable file → preserved as users.json.corrupt-<ts>, then reseeded
+//!     (this is an appliance; refusing to boot would brick the whole stack,
+//!     and anyone who can corrupt the file can already read the mnemonic that
+//!     lives in the same directory)
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+
+use crate::config::{hash_password, validate_operator_password, verify_password, write_atomic};
+
+pub const DEMO_USERNAME: &str = "admin";
+const DEMO_PASSWORD: &str = "admin";
+const MAX_USERNAME_LEN: usize = 32;
+
+/// Domain errors the web layer maps to HTTP statuses.
+#[derive(Debug, thiserror::Error)]
+pub enum UserError {
+    /// 400: bad username or password shape.
+    #[error("{0}")]
+    Invalid(String),
+    /// 409: username taken.
+    #[error("user {0} already exists")]
+    Duplicate(String),
+    /// 404: no such user.
+    #[error("unknown user {0}")]
+    Unknown(String),
+    /// 409: a session may not remove its own user.
+    #[error("cannot delete the signed-in user")]
+    DeleteSelf,
+    /// 409: at least one account must remain able to sign in.
+    #[error("cannot delete the last user")]
+    DeleteLast,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRecord {
+    pub username: String,
+    pub password_hash: String,
+    pub created_at: u64,
+}
+
+/// Snapshot-safe projection: never carries the hash.
+#[derive(Debug, Clone, Serialize)]
+pub struct PublicUser {
+    pub username: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct UsersFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    users: BTreeMap<String, UserRecord>,
+}
+
+#[derive(Clone)]
+pub struct UserStore {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    users: RwLock<BTreeMap<String, UserRecord>>,
+    /// Cached "admin still uses the demo password" flag. Recomputed only on
+    /// mutation — a 120k-round verify must never run per snapshot request.
+    demo_password_active: RwLock<bool>,
+    path: PathBuf,
+}
+
+impl UserStore {
+    /// Load or seed the user store. `legacy_hash` carries the deprecated
+    /// single-operator password hash from setup.json; when the store does not
+    /// exist yet, that hash becomes user "admin" so existing instances keep
+    /// their password across the migration.
+    pub async fn load(path: PathBuf, legacy_hash: Option<String>) -> Result<Self> {
+        let mut users: Option<BTreeMap<String, UserRecord>> = None;
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            let raw = tokio::fs::read(&path)
+                .await
+                .with_context(|| format!("read {}", path.display()))?;
+            match serde_json::from_slice::<UsersFile>(&raw) {
+                Ok(file) if !file.users.is_empty() => users = Some(file.users),
+                Ok(_) => {
+                    tracing::warn!("{} contains no users; reseeding", path.display());
+                }
+                Err(e) => {
+                    let quarantine = path.with_extension(format!("json.corrupt-{}", unix_now()));
+                    tracing::error!(
+                        "could not parse {} ({e}); preserving it as {} and reseeding",
+                        path.display(),
+                        quarantine.display()
+                    );
+                    tokio::fs::rename(&path, &quarantine)
+                        .await
+                        .with_context(|| format!("quarantine {}", path.display()))?;
+                }
+            }
+        }
+
+        let (users, seeded) = match users {
+            Some(users) => (users, false),
+            None => {
+                let hash = match legacy_hash {
+                    Some(hash) => {
+                        tracing::info!(
+                            "seeding {} from the existing operator password as user {DEMO_USERNAME:?}",
+                            path.display()
+                        );
+                        hash
+                    }
+                    // Demo seed: deliberately exempt from the password
+                    // complexity rule; the UI warns until it is changed.
+                    None => {
+                        tracing::info!(
+                            "seeding {} with demo credentials {DEMO_USERNAME}/{DEMO_PASSWORD}",
+                            path.display()
+                        );
+                        hash_password(DEMO_PASSWORD)
+                    }
+                };
+                let mut users = BTreeMap::new();
+                users.insert(
+                    DEMO_USERNAME.to_string(),
+                    UserRecord {
+                        username: DEMO_USERNAME.to_string(),
+                        password_hash: hash,
+                        created_at: unix_now(),
+                    },
+                );
+                (users, true)
+            }
+        };
+
+        let demo_password_active = users
+            .get(DEMO_USERNAME)
+            .is_some_and(|user| verify_password(DEMO_PASSWORD, &user.password_hash));
+
+        let store = Self {
+            inner: Arc::new(Inner {
+                users: RwLock::new(users),
+                demo_password_active: RwLock::new(demo_password_active),
+                path,
+            }),
+        };
+        if seeded {
+            store.persist().await?;
+        }
+        Ok(store)
+    }
+
+    /// Constant-shape credential check: unknown usernames still burn a full
+    /// verify against a dummy hash so they are not distinguishable by timing.
+    pub async fn verify(&self, username: &str, password: &str) -> bool {
+        let username = normalize_username(username);
+        let hash = {
+            let users = self.inner.users.read().await;
+            users.get(&username).map(|user| user.password_hash.clone())
+        };
+        match hash {
+            Some(hash) => verify_password(password, &hash),
+            None => {
+                verify_password(password, dummy_hash());
+                false
+            }
+        }
+    }
+
+    pub async fn contains(&self, username: &str) -> bool {
+        self.inner
+            .users
+            .read()
+            .await
+            .contains_key(&normalize_username(username))
+    }
+
+    pub async fn list(&self) -> Vec<PublicUser> {
+        self.inner
+            .users
+            .read()
+            .await
+            .values()
+            .map(|user| PublicUser {
+                username: user.username.clone(),
+                created_at: user.created_at,
+            })
+            .collect()
+    }
+
+    pub async fn demo_password_active(&self) -> bool {
+        *self.inner.demo_password_active.read().await
+    }
+
+    pub async fn create(
+        &self,
+        username: &str,
+        password: &str,
+        password_confirm: &str,
+    ) -> Result<PublicUser> {
+        let username = validate_username(username)?;
+        validate_operator_password(password, password_confirm)
+            .map_err(|e| UserError::Invalid(e.to_string()))?;
+        let record = UserRecord {
+            username: username.clone(),
+            password_hash: hash_password(password),
+            created_at: unix_now(),
+        };
+        {
+            let mut users = self.inner.users.write().await;
+            if users.contains_key(&username) {
+                return Err(UserError::Duplicate(username).into());
+            }
+            users.insert(username.clone(), record.clone());
+        }
+        self.persist().await?;
+        Ok(PublicUser {
+            username: record.username,
+            created_at: record.created_at,
+        })
+    }
+
+    pub async fn delete(&self, username: &str, acting_user: &str) -> Result<()> {
+        let username = normalize_username(username);
+        {
+            // Self/last-user guards live inside the write lock: no TOCTOU
+            // between the count check and the removal.
+            let mut users = self.inner.users.write().await;
+            if username == acting_user {
+                return Err(UserError::DeleteSelf.into());
+            }
+            if !users.contains_key(&username) {
+                return Err(UserError::Unknown(username).into());
+            }
+            if users.len() == 1 {
+                return Err(UserError::DeleteLast.into());
+            }
+            users.remove(&username);
+        }
+        self.persist().await
+    }
+
+    pub async fn set_password(
+        &self,
+        username: &str,
+        password: &str,
+        password_confirm: &str,
+    ) -> Result<()> {
+        let username = normalize_username(username);
+        validate_operator_password(password, password_confirm)
+            .map_err(|e| UserError::Invalid(e.to_string()))?;
+        {
+            let mut users = self.inner.users.write().await;
+            let user = users
+                .get_mut(&username)
+                .ok_or(UserError::Unknown(username.clone()))?;
+            user.password_hash = hash_password(password);
+        }
+        if username == DEMO_USERNAME {
+            // The complexity rule makes literal "admin" unreachable here.
+            *self.inner.demo_password_active.write().await = false;
+        }
+        self.persist().await
+    }
+
+    async fn persist(&self) -> Result<()> {
+        let users = self.inner.users.read().await.clone();
+        let file = UsersFile { version: 1, users };
+        let bytes = serde_json::to_vec_pretty(&file)?;
+        write_atomic(&self.inner.path, &bytes)
+            .await
+            .with_context(|| format!("persist {}", self.inner.path.display()))
+    }
+}
+
+fn normalize_username(username: &str) -> String {
+    username.trim().to_ascii_lowercase()
+}
+
+fn validate_username(username: &str) -> Result<String> {
+    let username = normalize_username(username);
+    if username.is_empty() || username.len() > MAX_USERNAME_LEN {
+        return Err(UserError::Invalid(format!(
+            "username must be 1-{MAX_USERNAME_LEN} characters"
+        ))
+        .into());
+    }
+    if !username
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(UserError::Invalid("username must start with a letter or digit".into()).into());
+    }
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(UserError::Invalid(
+            "username may only contain lowercase letters, digits, '.', '_', and '-'".into(),
+        )
+        .into());
+    }
+    Ok(username)
+}
+
+/// Valid-format hash of a random string, used to equalize timing for unknown
+/// usernames. Computed once per process.
+fn dummy_hash() -> &'static str {
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    DUMMY.get_or_init(|| hash_password(&uuid::Uuid::new_v4().to_string()))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "cdk-branch-users-{name}-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[tokio::test]
+    async fn seeds_demo_admin_and_flags_it() {
+        let path = temp_path("seed");
+        let store = UserStore::load(path.clone(), None).await.expect("load");
+        assert!(store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
+        assert!(!store.verify(DEMO_USERNAME, "wrong").await);
+        assert!(!store.verify("nobody", DEMO_PASSWORD).await);
+        assert!(store.demo_password_active().await);
+        assert_eq!(store.list().await.len(), 1);
+        // Reload uses the persisted file, not reseeding.
+        let reloaded = UserStore::load(path.clone(), None).await.expect("reload");
+        assert!(reloaded.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn migration_reuses_legacy_hash() {
+        let path = temp_path("migrate");
+        let legacy = hash_password("Old-passw0rd!");
+        let store = UserStore::load(path.clone(), Some(legacy))
+            .await
+            .expect("load");
+        assert!(store.verify("admin", "Old-passw0rd!").await);
+        assert!(!store.verify("admin", DEMO_PASSWORD).await);
+        assert!(!store.demo_password_active().await);
+        // Once the file exists, a later legacy hash is ignored.
+        let again = UserStore::load(path.clone(), Some(hash_password("Other-pass-2!")))
+            .await
+            .expect("reload");
+        assert!(again.verify("admin", "Old-passw0rd!").await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn create_validates_and_rejects_duplicates() {
+        let path = temp_path("create");
+        let store = UserStore::load(path.clone(), None).await.expect("load");
+        assert!(store.create("teller1", "weak", "weak").await.is_err());
+        assert!(store
+            .create("Bad Name!", "Te11er-pass!", "Te11er-pass!")
+            .await
+            .is_err());
+        store
+            .create("Teller1", "Te11er-pass!", "Te11er-pass!")
+            .await
+            .expect("create");
+        assert!(store.verify("teller1", "Te11er-pass!").await);
+        let err = store
+            .create("teller1", "Te11er-pass!", "Te11er-pass!")
+            .await
+            .expect_err("duplicate");
+        assert!(matches!(
+            err.downcast_ref::<UserError>(),
+            Some(UserError::Duplicate(_))
+        ));
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn delete_guards_self_and_last_user() {
+        let path = temp_path("delete");
+        let store = UserStore::load(path.clone(), None).await.expect("load");
+        let err = store.delete("admin", "admin").await.expect_err("self");
+        assert!(matches!(
+            err.downcast_ref::<UserError>(),
+            Some(UserError::DeleteSelf)
+        ));
+        store
+            .create("teller1", "Te11er-pass!", "Te11er-pass!")
+            .await
+            .expect("create");
+        store.delete("teller1", "admin").await.expect("delete");
+        let err = store.delete("teller1", "admin").await.expect_err("unknown");
+        assert!(matches!(
+            err.downcast_ref::<UserError>(),
+            Some(UserError::Unknown(_))
+        ));
+        // admin is now the last user; another session cannot delete it either.
+        let err = store
+            .delete("admin", "someone-else")
+            .await
+            .expect_err("last");
+        assert!(matches!(
+            err.downcast_ref::<UserError>(),
+            Some(UserError::DeleteLast)
+        ));
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn password_change_clears_demo_flag() {
+        let path = temp_path("password");
+        let store = UserStore::load(path.clone(), None).await.expect("load");
+        assert!(store.demo_password_active().await);
+        assert!(store.set_password("admin", "weak", "weak").await.is_err());
+        store
+            .set_password("admin", "Str0ng-pass-9!", "Str0ng-pass-9!")
+            .await
+            .expect("change");
+        assert!(!store.demo_password_active().await);
+        assert!(store.verify("admin", "Str0ng-pass-9!").await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_file_is_quarantined_and_reseeded() {
+        let path = temp_path("quarantine");
+        tokio::fs::write(&path, b"{ not json").await.expect("write");
+        let store = UserStore::load(path.clone(), None).await.expect("load");
+        assert!(store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
+        let stem = path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .expect("stem")
+            .to_string();
+        let dir = path.parent().expect("parent");
+        let mut found_quarantine = false;
+        let mut entries = tokio::fs::read_dir(dir).await.expect("read dir");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&stem) && name.contains(".json.corrupt-") {
+                found_quarantine = true;
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+        assert!(found_quarantine, "expected a quarantined corrupt file");
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+}
