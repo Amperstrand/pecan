@@ -497,7 +497,8 @@ mod tests {
     use super::*;
 
     async fn fresh_state() -> BranchState {
-        let path = std::env::temp_dir().join(format!("branch-state-test-{}.json", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("branch-state-test-{}.json", uuid::Uuid::new_v4()));
         BranchState::load(path).await.expect("load state")
     }
 
@@ -589,7 +590,9 @@ mod tests {
 
         // second claim loses
         assert!(matches!(
-            state.claim_outgoing(&id, "ora", "quote-other".to_string()).await,
+            state
+                .claim_outgoing(&id, "ora", "quote-other".to_string())
+                .await,
             Err(ClaimError::AlreadyClaimed)
         ));
 

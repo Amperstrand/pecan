@@ -4,16 +4,21 @@
 //!   * a gRPC `cdk-payment-processor` server on $CDK_BRANCH_PROCESSOR_GRPC_PORT,
 //!     implementing the "branch" custom payment method for the configured unit.
 //!     cdk-mintd connects to this and routes all mint/melt for that method to us.
-//!   * a web UI on $CDK_BRANCH_PROCESSOR_HTTP_PORT for a branch operator to log
-//!     in (static password), see pending mint/melt quotes, mark them paid when
-//!     physical cash is exchanged, and manage keysets (rotate via mint-rpc,
-//!     operator-expire via the signatory admin endpoint).
+//!   * a web UI on $CDK_BRANCH_PROCESSOR_HTTP_PORT for branch operators to sign
+//!     in (username + password from the users.json store; first boot seeds a
+//!     demo admin/admin account), see pending mint/melt quotes, mark them paid
+//!     when physical cash is exchanged, and manage units, keysets, and users.
+//!
+//! First boot bootstraps a complete configuration (generated recovery seed,
+//! unit "ora", method "branch") with zero interaction — there is no setup mode.
 
 mod backend;
 mod clients;
 mod config;
 mod offer;
+mod sessions;
 mod state;
+mod users;
 mod web;
 
 use std::collections::HashMap;
@@ -32,8 +37,10 @@ use tracing_subscriber::EnvFilter;
 
 use crate::backend::BranchBackend;
 use crate::clients::{KeysetEntry, MintHttpClient, MintRpcClient};
-use crate::config::{AppConfig, ConfigStore, UnitLifecycle};
+use crate::config::{AppConfig, BootstrapEndpoints, ConfigStore, UnitLifecycle};
+use crate::sessions::SessionStore;
 use crate::state::BranchState;
+use crate::users::UserStore;
 
 const ENV_WORK_DIR: &str = "CDK_BRANCH_PROCESSOR_WORK_DIR";
 const ENV_CONFIG_DIR: &str = "CDK_BRANCH_PROCESSOR_CONFIG_DIR";
@@ -77,6 +84,10 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(&config_dir)
         .await
         .with_context(|| format!("create config_dir {}", config_dir.display()))?;
+    // Credentials live on the durable config volume next to setup.json;
+    // sessions are operational scratch and live in the work dir.
+    let users_path = config_dir.join("users.json");
+    let sessions_path = work_dir.join("sessions.json");
     let config_store =
         ConfigStore::new(config_dir).with_backup_path(work_dir.join("managed-stack-backup.json"));
 
@@ -102,79 +113,106 @@ async fn main() -> Result<()> {
         std::env::var(ENV_MINT_GRPC_ADDR).unwrap_or_else(|_| DEFAULT_MINT_GRPC_ADDR.into());
 
     let state_path = work_dir.join("tickets.json");
-    let mut grpc_server = None;
 
-    let app = if let Some(app_config) = config_store.load().await? {
-        config_store.save(&app_config).await?;
-        config_store.write_mint_config(&app_config).await?;
-        let mut units = HashMap::new();
-        for managed in app_config
-            .units
-            .iter()
-            .filter(|unit| unit.lifecycle != UnitLifecycle::Retired)
-        {
-            let unit: CurrencyUnit = managed
-                .unit
-                .parse()
-                .map_err(|e| anyhow!("bad configured unit {}: {e}", managed.unit))?;
-            units.insert(unit, managed.lifecycle);
+    // Load the config, or bootstrap a complete one on first boot. The old
+    // browser setup wizard is gone: the stack comes up working immediately.
+    let mut app_config = match config_store.load().await? {
+        Some(config) => config,
+        None => {
+            let config = config::bootstrap_config(
+                BootstrapEndpoints {
+                    public_url: default_public_url.clone(),
+                    mint_http_url: mint_http_url.clone(),
+                    mint_rpc_url: mint_rpc_url.clone(),
+                    processor_grpc_addr: mint_grpc_addr.clone(),
+                    processor_grpc_port: grpc_port,
+                },
+                unix_now(),
+            )?;
+            config_store.save(&config).await?;
+            tracing::info!(
+                "bootstrapped new mint configuration at {}",
+                config_store.app_config_path().display()
+            );
+            config
         }
-        let unit: CurrencyUnit = app_config
-            .mint
+    };
+
+    // Auth migration, ordered for crash safety: seed users.json from the
+    // legacy operator hash BEFORE stripping it from setup.json. A crash in
+    // between converges on the next boot (users.json exists, so the legacy
+    // hash is ignored and then stripped) — the hash is never in zero places.
+    let users = UserStore::load(
+        users_path,
+        app_config
+            .auth
+            .as_ref()
+            .map(|auth| auth.password_hash.clone()),
+    )
+    .await?;
+    if app_config.auth.take().is_some() {
+        tracing::info!("migrated the operator password into users.json as user 'admin'");
+    }
+    config_store.save(&app_config).await?;
+    config_store.write_mint_config(&app_config).await?;
+    let sessions = SessionStore::load(sessions_path).await?;
+
+    let app_config = app_config;
+    let mut units = HashMap::new();
+    for managed in app_config
+        .units
+        .iter()
+        .filter(|unit| unit.lifecycle != UnitLifecycle::Retired)
+    {
+        let unit: CurrencyUnit = managed
             .unit
             .parse()
-            .map_err(|e| anyhow!("bad primary unit: {e}"))?;
-        let method = app_config.mint.method.clone();
-        let branch = BranchState::load(state_path).await?;
+            .map_err(|e| anyhow!("bad configured unit {}: {e}", managed.unit))?;
+        units.insert(unit, managed.lifecycle);
+    }
+    let unit: CurrencyUnit = app_config
+        .mint
+        .unit
+        .parse()
+        .map_err(|e| anyhow!("bad primary unit: {e}"))?;
+    let method = app_config.mint.method.clone();
+    let branch = BranchState::load(state_path).await?;
 
-        let backend = Arc::new(BranchBackend::new(
-            branch.clone(),
-            units,
-            unit.clone(),
-            method.clone(),
-        ));
-        let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
-            .map_err(|e| anyhow!("payment processor server init: {e}"))?;
-        server
-            .start(None)
-            .await
-            .map_err(|e| anyhow!("grpc start: {e}"))?;
-        tracing::info!(
-            "branch-processor gRPC on {grpc_addr}:{grpc_port} (method={method}, unit={unit})"
-        );
-        grpc_server = Some(server);
+    let backend = Arc::new(BranchBackend::new(
+        branch.clone(),
+        units,
+        unit.clone(),
+        method.clone(),
+    ));
+    let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
+        .map_err(|e| anyhow!("payment processor server init: {e}"))?;
+    server
+        .start(None)
+        .await
+        .map_err(|e| anyhow!("grpc start: {e}"))?;
+    tracing::info!(
+        "branch-processor gRPC on {grpc_addr}:{grpc_port} (method={method}, unit={unit})"
+    );
+    let grpc_server = Some(server);
 
-        let mint_rpc = MintRpcClient::new(app_config.endpoints.mint_rpc_url.clone());
-        let mint_http = MintHttpClient::new(app_config.endpoints.mint_http_url.clone());
-        spawn_rollover_worker(
-            app_config.clone(),
-            mint_rpc.clone(),
-            mint_http.clone(),
-            branch.clone(),
-        );
+    let mint_rpc = MintRpcClient::new(app_config.endpoints.mint_rpc_url.clone());
+    let mint_http = MintHttpClient::new(app_config.endpoints.mint_http_url.clone());
+    spawn_rollover_worker(
+        app_config.clone(),
+        mint_rpc.clone(),
+        mint_http.clone(),
+        branch.clone(),
+    );
 
-        web::router(web::WebState::new(
-            branch,
-            mint_rpc,
-            mint_http,
-            app_config,
-            unit,
-            config_store.clone(),
-        ))
-    } else {
-        tracing::info!(
-            "no setup config at {}; serving first-run setup UI",
-            config_store.app_config_path().display()
-        );
-        web::setup_router(web::SetupState {
-            config_store,
-            mint_http_url,
-            mint_rpc_url,
-            mint_grpc_addr,
-            grpc_port,
-            default_public_url,
-        })
-    };
+    let app = web::router(web::WebState::new(
+        branch,
+        mint_rpc,
+        mint_http,
+        app_config,
+        config_store.clone(),
+        users,
+        sessions,
+    ));
 
     tracing::info!("branch-processor HTTP on {http_socket}");
     let listener = TcpListener::bind(http_socket).await?;
