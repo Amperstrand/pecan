@@ -1,9 +1,12 @@
-# Stock cdk-mintd configuration for the Custom Unit Mint.
+# Reference cdk-mintd configuration for the Custom Unit Mint. The default
+# deploy does NOT read this file — the processor generates mint.toml from the
+# console-managed configuration (one [[ln]] + unit_keysets entry per unit; a
+# fresh install has none until the operator adds the first unit).
 #
 # Nothing here is a patched/custom mintd setting — every key is a stock cdk
-# option. The mint is made specific to the custom unit (ora, here) purely by
-# pointing its gRPC payment backend at our processor (see [ln]/[grpc_processor]
-# below). To issue a different unit, change "ora" here and CDK_BRANCH_PROCESSOR_UNIT.
+# option. The mint is made specific to a custom unit (ora, in this example)
+# purely by pointing its gRPC payment backend at our processor (see
+# [ln]/[grpc_processor] below).
 
 [info]
 url = "http://localhost:8089"

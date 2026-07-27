@@ -1382,6 +1382,9 @@ async fn create_quote_inner(state: &WebState, form: CreateQuoteForm) -> Result<T
     } else {
         form.unit.trim()
     };
+    if unit.is_empty() {
+        return Err("no units are configured yet; add one in the console's Units tab".to_string());
+    }
     let managed = state
         .config
         .managed_unit(unit)
