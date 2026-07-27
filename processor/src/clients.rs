@@ -15,7 +15,6 @@ use serde_json::Value;
 use tonic::transport::Channel;
 use tonic::Request;
 
-
 #[derive(Clone, Debug)]
 pub struct MintRpcClient {
     addr: Arc<String>,
@@ -145,5 +144,4 @@ impl MintHttpClient {
         }
         Ok(r.json().await?)
     }
-
 }

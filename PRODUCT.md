@@ -8,7 +8,7 @@ product
 Branch operators, mint administrators, and semi-technical deployers who need to provision and run a Cashu mint for a custom unit. They may be comfortable running one installation command, but should not need to edit config files, environment variables, or service definitions by hand.
 
 ## Product Purpose
-Custom Unit Mint turns a stock `cdk-mintd` plus a custom payment processor into a browser-managed mint lifecycle tool. It guides first-run provisioning, locks immutable mint attributes after setup, starts the mint from generated configuration, supports manual branch settlement, manages keysets and expiry, and gives operators a clear operational dashboard.
+Custom Unit Mint turns a stock `cdk-mintd` plus a custom payment processor into a browser-managed mint lifecycle tool. First boot bootstraps a complete working configuration with zero interaction (seeded demo `admin`/`admin` account); everything except the recovery seed stays editable on the running instance. It supports manual branch settlement through a focused teller, manages units, keysets, expiry, and operator accounts, and gives operators a clear monochrome console.
 
 ## Brand Personality
 Calm, exact, operational. The interface should feel like trustworthy infrastructure software: plain language, explicit state, strong defaults, and no decorative ambiguity.
@@ -17,7 +17,7 @@ Calm, exact, operational. The interface should feel like trustworthy infrastruct
 Avoid marketing-style landing pages, crypto-dashboard spectacle, terminal-only workflows, hidden manual configuration steps, and UI that assumes the operator already knows Cashu/CDK internals.
 
 ## Design Principles
-- One-command start, browser-first setup.
+- One-command start; no setup wizard — configure the running instance.
 - Explain irreversible decisions before they are committed.
 - Prefer guided defaults over empty expert forms.
 - Make system state observable before asking the operator to act.
