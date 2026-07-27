@@ -37,7 +37,8 @@ pub const TICKET_FIELD: &str = "ticket";
 pub struct BranchBackend {
     state: BranchState,
     units: HashMap<CurrencyUnit, UnitLifecycle>,
-    primary_unit: CurrencyUnit,
+    /// None until the operator adds the first unit on a fresh install.
+    primary_unit: Option<CurrencyUnit>,
     method: String,
     stream_active: AtomicBool,
 }
@@ -55,7 +56,7 @@ impl BranchBackend {
     pub fn new(
         state: BranchState,
         units: HashMap<CurrencyUnit, UnitLifecycle>,
-        primary_unit: CurrencyUnit,
+        primary_unit: Option<CurrencyUnit>,
         method: String,
     ) -> Self {
         Self {
@@ -126,7 +127,13 @@ impl MintPayment for BranchBackend {
             // The pinned CDK gRPC settings message has a legacy singleton unit.
             // cdk-mintd is patched at build time to register this backend for
             // every configured [[ln]] unit while requests remain unit-checked.
-            unit: self.primary_unit.to_string(),
+            // With zero units configured the mint has no [[ln]] entries and
+            // never calls this; the empty string is just wire filler.
+            unit: self
+                .primary_unit
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             // Mint requires either bolt11 or bolt12 settings in some code paths;
             // advertising None for both is intentional — bolt is not a valid rail here.
             bolt11: None::<Bolt11Settings>,

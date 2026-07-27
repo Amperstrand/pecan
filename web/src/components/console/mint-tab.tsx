@@ -138,7 +138,7 @@ function FactsCard({ snapshot }: { snapshot: AppSnapshot }) {
           <MonoChip>{snapshot.mint.method}</MonoChip>
         </DetailRow>
         <DetailRow label="Primary unit">
-          <MonoChip>{snapshot.mint.unit}</MonoChip>
+          <MonoChip>{snapshot.mint.unit || "none yet"}</MonoChip>
         </DetailRow>
         <DetailRow label="Mint HTTP">
           <MonoChip>{snapshot.endpoints.mint_http_url}</MonoChip>

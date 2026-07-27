@@ -63,6 +63,17 @@ export function UnitsTab({ snapshot }: { snapshot: AppSnapshot }) {
         <AddUnitDialog snapshot={snapshot} />
       </div>
 
+      {snapshot.units.length === 0 && (
+        <Card>
+          <CardContent>
+            <EmptyState
+              title="No units yet"
+              body="A fresh install starts without any units, so the mint offers nothing to wallets. Add the first unit to start issuing ecash; it becomes available to the teller after a short restart."
+            />
+          </CardContent>
+        </Card>
+      )}
+
       {snapshot.units.map((unit) => {
         const keysets = snapshot.keysets.items.filter((keyset) => keyset.unit === unit.unit)
         return (

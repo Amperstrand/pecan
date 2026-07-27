@@ -102,16 +102,25 @@ export function CreateOfferCard({
             </Field>
           </div>
 
-          {availableUnits.length === 0 && (
-            <Alert variant="emphasis">
-              <AlertTitle>No unit supports this operation</AlertTitle>
-              <AlertDescription>
-                {deposit
-                  ? "Every unit has issuing stopped. Resume issuing in the Console's Units tab."
-                  : "Every unit is retired. Withdrawals need a unit that still allows redemptions."}
-              </AlertDescription>
-            </Alert>
-          )}
+          {availableUnits.length === 0 &&
+            (snapshot.units.length === 0 ? (
+              <Alert variant="emphasis">
+                <AlertTitle>No units configured yet</AlertTitle>
+                <AlertDescription>
+                  An operator must add the first unit in the Console's Units tab before offers
+                  can be created.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <Alert variant="emphasis">
+                <AlertTitle>No unit supports this operation</AlertTitle>
+                <AlertDescription>
+                  {deposit
+                    ? "Every unit has issuing stopped. Resume issuing in the Console's Units tab."
+                    : "Every unit is retired. Withdrawals need a unit that still allows redemptions."}
+                </AlertDescription>
+              </Alert>
+            ))}
 
           <Field label="Note (optional)" htmlFor="offer-note">
             <Input
