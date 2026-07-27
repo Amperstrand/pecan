@@ -1,35 +1,34 @@
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
+
 import { cn } from "@/lib/utils"
 
+// Grayscale status language: solid = terminal-good, outline = in progress,
+// muted = inactive/retired. Failure states add an <X /> icon, never a color.
 const badgeVariants = cva(
-  "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium leading-none",
+  "inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium [&>svg]:pointer-events-none [&>svg]:size-3",
   {
     variants: {
       variant: {
-        neutral: "border-border bg-surface-muted text-muted-foreground",
-        info: "border-transparent bg-primary-soft text-primary",
-        success: "border-transparent bg-success-soft text-success",
-        warning: "border-transparent bg-warning-soft text-warning",
-        danger: "border-transparent bg-danger-soft text-danger",
-      },
-      dot: {
-        true: "before:size-1.5 before:shrink-0 before:rounded-full before:bg-current",
+        solid: "border-transparent bg-primary text-primary-foreground",
+        outline: "border-border text-foreground",
+        muted: "border-transparent bg-muted text-muted-foreground",
       },
     },
     defaultVariants: {
-      variant: "neutral",
-      dot: true,
+      variant: "outline",
     },
   },
 )
 
-export interface BadgeProps
-  extends React.HTMLAttributes<HTMLSpanElement>,
-    VariantProps<typeof badgeVariants> {}
-
-function Badge({ className, variant, dot, ...props }: BadgeProps) {
-  return <span className={cn(badgeVariants({ variant, dot, className }))} {...props} />
+function Badge({
+  className,
+  variant,
+  ...props
+}: React.ComponentProps<"span"> & VariantProps<typeof badgeVariants>) {
+  return (
+    <span data-slot="badge" className={cn(badgeVariants({ variant }), className)} {...props} />
+  )
 }
 
 export { Badge, badgeVariants }

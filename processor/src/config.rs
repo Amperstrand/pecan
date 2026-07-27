@@ -1,9 +1,10 @@
 //! Persistent lifecycle configuration for the browser-managed mint.
 //!
-//! This file is the boundary between first-run setup and normal operations.
-//! The recovery seed is immutable after provisioning. Units are managed through
-//! explicit lifecycle migrations so the generated mint configuration, payment
-//! backend, advertised NUT settings, and keysets stay aligned.
+//! First boot bootstraps a complete configuration from env + defaults (no
+//! setup wizard). The recovery seed is immutable after provisioning. Units are
+//! managed through explicit lifecycle migrations so the generated mint
+//! configuration, payment backend, advertised NUT settings, and keysets stay
+//! aligned.
 
 use std::path::{Path, PathBuf};
 
@@ -37,10 +38,6 @@ impl ConfigStore {
 
     pub fn app_config_path(&self) -> &Path {
         &self.app_config_path
-    }
-
-    pub fn mint_config_path(&self) -> &Path {
-        &self.mint_config_path
     }
 
     pub async fn load(&self) -> Result<Option<AppConfig>> {
@@ -104,7 +101,11 @@ pub struct AppConfig {
     pub version: u32,
     pub configured_at: u64,
     pub mint: MintSetup,
-    pub auth: AuthConfig,
+    /// Deprecated single-operator password from the pre-user-database era.
+    /// Optional so old setup.json files still parse; main migrates the hash
+    /// into users.json as user "admin" and strips this field on save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthConfig>,
     pub endpoints: EndpointConfig,
     pub rollover: RolloverPolicy,
     #[serde(default)]
@@ -172,111 +173,70 @@ pub struct ManagedUnit {
     pub rollover: RolloverPolicy,
 }
 
+/// Endpoint values baked into a bootstrapped config, sourced from env vars
+/// (all of which have defaults) in main.
 #[derive(Debug, Clone)]
-pub struct SetupDraft {
-    pub name: String,
-    pub description: String,
-    pub description_long: String,
-    pub unit: String,
-    pub method: String,
+pub struct BootstrapEndpoints {
     pub public_url: String,
-    pub password: String,
-    pub password_confirm: String,
-    pub mnemonic: String,
-    pub rollover_enabled: bool,
-    pub keyset_lifetime_days: u64,
-    pub rotate_before_expiry_days: u64,
-    pub input_fee_ppk: u64,
-    pub amounts: Vec<u64>,
-    pub backup_confirmed: bool,
+    pub mint_http_url: String,
+    pub mint_rpc_url: String,
+    pub processor_grpc_addr: String,
+    pub processor_grpc_port: u16,
+}
+
+/// Build a complete first-run configuration with generated defaults — a fresh
+/// recovery mnemonic, the primary unit "ora" on the "branch" method, and the
+/// stock rollover policy. Replaces the browser setup wizard: the stack comes
+/// up working with zero interaction, and everything here except the recovery
+/// seed stays editable from the operator UI.
+pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Result<AppConfig> {
+    let mnemonic = generate_mnemonic()?;
+    let rollover = RolloverPolicy {
+        enabled: true,
+        keyset_lifetime_days: 90,
+        rotate_before_expiry_days: 14,
+        input_fee_ppk: 0,
+        amounts: default_amounts(),
+    };
+    let unit = "ora".to_string();
+    let seed_fingerprint = mnemonic_fingerprint(&mnemonic);
+    let config = AppConfig {
+        version: 3,
+        configured_at,
+        mint: MintSetup {
+            name: "Custom Unit Mint".to_string(),
+            description: "Cashu mint for a custom unit with branch settlement.".to_string(),
+            description_long: "A stock cdk-mintd instance managed from the browser UI. Mint and melt quotes settle manually through the branch operator workflow.".to_string(),
+            unit: unit.clone(),
+            method: "branch".to_string(),
+            mnemonic,
+        },
+        auth: None,
+        endpoints: EndpointConfig {
+            public_url: endpoints
+                .public_url
+                .trim()
+                .trim_end_matches('/')
+                .to_string(),
+            mint_http_url: endpoints.mint_http_url,
+            mint_rpc_url: endpoints.mint_rpc_url,
+            processor_grpc_addr: endpoints.processor_grpc_addr,
+            processor_grpc_port: endpoints.processor_grpc_port,
+        },
+        rollover: rollover.clone(),
+        units: vec![ManagedUnit {
+            unit,
+            lifecycle: UnitLifecycle::Active,
+            configured_at,
+            rollover,
+        }],
+        seed_fingerprint,
+    };
+    config.validate_integrity()?;
+    Ok(config)
 }
 
 impl AppConfig {
-    pub fn from_draft(
-        draft: SetupDraft,
-        configured_at: u64,
-        mint_http_url: String,
-        mint_rpc_url: String,
-        processor_grpc_addr: String,
-        processor_grpc_port: u16,
-    ) -> Result<Self> {
-        validate_slug("unit", &draft.unit)?;
-        validate_slug("method", &draft.method)?;
-        validate_url("public URL", &draft.public_url)?;
-
-        if draft.name.trim().is_empty() {
-            bail!("mint name is required");
-        }
-        if draft.description.trim().is_empty() {
-            bail!("short description is required");
-        }
-        validate_operator_password(&draft.password, &draft.password_confirm)?;
-        if !draft.backup_confirmed {
-            bail!("confirm that the recovery phrase has been backed up");
-        }
-        if draft.keyset_lifetime_days < 2 {
-            bail!("keyset lifetime must be at least 2 days");
-        }
-        if draft.rotate_before_expiry_days == 0
-            || draft.rotate_before_expiry_days >= draft.keyset_lifetime_days
-        {
-            bail!("rotate-before-expiry must be shorter than the keyset lifetime");
-        }
-        if draft.amounts.is_empty() {
-            bail!("at least one denomination amount is required");
-        }
-        if draft.amounts.iter().any(|a| *a == 0) {
-            bail!("denomination amounts must be greater than zero");
-        }
-
-        let mnemonic = normalize_mnemonic(&draft.mnemonic)?;
-
-        let rollover = RolloverPolicy {
-            enabled: draft.rollover_enabled,
-            keyset_lifetime_days: draft.keyset_lifetime_days,
-            rotate_before_expiry_days: draft.rotate_before_expiry_days,
-            input_fee_ppk: draft.input_fee_ppk,
-            amounts: draft.amounts,
-        };
-        let unit = draft.unit.trim().to_ascii_lowercase();
-        let seed_fingerprint = mnemonic_fingerprint(&mnemonic);
-
-        Ok(Self {
-            version: 2,
-            configured_at,
-            mint: MintSetup {
-                name: draft.name.trim().to_string(),
-                description: draft.description.trim().to_string(),
-                description_long: draft.description_long.trim().to_string(),
-                unit: unit.clone(),
-                method: draft.method.trim().to_ascii_lowercase(),
-                mnemonic,
-            },
-            auth: AuthConfig {
-                password_hash: hash_password(&draft.password),
-            },
-            endpoints: EndpointConfig {
-                public_url: draft.public_url.trim().trim_end_matches('/').to_string(),
-                mint_http_url,
-                mint_rpc_url,
-                processor_grpc_addr,
-                processor_grpc_port,
-            },
-            rollover: rollover.clone(),
-            units: vec![ManagedUnit {
-                unit,
-                lifecycle: UnitLifecycle::Active,
-                configured_at,
-                rollover,
-            }],
-            seed_fingerprint,
-        })
-    }
-
-    pub fn verify_password(&self, password: &str) -> bool {
-        verify_password(password, &self.auth.password_hash)
-    }
-
     pub fn upgrade(&mut self) {
         if self.units.is_empty() {
             self.units.push(ManagedUnit {
@@ -289,7 +249,7 @@ impl AppConfig {
         if self.seed_fingerprint.is_empty() {
             self.seed_fingerprint = mnemonic_fingerprint(&self.mint.mnemonic);
         }
-        self.version = 2;
+        self.version = 3;
     }
 
     pub fn validate_integrity(&self) -> Result<()> {
@@ -344,6 +304,23 @@ impl AppConfig {
         managed.lifecycle = lifecycle;
         Ok(())
     }
+
+    /// Replace an existing unit's rollover policy. Future rotations (manual and
+    /// automatic) use the new policy after the restart that follows.
+    pub fn set_unit_rollover(&mut self, unit: &str, rollover: RolloverPolicy) -> Result<()> {
+        validate_rollover(&rollover)?;
+        let managed = self
+            .units
+            .iter_mut()
+            .find(|candidate| candidate.unit == unit)
+            .ok_or_else(|| anyhow!("unit {unit} is not managed"))?;
+        managed.rollover = rollover.clone();
+        if self.mint.unit == unit {
+            // The legacy top-level policy mirrors the primary unit.
+            self.rollover = rollover;
+        }
+        Ok(())
+    }
 }
 
 pub fn default_amounts() -> Vec<u64> {
@@ -392,6 +369,9 @@ pub fn validate_operator_password(password: &str, password_confirm: &str) -> Res
     Ok(())
 }
 
+// Upgrade slot: to move to a vetted KDF (argon2id), add an "argon2id:" branch
+// in `verify_password`, switch this function's output format, and rehash
+// opportunistically on successful login in `UserStore::verify`.
 pub fn hash_password(password: &str) -> String {
     let salt = uuid::Uuid::new_v4().to_string();
     let digest = password_digest(&salt, password);
@@ -439,13 +419,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn normalize_mnemonic(raw: &str) -> Result<String> {
-    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mnemonic = Mnemonic::parse_in_normalized(Language::English, &normalized)
-        .map_err(|e| anyhow!("recovery phrase is not a valid English BIP39 phrase: {e}"))?;
-    Ok(mnemonic.to_string())
-}
-
 fn mnemonic_fingerprint(mnemonic: &str) -> String {
     let digest = sha256::Hash::hash(mnemonic.as_bytes()).to_string();
     format!("sha256:{}", &digest[..16])
@@ -476,14 +449,6 @@ fn validate_slug(label: &str, value: &str) -> Result<()> {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     {
         bail!("{label} may only contain lowercase letters, digits, hyphen, and underscore");
-    }
-    Ok(())
-}
-
-fn validate_url(label: &str, value: &str) -> Result<()> {
-    let value = value.trim();
-    if !(value.starts_with("http://") || value.starts_with("https://")) {
-        bail!("{label} must start with http:// or https://");
     }
     Ok(())
 }
@@ -608,7 +573,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     out
 }
 
-async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     tokio::fs::write(&tmp, bytes)
         .await
@@ -623,32 +588,94 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn test_endpoints() -> BootstrapEndpoints {
+        BootstrapEndpoints {
+            public_url: "http://localhost:8089".into(),
+            mint_http_url: "http://mint:8089".into(),
+            mint_rpc_url: "http://mint:8091".into(),
+            processor_grpc_addr: "processor".into(),
+            processor_grpc_port: 50051,
+        }
+    }
+
     fn test_config() -> AppConfig {
-        AppConfig::from_draft(
-            SetupDraft {
-                name: "Branch mint".into(),
-                description: "Test".into(),
-                description_long: "Test mint".into(),
-                unit: "ora".into(),
-                method: "branch".into(),
-                public_url: "http://localhost:8089".into(),
-                password: "correct horse 7!".into(),
-                password_confirm: "correct horse 7!".into(),
-                mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(),
-                rollover_enabled: true,
-                keyset_lifetime_days: 30,
-                rotate_before_expiry_days: 7,
-                input_fee_ppk: 0,
-                amounts: vec![1, 2, 4, 8],
-                backup_confirmed: true,
-            },
-            1,
-            "http://mint:8089".into(),
-            "http://mint:8091".into(),
-            "processor".into(),
-            50051,
-        )
-        .expect("valid config")
+        let mut config = bootstrap_config(test_endpoints(), 1).expect("valid config");
+        config.mint.name = "Branch mint".into();
+        let rollover = RolloverPolicy {
+            enabled: true,
+            keyset_lifetime_days: 30,
+            rotate_before_expiry_days: 7,
+            input_fee_ppk: 0,
+            amounts: vec![1, 2, 4, 8],
+        };
+        config
+            .set_unit_rollover("ora", rollover)
+            .expect("set primary policy");
+        config
+    }
+
+    #[test]
+    fn bootstrap_produces_a_valid_ready_to_run_config() {
+        let config = bootstrap_config(test_endpoints(), 42).expect("bootstrap");
+        assert!(config.validate_integrity().is_ok());
+        assert!(config.auth.is_none());
+        assert_eq!(config.version, 3);
+        assert_eq!(config.mint.unit, "ora");
+        assert_eq!(config.mint.method, "branch");
+        assert_eq!(config.mint.mnemonic.split_whitespace().count(), 24);
+        let rendered = render_mint_toml(&config);
+        assert!(rendered.contains("[grpc_processor.unit_keysets.ora]"));
+        assert!(rendered.contains("supported_units = [\"ora\"]"));
+    }
+
+    #[test]
+    fn v2_config_with_auth_parses_and_auth_is_omitted_when_none() {
+        let mut config = test_config();
+        config.version = 2;
+        config.auth = Some(AuthConfig {
+            password_hash: hash_password("Old-passw0rd!"),
+        });
+        let raw = serde_json::to_vec_pretty(&config).expect("serialize");
+        assert!(String::from_utf8_lossy(&raw).contains("\"auth\""));
+
+        let mut parsed: AppConfig = serde_json::from_slice(&raw).expect("parse v2");
+        assert!(parsed.auth.is_some());
+        parsed.upgrade();
+        assert_eq!(parsed.version, 3);
+        // Stripping auth is main's job (after seeding users.json); upgrade keeps it.
+        assert!(parsed.auth.is_some());
+
+        parsed.auth = None;
+        let raw = serde_json::to_vec_pretty(&parsed).expect("serialize authless");
+        assert!(!String::from_utf8_lossy(&raw).contains("\"auth\""));
+        let reparsed: AppConfig = serde_json::from_slice(&raw).expect("parse authless");
+        assert!(reparsed.auth.is_none());
+    }
+
+    #[test]
+    fn set_unit_rollover_updates_unit_and_primary_mirror() {
+        let mut config = test_config();
+        let policy = RolloverPolicy {
+            enabled: false,
+            keyset_lifetime_days: 60,
+            rotate_before_expiry_days: 10,
+            input_fee_ppk: 5,
+            amounts: vec![1, 2, 4],
+        };
+        config
+            .set_unit_rollover("ora", policy.clone())
+            .expect("edit policy");
+        assert_eq!(
+            config.managed_unit("ora").unwrap().rollover.amounts,
+            policy.amounts
+        );
+        assert_eq!(config.rollover.input_fee_ppk, 5);
+        assert!(config.set_unit_rollover("nope", policy.clone()).is_err());
+        let bad = RolloverPolicy {
+            keyset_lifetime_days: 1,
+            ..policy
+        };
+        assert!(config.set_unit_rollover("ora", bad).is_err());
     }
 
     #[test]

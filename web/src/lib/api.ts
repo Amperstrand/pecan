@@ -89,8 +89,14 @@ export interface CirculationPoint {
   circulation: number
 }
 
+export interface UserEntry {
+  username: string
+  created_at: number
+}
+
 export interface AppSnapshot {
   now: number
+  session: { username: string }
   mint: {
     name: string
     description: string
@@ -133,22 +139,9 @@ export interface AppSnapshot {
   units: ManagedUnit[]
   capabilities: Capability[]
   consistency: ConsistencyState
-}
-
-export interface SetupDefaults {
-  name: string
-  description: string
-  description_long: string
-  unit: string
-  method: string
-  public_url: string
+  users: UserEntry[]
+  demo_password_active: boolean
   password_min_length: number
-  mnemonic: string
-  rollover_enabled: boolean
-  keyset_lifetime_days: number
-  rotate_before_expiry_days: number
-  input_fee_ppk: number
-  amounts: string
 }
 
 export class ApiRequestError extends Error {
@@ -189,9 +182,134 @@ export async function requestJson<T>(path: string, init: RequestInit = {}): Prom
   return data as T
 }
 
-export function apiPost<T>(path: string, body?: unknown) {
+function post<T>(path: string, body?: unknown) {
   return requestJson<T>(path, {
     method: "POST",
     body: body === undefined ? undefined : JSON.stringify(body),
+  })
+}
+
+// ---- auth ----
+
+export function login(username: string, password: string) {
+  return post<{ message: string }>("/api/login", { username, password })
+}
+
+export function logout() {
+  return post<{ message: string }>("/api/logout")
+}
+
+// ---- snapshot ----
+
+export function fetchSnapshot() {
+  return requestJson<AppSnapshot>("/api/app")
+}
+
+// ---- teller ----
+
+export function createQuote(input: {
+  kind: "mint" | "melt"
+  unit: string
+  amount: number
+  description?: string
+}) {
+  return post<Ticket>("/api/quotes", input)
+}
+
+export function markPaid(ticketId: string, notes?: string) {
+  return post<Ticket>(`/api/tickets/${encodeURIComponent(ticketId)}/mark-paid`, {
+    notes: notes ?? "",
+  })
+}
+
+export function markFailed(ticketId: string, notes?: string) {
+  return post<Ticket>(`/api/tickets/${encodeURIComponent(ticketId)}/mark-failed`, {
+    notes: notes ?? "",
+  })
+}
+
+// ---- units & keysets ----
+
+export function addUnit(input: {
+  unit: string
+  keyset_lifetime_days: number
+  rotate_before_expiry_days: number
+  input_fee_ppk: number
+  amounts: string
+}) {
+  return post<{ message: string }>("/api/units", input) // restarts the stack
+}
+
+export function setUnitLifecycle(unit: string, lifecycle: UnitLifecycle) {
+  return post<{ message: string }>(`/api/units/${encodeURIComponent(unit)}/lifecycle`, {
+    lifecycle,
+  }) // restarts the stack
+}
+
+export function updateUnitPolicy(
+  unit: string,
+  policy: {
+    enabled: boolean
+    keyset_lifetime_days: number
+    rotate_before_expiry_days: number
+    input_fee_ppk: number
+    amounts: string
+  },
+) {
+  return post<{ message: string }>(`/api/units/${encodeURIComponent(unit)}/policy`, policy) // restarts
+}
+
+export function rotateKeyset(input: {
+  unit: string
+  amounts: string
+  input_fee_ppk: number
+  final_expiry: string | null
+}) {
+  return post<{ message: string }>("/api/keysets/rotate", input)
+}
+
+// ---- mint identity & recovery ----
+
+export function updateIdentity(input: {
+  name: string
+  public_url: string
+  description: string
+  description_long: string
+}) {
+  return post<{ message: string }>("/api/settings/identity", input) // restarts the stack
+}
+
+export function revealMnemonic(password: string) {
+  return post<{ mnemonic: string }>("/api/settings/mnemonic", { password })
+}
+
+// ---- users ----
+
+export function createUser(username: string, password: string, passwordConfirm: string) {
+  return post<UserEntry>("/api/users", {
+    username,
+    password,
+    password_confirm: passwordConfirm,
+  })
+}
+
+export function deleteUser(username: string) {
+  return requestJson<{ message: string }>(`/api/users/${encodeURIComponent(username)}`, {
+    method: "DELETE",
+  })
+}
+
+export function changePassword(currentPassword: string, password: string, passwordConfirm: string) {
+  return post<{ message: string }>("/api/me/password", {
+    current_password: currentPassword,
+    password,
+    password_confirm: passwordConfirm,
+  })
+}
+
+export function resetUserPassword(username: string, password: string, passwordConfirm: string) {
+  return post<{ message: string }>(`/api/users/${encodeURIComponent(username)}/password`, {
+    password,
+    password_confirm: passwordConfirm,
   })
 }
