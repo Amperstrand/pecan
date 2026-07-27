@@ -2,7 +2,7 @@
 //!
 //! Single binary that runs:
 //!   * a gRPC `cdk-payment-processor` server on $CDK_BRANCH_PROCESSOR_GRPC_PORT,
-//!     implementing the "branch" custom payment method for the configured unit.
+//!     implementing the "branch" custom payment method for the configured units.
 //!     cdk-mintd connects to this and routes all mint/melt for that method to us.
 //!   * a web UI on $CDK_BRANCH_PROCESSOR_HTTP_PORT for branch operators to sign
 //!     in (username + password from the users.json store; first boot seeds a
@@ -10,7 +10,9 @@
 //!     when physical cash is exchanged, and manage units, keysets, and users.
 //!
 //! First boot bootstraps a complete configuration (generated recovery seed,
-//! unit "ora", method "branch") with zero interaction — there is no setup mode.
+//! method "branch", no units) with zero interaction — there is no setup mode.
+//! The mint starts immediately but advertises nothing until the operator adds
+//! the first unit from the console.
 
 mod backend;
 mod clients;
@@ -170,18 +172,25 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow!("bad configured unit {}: {e}", managed.unit))?;
         units.insert(unit, managed.lifecycle);
     }
-    let unit: CurrencyUnit = app_config
-        .mint
-        .unit
-        .parse()
-        .map_err(|e| anyhow!("bad primary unit: {e}"))?;
+    // Empty until the operator adds the first unit on a fresh install.
+    let primary_unit: Option<CurrencyUnit> = if app_config.mint.unit.is_empty() {
+        None
+    } else {
+        Some(
+            app_config
+                .mint
+                .unit
+                .parse()
+                .map_err(|e| anyhow!("bad primary unit: {e}"))?,
+        )
+    };
     let method = app_config.mint.method.clone();
     let branch = BranchState::load(state_path).await?;
 
     let backend = Arc::new(BranchBackend::new(
         branch.clone(),
         units,
-        unit.clone(),
+        primary_unit,
         method.clone(),
     ));
     let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
@@ -191,7 +200,17 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow!("grpc start: {e}"))?;
     tracing::info!(
-        "branch-processor gRPC on {grpc_addr}:{grpc_port} (method={method}, unit={unit})"
+        "branch-processor gRPC on {grpc_addr}:{grpc_port} (method={method}, units={})",
+        if app_config.units.is_empty() {
+            "none configured yet".to_string()
+        } else {
+            app_config
+                .units
+                .iter()
+                .map(|u| u.unit.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        }
     );
     let grpc_server = Some(server);
 

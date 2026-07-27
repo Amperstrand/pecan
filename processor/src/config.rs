@@ -1,10 +1,11 @@
 //! Persistent lifecycle configuration for the browser-managed mint.
 //!
 //! First boot bootstraps a complete configuration from env + defaults (no
-//! setup wizard). The recovery seed is immutable after provisioning. Units are
-//! managed through explicit lifecycle migrations so the generated mint
-//! configuration, payment backend, advertised NUT settings, and keysets stay
-//! aligned.
+//! setup wizard) with zero units: the mint runs but advertises nothing until
+//! the operator adds the first unit from the console. The recovery seed is
+//! immutable after provisioning. Units are managed through explicit lifecycle
+//! migrations so the generated mint configuration, payment backend, advertised
+//! NUT settings, and keysets stay aligned.
 
 use std::path::{Path, PathBuf};
 
@@ -185,10 +186,11 @@ pub struct BootstrapEndpoints {
 }
 
 /// Build a complete first-run configuration with generated defaults — a fresh
-/// recovery mnemonic, the primary unit "ora" on the "branch" method, and the
-/// stock rollover policy. Replaces the browser setup wizard: the stack comes
-/// up working with zero interaction, and everything here except the recovery
-/// seed stays editable from the operator UI.
+/// recovery mnemonic, the "branch" method, the stock rollover policy, and no
+/// units. Replaces the browser setup wizard: the stack comes up working with
+/// zero interaction, the mint advertises nothing until the operator adds the
+/// first unit from the console, and everything here except the recovery seed
+/// stays editable from the operator UI.
 pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Result<AppConfig> {
     let mnemonic = generate_mnemonic()?;
     let rollover = RolloverPolicy {
@@ -198,7 +200,6 @@ pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Re
         input_fee_ppk: 0,
         amounts: default_amounts(),
     };
-    let unit = "ora".to_string();
     let seed_fingerprint = mnemonic_fingerprint(&mnemonic);
     let config = AppConfig {
         version: 3,
@@ -207,7 +208,8 @@ pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Re
             name: "Custom Unit Mint".to_string(),
             description: "Cashu mint for a custom unit with branch settlement.".to_string(),
             description_long: "A stock cdk-mintd instance managed from the browser UI. Mint and melt quotes settle manually through the branch operator workflow.".to_string(),
-            unit: unit.clone(),
+            // The primary unit is claimed by the first unit the operator adds.
+            unit: String::new(),
             method: "branch".to_string(),
             mnemonic,
         },
@@ -224,12 +226,7 @@ pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Re
             processor_grpc_port: endpoints.processor_grpc_port,
         },
         rollover: rollover.clone(),
-        units: vec![ManagedUnit {
-            unit,
-            lifecycle: UnitLifecycle::Active,
-            configured_at,
-            rollover,
-        }],
+        units: Vec::new(),
         seed_fingerprint,
     };
     config.validate_integrity()?;
@@ -238,7 +235,10 @@ pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Re
 
 impl AppConfig {
     pub fn upgrade(&mut self) {
-        if self.units.is_empty() {
+        // Wizard-era configs predate the units list but always carried a
+        // primary unit; migrate it. Bootstrapped configs with no units yet
+        // have an empty primary, which is a valid state, not a legacy one.
+        if self.units.is_empty() && !self.mint.unit.is_empty() {
             self.units.push(ManagedUnit {
                 unit: self.mint.unit.clone(),
                 lifecycle: UnitLifecycle::Active,
@@ -258,9 +258,6 @@ impl AppConfig {
             bail!(
                 "configured recovery seed does not match the immutable seed fingerprint; refusing to continue"
             );
-        }
-        if self.units.is_empty() {
-            bail!("at least one managed unit is required");
         }
         for managed in &self.units {
             validate_slug("unit", &managed.unit)?;
@@ -284,6 +281,13 @@ impl AppConfig {
         let unit = unit.trim().to_ascii_lowercase();
         if self.managed_unit(&unit).is_some() {
             bail!("unit {unit} is already managed");
+        }
+        // The first unit ever added claims the primary slot (a fresh install
+        // bootstraps with none), putting the config in the same shape the
+        // wizard used to produce. The legacy top-level policy mirrors it.
+        if self.mint.unit.is_empty() {
+            self.mint.unit = unit.clone();
+            self.rollover = rollover.clone();
         }
         self.units.push(ManagedUnit {
             unit,
@@ -608,24 +612,61 @@ mod tests {
             input_fee_ppk: 0,
             amounts: vec![1, 2, 4, 8],
         };
-        config
-            .set_unit_rollover("ora", rollover)
-            .expect("set primary policy");
+        config.add_unit("ora", rollover, 1).expect("add first unit");
         config
     }
 
     #[test]
-    fn bootstrap_produces_a_valid_ready_to_run_config() {
+    fn bootstrap_produces_a_valid_unitless_config() {
         let config = bootstrap_config(test_endpoints(), 42).expect("bootstrap");
         assert!(config.validate_integrity().is_ok());
         assert!(config.auth.is_none());
         assert_eq!(config.version, 3);
-        assert_eq!(config.mint.unit, "ora");
+        assert_eq!(config.mint.unit, "");
         assert_eq!(config.mint.method, "branch");
         assert_eq!(config.mint.mnemonic.split_whitespace().count(), 24);
+        assert!(config.units.is_empty());
+        let rendered = render_mint_toml(&config);
+        assert!(!rendered.contains("[[ln]]"));
+        assert!(!rendered.contains("unit_keysets"));
+        assert!(rendered.contains("supported_units = []"));
+    }
+
+    #[test]
+    fn first_added_unit_claims_the_primary_slot() {
+        let mut config = bootstrap_config(test_endpoints(), 42).expect("bootstrap");
+        let policy = RolloverPolicy {
+            enabled: true,
+            keyset_lifetime_days: 30,
+            rotate_before_expiry_days: 7,
+            input_fee_ppk: 3,
+            amounts: vec![1, 2, 4, 8],
+        };
+        config
+            .add_unit("ora", policy.clone(), 43)
+            .expect("add first unit");
+        assert_eq!(config.mint.unit, "ora");
+        assert_eq!(config.rollover.input_fee_ppk, 3);
         let rendered = render_mint_toml(&config);
         assert!(rendered.contains("[grpc_processor.unit_keysets.ora]"));
         assert!(rendered.contains("supported_units = [\"ora\"]"));
+
+        config.add_unit("usd", policy, 44).expect("add second unit");
+        assert_eq!(config.mint.unit, "ora");
+    }
+
+    #[test]
+    fn upgrade_migrates_wizard_units_but_keeps_bootstrap_empty() {
+        let mut wizard_era = test_config();
+        wizard_era.units.clear();
+        wizard_era.version = 2;
+        wizard_era.upgrade();
+        assert_eq!(wizard_era.units.len(), 1);
+        assert_eq!(wizard_era.units[0].unit, "ora");
+
+        let mut fresh = bootstrap_config(test_endpoints(), 42).expect("bootstrap");
+        fresh.upgrade();
+        assert!(fresh.units.is_empty());
     }
 
     #[test]

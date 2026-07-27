@@ -2,7 +2,7 @@
 #
 #   processor — implements the "branch" custom payment method over gRPC and
 #               serves the operator web UI on :9090. cdk-mintd routes all
-#               mint/melt for the custom unit (ora, by default) to it.
+#               mint/melt for the units added in the console to it.
 #   mint      — pinned cdk-mintd on :8089. Talks to the processor's gRPC and,
 #               for keyset management, exposes its management RPC on :8091.
 #

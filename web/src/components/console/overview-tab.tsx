@@ -1,7 +1,8 @@
-import { CircleAlert, CircleCheck, CircleDot, Wallet } from "lucide-react"
+import { CircleAlert, CircleCheck, CircleDot, PlusCircle, Wallet } from "lucide-react"
 
 import type { AppSnapshot, HealthItem } from "@/lib/api"
 import { formatSignedAmount } from "@/lib/format"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Table,
@@ -26,6 +27,17 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
 
   return (
     <div className="grid gap-4">
+      {snapshot.units.length === 0 && (
+        <Alert variant="emphasis">
+          <PlusCircle />
+          <AlertTitle>No units configured yet</AlertTitle>
+          <AlertDescription>
+            The mint is running but offers nothing to wallets. Add the first unit in the Units
+            tab to start issuing ecash.
+          </AlertDescription>
+        </Alert>
+      )}
+
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {health.map(([label, item]) => (
           <StatTile
@@ -37,9 +49,21 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
           />
         ))}
         <StatTile
-          label={`Circulation · ${snapshot.mint.unit.toUpperCase()}`}
-          value={formatSignedAmount(snapshot.summary.net_issued, snapshot.mint.unit)}
-          detail="Completed deposits minus completed payouts"
+          label={
+            snapshot.mint.unit
+              ? `Circulation · ${snapshot.mint.unit.toUpperCase()}`
+              : "Circulation"
+          }
+          value={
+            snapshot.mint.unit
+              ? formatSignedAmount(snapshot.summary.net_issued, snapshot.mint.unit)
+              : "—"
+          }
+          detail={
+            snapshot.mint.unit
+              ? "Completed deposits minus completed payouts"
+              : "Add a unit to start issuing"
+          }
           icon={<Wallet />}
         />
         <StatTile
