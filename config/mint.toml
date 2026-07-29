@@ -1,12 +1,15 @@
 # Reference cdk-mintd configuration for the Custom Unit Mint. The default
 # deploy does NOT read this file — the processor generates mint.toml from the
-# console-managed configuration (one [[ln]] + unit_keysets entry per unit; a
-# fresh install has none until the operator adds the first unit).
+# console-managed configuration: one [[ln]] + [grpc_processor.unit_keysets.*]
+# entry per non-retired unit. A fresh install has none until the operator adds
+# the first unit, and cdk-mintd refuses to start without a payment backend, so
+# the supervisor keeps the mint offline until then.
 #
-# Nothing here is a patched/custom mintd setting — every key is a stock cdk
-# option. The mint is made specific to a custom unit (ora, in this example)
-# purely by pointing its gRPC payment backend at our processor (see
-# [ln]/[grpc_processor] below).
+# Every key except [grpc_processor.unit_keysets.*] is a stock cdk option; the
+# unit_keysets blocks (per-unit denominations, input fee, and initial keyset
+# expiry) are added by patches/cdk-managed-units.patch. The mint is made
+# specific to a custom unit (ora, in this example) by pointing its gRPC
+# payment backend at our processor.
 
 [info]
 url = "http://localhost:8089"
@@ -25,16 +28,24 @@ backend = "memory"
 ttl = 60
 tti = 60
 
+# Seeds a fresh mint database; the processor also asserts these over the
+# management RPC on every boot (QuoteTTL is DB-persisted). Wallet-created
+# quotes live this long before the expiry sweep reclaims them.
+[info.quote_ttl]
+mint_ttl = 1800
+melt_ttl = 900
+
 [mint_info]
 name = "Custom Unit Mint"
-description = "Cashu mint for a custom unit (ora). Mint and melt quotes settle manually through a branch operator."
-description_long = "Demonstrates an unmodified cdk-mintd plumbed against a custom gRPC payment processor implementing the 'branch' method (manual cash settlement). Keyset expiry is enforced natively by the mint."
+description = "Cashu mint for a custom unit (ora). Wallets create locked quotes; a branch operator settles them by quote id."
+description_long = "Demonstrates cdk-mintd (with the managed-units patch) plumbed against a custom gRPC payment processor implementing the 'branch' method (manual cash settlement at a counter). Keyset expiry is enforced natively by the mint."
 
 [database]
 engine = "sqlite"
 
 # Route the custom unit "ora" to our processor instead of a Lightning backend.
-[ln]
+# The generated config writes one such entry per non-retired unit.
+[[ln]]
 ln_backend = "grpcprocessor"
 unit = "ora"
 min_mint = 1
@@ -47,6 +58,12 @@ supported_units = ["ora"]
 # docker-compose service name; plaintext on the compose-internal network.
 addr = "http://processor"
 port = 50051
+
+# Patch-added: per-unit keyset parameters applied at registration.
+[grpc_processor.unit_keysets.ora]
+amounts = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+input_fee_ppk = 0
+initial_final_expiry = 1785283200
 
 # Lets the operator UI rotate keysets (and set each keyset's final_expiry).
 [mint_management_rpc]

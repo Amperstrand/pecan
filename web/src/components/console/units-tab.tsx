@@ -30,6 +30,9 @@ export function UnitsTab({ snapshot }: { snapshot: AppSnapshot }) {
   const observed = snapshot.capabilities.filter(
     (pair) => !snapshot.units.some((unit) => unit.unit === pair.unit),
   )
+  // No non-retired unit → the mint is deliberately not running (standby), so
+  // an unreadable keyset listing is expected, not an incident.
+  const standby = !snapshot.units.some((unit) => unit.lifecycle !== "retired")
 
   return (
     <div className="grid gap-4">
@@ -47,7 +50,7 @@ export function UnitsTab({ snapshot }: { snapshot: AppSnapshot }) {
         </Alert>
       )}
 
-      {!snapshot.keysets.ok && (
+      {!snapshot.keysets.ok && !standby && (
         <Alert variant="emphasis">
           <TriangleAlert />
           <AlertTitle>Could not read keysets from the mint</AlertTitle>
@@ -68,7 +71,7 @@ export function UnitsTab({ snapshot }: { snapshot: AppSnapshot }) {
           <CardContent>
             <EmptyState
               title="No units yet"
-              body="A fresh install starts without any units, so the mint offers nothing to wallets. Add the first unit to start issuing ecash; it becomes available to the teller after a short restart."
+              body="A fresh install starts without any units, and the mint itself stays offline until one exists. Adding the first unit starts the mint and makes the unit available to the teller after a short restart."
             />
           </CardContent>
         </Card>

@@ -1,4 +1,4 @@
-import { CircleAlert, CircleCheck, CircleDot, PlusCircle, Wallet } from "lucide-react"
+import { CircleAlert, CircleCheck, CircleDashed, CircleDot, PlusCircle, Wallet } from "lucide-react"
 
 import type { AppSnapshot, HealthItem } from "@/lib/api"
 import { formatAmount, formatSignedAmount } from "@/lib/format"
@@ -38,8 +38,9 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
           <PlusCircle />
           <AlertTitle>No units configured yet</AlertTitle>
           <AlertDescription>
-            The mint is running but offers nothing to wallets. Add the first unit in the Units
-            tab to start issuing ecash.
+            The mint stays offline until it has a unit to serve — cdk requires at least one
+            payment backend to start. Add the first unit in the Units tab; the mint starts
+            automatically.
           </AlertDescription>
         </Alert>
       )}
@@ -51,7 +52,9 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
             label={label}
             value={item.label}
             detail={item.detail}
-            icon={item.ok ? <CircleCheck /> : <CircleAlert />}
+            icon={
+              item.ok ? <CircleCheck /> : item.label === "Standby" ? <CircleDashed /> : <CircleAlert />
+            }
           />
         ))}
         <StatTile

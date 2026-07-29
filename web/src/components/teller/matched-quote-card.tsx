@@ -129,7 +129,7 @@ export function MatchedQuoteCard({
             Ticket <MonoChip>{ticket.short_id}</MonoChip>
           </span>
           <span>Created {formatAge(ticket.created_at, now)}</span>
-          {incoming && expiresIn && <span>Expires in {expiresIn}</span>}
+          {expiresIn && (incoming || waiting) && <span>Expires in {expiresIn}</span>}
           {ticket.description && <span>Note: {ticket.description}</span>}
         </div>
 

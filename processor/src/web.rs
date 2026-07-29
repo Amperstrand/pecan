@@ -79,8 +79,6 @@ pub fn router(state: WebState) -> Router {
     Router::new()
         .route("/", get(spa_page))
         .route("/teller", get(spa_page))
-        .route("/keysets", get(spa_page))
-        .route("/settings", get(spa_page))
         .route("/login", get(spa_page))
         .route("/api/app", get(api_app))
         .route("/api/login", post(api_login))
@@ -481,6 +479,15 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         Err(r) => return r,
     };
 
+    // With no non-retired unit the generated mint.toml has no payment backend
+    // and cdk-mintd cannot start (the supervisor waits) — the mint services
+    // being down is the expected state, not an outage.
+    let standby = !state
+        .config
+        .units
+        .iter()
+        .any(|unit| unit.lifecycle != UnitLifecycle::Retired);
+
     let mut tickets = state.branch.list_all().await;
     tickets.sort_by_key(|ticket| std::cmp::Reverse(ticket.created_at));
     let primary_tickets = tickets
@@ -694,8 +701,8 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         rollover: api_rollover(&state.config.rollover),
         default_amounts: (*state.default_amounts).clone(),
         health: ApiHealth {
-            mint_http: health_item(info_health.as_ref().map(|_| ())),
-            management_rpc: health_item(rpc_health.as_ref().map(|_| ())),
+            mint_http: standby_aware(health_item(info_health.as_ref().map(|_| ())), standby),
+            management_rpc: standby_aware(health_item(rpc_health.as_ref().map(|_| ())), standby),
             payment_backend: ApiHealthItem {
                 ok: true,
                 label: "Listening".to_string(),
@@ -780,6 +787,19 @@ fn health_item<T>(result: Result<T, &anyhow::Error>) -> ApiHealthItem {
             Ok(_) => "Responding normally".to_string(),
             Err(e) => e.to_string(),
         },
+    }
+}
+
+/// Reframe an expected zero-unit outage as standby instead of an error.
+fn standby_aware(item: ApiHealthItem, standby: bool) -> ApiHealthItem {
+    if standby && !item.ok {
+        ApiHealthItem {
+            ok: false,
+            label: "Standby".to_string(),
+            detail: "The mint starts once the first unit is added".to_string(),
+        }
+    } else {
+        item
     }
 }
 

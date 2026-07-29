@@ -3,9 +3,10 @@
 //! Config changes restart the whole process (persist + exit + docker restart);
 //! keeping sessions in a file means operators stay signed in across those
 //! restarts. A corrupt or missing file is harmless — everyone just signs in
-//! again — so loading is parse-or-default, mirroring the tickets store's
-//! tolerance. Writes are whole-file atomic (tmp + rename): a login racing the
-//! 900 ms restart window either fully persists or is simply lost, never torn.
+//! again — so loading is parse-or-default (unlike the tickets store, which
+//! quarantines an unreadable file because it is a settlement record). Writes
+//! are whole-file atomic (tmp + rename): a login racing the 900 ms restart
+//! window either fully persists or is simply lost, never torn.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
