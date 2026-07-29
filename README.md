@@ -168,8 +168,8 @@ final expiry.
 ## Security Notes
 
 - Change the demo `admin`/`admin` password immediately; the console banner
-  clears once you do. New and changed passwords must be at least 12 characters
-  with a letter, a number, and a symbol.
+  clears once you do. New and changed passwords must be at least 8 characters;
+  there are no composition rules.
 - Back up the recovery phrase (**Mint → Reveal recovery phrase**). It restores
   the mint signing keys and cannot be changed.
 - All users have full operator access; there are no roles. Instances upgraded

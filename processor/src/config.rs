@@ -14,7 +14,7 @@ use bip39::{Language, Mnemonic};
 use bitcoin_hashes::{sha256, Hash};
 use serde::{Deserialize, Serialize};
 
-pub const PASSWORD_MIN_LENGTH: usize = 12;
+pub const PASSWORD_MIN_LENGTH: usize = 8;
 
 /// Lifetime of a wallet-created mint quote. Rendered into mint.toml, asserted
 /// over the management RPC on every boot, and mirrored by the processor's
@@ -360,21 +360,10 @@ pub fn parse_amounts(raw: &str) -> Result<Vec<u64>> {
     Ok(amounts)
 }
 
+/// Length is the only strength requirement — no composition rules.
 pub fn validate_operator_password(password: &str, password_confirm: &str) -> Result<()> {
     if password.chars().count() < PASSWORD_MIN_LENGTH {
         bail!("operator password must be at least {PASSWORD_MIN_LENGTH} characters");
-    }
-    if !password.chars().any(char::is_alphabetic) {
-        bail!("operator password must include a letter");
-    }
-    if !password.chars().any(|c| c.is_ascii_digit()) {
-        bail!("operator password must include a number");
-    }
-    if !password
-        .chars()
-        .any(|c| !c.is_alphanumeric() && !c.is_whitespace())
-    {
-        bail!("operator password must include a symbol");
     }
     if password != password_confirm {
         bail!("operator passwords do not match");
@@ -771,6 +760,14 @@ mod tests {
         let rendered = render_mint_toml(&config);
         assert!(!rendered.contains("unit = \"ora\""));
         assert!(rendered.contains("supported_units = [\"usd\"]"));
+    }
+
+    #[test]
+    fn password_rule_is_length_only() {
+        assert!(validate_operator_password("1234567", "1234567").is_err()); // 7 chars
+        assert!(validate_operator_password("12345678", "12345678").is_ok()); // digits only
+        assert!(validate_operator_password("password", "password").is_ok()); // letters only
+        assert!(validate_operator_password("password", "different").is_err()); // mismatch
     }
 
     #[test]

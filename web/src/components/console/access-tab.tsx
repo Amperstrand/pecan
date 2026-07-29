@@ -164,8 +164,7 @@ function AddUserDialog({ minLength }: { minLength: number }) {
           <DialogHeader>
             <DialogTitle>Add a user</DialogTitle>
             <DialogDescription>
-              Lowercase username; the password needs at least {minLength} characters with a
-              letter, a number, and a symbol.
+              Lowercase username; the password needs at least {minLength} characters.
             </DialogDescription>
           </DialogHeader>
           <Field label="Username" htmlFor="add-user-name">
@@ -392,8 +391,7 @@ function ChangePasswordCard({ minLength }: { minLength: number }) {
       <CardHeader>
         <CardTitle>Change your password</CardTitle>
         <CardDescription>
-          At least {minLength} characters with a letter, a number, and a symbol. Your other
-          sessions are signed out.
+          At least {minLength} characters. Your other sessions are signed out.
         </CardDescription>
       </CardHeader>
       <CardContent>
