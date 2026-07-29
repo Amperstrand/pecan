@@ -46,10 +46,13 @@ docker compose up --build --force-recreate -d
 
 Two pages, monochrome:
 
-- **Teller** (`/teller`) — one quote offer at a time. Create a deposit or
-  withdrawal offer (NUT-XX `cquoteA…`), show the QR, and settle with at most
-  two big buttons per step: interrupt (outline, left) or proceed (solid,
-  right).
+- **Teller** (`/teller`) — match-first till. Customers create quotes in their
+  own wallet; the teller resolves the right one by entering the last 6+
+  characters of the quote id from the customer's wallet screen (or scanning
+  the full id with a handheld scanner), then settles it with at most two big
+  buttons: interrupt (outline, left) or proceed (solid, right). The open-quote
+  list shows truncated ids only, so a quote can never be settled without the
+  customer's code.
 - **Operator Console** (`/`) — everything else, in four tabs:
   - **Overview**: health, circulating ecash, unit balances, settled activity.
   - **Units**: add units, edit each unit's keyset policy, rotate keysets, and
@@ -68,16 +71,49 @@ come back and sessions survive the restart.
 
 Deposit (mint):
 
-1. Teller creates a **Deposit** offer; the wallet scans and claims it.
-2. Customer hands over cash.
-3. Teller presses **Cash received**; the wallet receives ecash.
+1. The customer's wallet creates a NUT-20-locked mint quote at the mint
+   (`POST /v1/mint/quote/branch`) and shows its quote id.
+2. The teller matches the quote — scans the id or types its last 6+
+   characters — and checks the amount with the customer.
+3. Customer hands over cash; teller presses **Cash received**. The mint marks
+   the quote paid and the wallet mints the ecash (only that wallet can — the
+   quote is locked to its key, so the quote id is not a bearer secret).
 
 Withdrawal (melt):
 
-1. Teller creates a **Withdraw** offer; the wallet claims it and commits
-   proofs (the screen says when it is safe to pay out).
-2. Teller compares the payment code shown in the customer's wallet, hands
-   over cash, and presses **Cash paid out**; the mint finalizes the melt.
+1. The customer's wallet creates a melt quote (`POST /v1/melt/quote/branch`)
+   declaring the payout amount, then pays its ecash into it — the mint locks
+   the proofs before any cash moves.
+2. The teller matches the melt quote id the same way. The card blocks payout
+   until the wallet's funds are locked ("Awaiting wallet" → "Ready to pay
+   out").
+3. Teller hands over cash and presses **Cash paid out**; the mint finalizes
+   the melt. **Void** at any earlier point releases the customer's proofs.
+
+Abandoned quotes expire at the mint (30 min for deposits, 15 min for
+withdrawals) and the processor deletes expired, never-funded tickets
+automatically.
+
+## Wallet Integration Contract
+
+Wallets talking to a branch mint must:
+
+- create **locked** mint quotes: `POST /v1/mint/quote/branch` with `amount`,
+  `unit`, and a NUT-20 `pubkey` (unlocked quotes are rejected), then sign the
+  mint request with that key;
+- display the quote id for the teller: as text with the **last 6 characters
+  emphasized**, and as a QR encoding the **bare quote id** (no URL scheme —
+  handheld scanners type the payload verbatim into the match field);
+- poll `GET /v1/mint/quote/branch/{quote_id}` (or subscribe via NUT-17) and
+  mint once `amount_paid` covers the quote;
+- for withdrawals: `POST /v1/melt/quote/branch` with `unit`, a free-form
+  `request` memo, and the payout declared as a flattened `amount` field, then
+  submit the melt with proofs. The melt may exceed the 60 s synchronous
+  window — handle the pending-timeout response and keep polling the melt
+  quote;
+- expect rejections to surface as generic mint errors (cdk flattens payment
+  processor errors); the specific reason — missing pubkey, unmanaged unit,
+  amount limits, too many open quotes — is logged by the mint and processor.
 
 ## Persistence
 
@@ -89,8 +125,12 @@ Docker Compose uses named volumes:
 | `mint-data` | `cdk-mintd` database |
 | `processor-data` | branch ticket store, login sessions, config backup |
 
-Normal rebuilds and recreates keep these volumes. To reset everything for a
-fresh local demo:
+Normal rebuilds and recreates keep these volumes. **Upgrade note:** settle or
+cancel open teller work before deploying this version — tickets written by the
+removed quote-offer flow have no mint quote id, so any still-open ones are
+voided on first load (settled history is preserved).
+
+To reset everything for a fresh local demo:
 
 ```sh
 docker compose down -v

@@ -6,8 +6,9 @@
 //!     cdk-mintd connects to this and routes all mint/melt for that method to us.
 //!   * a web UI on $CDK_BRANCH_PROCESSOR_HTTP_PORT for branch operators to sign
 //!     in (username + password from the users.json store; first boot seeds a
-//!     demo admin/admin account), see pending mint/melt quotes, mark them paid
-//!     when physical cash is exchanged, and manage units, keysets, and users.
+//!     demo admin/admin account), match wallet-created quotes by quote id,
+//!     mark them paid when physical cash is exchanged, and manage units,
+//!     keysets, and users.
 //!
 //! First boot bootstraps a complete configuration (generated recovery seed,
 //! method "branch", no units) with zero interaction — there is no setup mode.
@@ -17,7 +18,6 @@
 mod backend;
 mod clients;
 mod config;
-mod offer;
 mod sessions;
 mod state;
 mod users;
@@ -222,6 +222,8 @@ async fn main() -> Result<()> {
         mint_http.clone(),
         branch.clone(),
     );
+    spawn_ticket_sweeper(branch.clone());
+    spawn_quote_ttl_sync(mint_rpc.clone());
 
     let app = web::router(web::WebState::new(
         branch,
@@ -248,6 +250,55 @@ async fn main() -> Result<()> {
         let _ = server.stop().await;
     }
     Ok(())
+}
+
+/// Periodically drop expired tickets no money ever moved for, so abandoned
+/// wallet-created quotes neither clutter the teller's open list nor pin the
+/// open-quote cap. Funded melts are never touched (see `sweep_expired`).
+fn spawn_ticket_sweeper(branch: BranchState) {
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(60)).await;
+            let removed = branch.sweep_expired().await;
+            if removed > 0 {
+                tracing::info!("swept {removed} expired unfunded quote(s)");
+            }
+        }
+    });
+}
+
+/// Assert the mint's quote TTLs on every boot. The TTL is persisted in the
+/// mint's database (the generated mint.toml only seeds fresh installs), so
+/// without this an existing deployment would keep the cdk defaults (1 h mint,
+/// 60 s melt) and disagree with the processor's ticket-expiry bookkeeping.
+/// Retries quietly while cdk-mintd is still starting up.
+fn spawn_quote_ttl_sync(mint_rpc: MintRpcClient) {
+    tokio::spawn(async move {
+        for attempt in 1..=30u32 {
+            match mint_rpc
+                .set_quote_ttl(
+                    config::MINT_QUOTE_TTL_SECS,
+                    config::MELT_QUOTE_TTL_SECS,
+                )
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        "mint quote TTLs set: mint {}s, melt {}s",
+                        config::MINT_QUOTE_TTL_SECS,
+                        config::MELT_QUOTE_TTL_SECS
+                    );
+                    return;
+                }
+                Err(e) => {
+                    if attempt == 30 {
+                        tracing::warn!("could not set mint quote TTLs after {attempt} tries: {e:#}");
+                    }
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    });
 }
 
 fn spawn_rollover_worker(

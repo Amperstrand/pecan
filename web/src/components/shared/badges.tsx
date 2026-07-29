@@ -13,7 +13,7 @@ export function StatusBadge({ status }: { status: TicketStatus }) {
         Failed
       </Badge>
     )
-  const label = status === "waiting" ? "Claimed" : status[0].toUpperCase() + status.slice(1)
+  const label = status === "waiting" ? "Awaiting wallet" : "Open"
   return <Badge variant="outline">{label}</Badge>
 }
 
