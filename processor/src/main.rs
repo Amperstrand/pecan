@@ -234,7 +234,7 @@ async fn main() -> Result<()> {
         branch.clone(),
     );
     spawn_ticket_sweeper(branch.clone());
-    spawn_quote_ttl_sync(mint_rpc.clone());
+    spawn_quote_ttl_sync(mint_rpc.clone(), branch.clone());
 
     let app = web::router(web::WebState::new(
         branch,
@@ -289,7 +289,11 @@ fn spawn_ticket_sweeper(branch: BranchState) {
 /// (That path is also covered by mint.toml seeding a brand-new database, but
 /// the retry keeps every ordering correct.) Quick retries for the first
 /// minute, then one quiet probe per minute.
-fn spawn_quote_ttl_sync(mint_rpc: MintRpcClient) {
+///
+/// First success doubles as the "the mint just came up" signal: it pushes an
+/// SSE change so every open console refetches and its health tiles settle
+/// without a manual reload.
+fn spawn_quote_ttl_sync(mint_rpc: MintRpcClient, branch: BranchState) {
     tokio::spawn(async move {
         let mut attempt = 0u32;
         loop {
@@ -303,6 +307,7 @@ fn spawn_quote_ttl_sync(mint_rpc: MintRpcClient) {
                         config::MINT_QUOTE_TTL_SECS,
                         config::MELT_QUOTE_TTL_SECS
                     );
+                    branch.notify_ui_change();
                     return;
                 }
                 Err(e) => {
