@@ -30,9 +30,15 @@ services:
       CDK_BRANCH_PROCESSOR_MINT_HTTP_URL: "http://mint:8089"
       CDK_BRANCH_PROCESSOR_MINT_GRPC_ADDR: "http://processor"
       CDK_BRANCH_PROCESSOR_DEFAULT_MINT_PUBLIC_URL: "http://localhost:${MINT_PORT:-8089}"
+      CDK_BRANCH_PROCESSOR_MINT_DB_PATH: "/var/lib/cdk-mintd/cdk-mintd.sqlite"
     volumes:
       - processor-data:/var/lib/cdk-branch-processor
       - config-data:/var/lib/custom-unit-mint/config
+      # Supply audit: the processor reads the mint's keyset_amounts table.
+      # The connection is opened read-only, but the mount cannot be :ro —
+      # the database runs in WAL mode and even readers must write the -shm
+      # WAL index file.
+      - mint-data:/var/lib/cdk-mintd
     restart: unless-stopped
     networks:
       - custom-unit
