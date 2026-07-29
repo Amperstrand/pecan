@@ -58,6 +58,23 @@ export interface UnitSummary {
   net_issued: number
 }
 
+/** Audited supply for one unit, read from the mint database per keyset. */
+export interface UnitSupply {
+  unit: string
+  /** Redeemable ecash outstanding under non-expired keysets. */
+  live: number
+  /** Ecash stranded under keysets past their final expiry. */
+  demonetized: number
+  /** Value burned as input fees. */
+  fee_collected: number
+}
+
+export interface SupplySnapshot {
+  available: boolean
+  error?: string | null
+  units: UnitSupply[]
+}
+
 export interface Ticket {
   id: string
   short_id: string
@@ -145,6 +162,7 @@ export interface AppSnapshot {
     net_issued: number
   }
   unit_summaries: UnitSummary[]
+  supply: SupplySnapshot
   circulation: CirculationPoint[]
   open_quotes: OpenQuoteSummary[]
   recent_done: Ticket[]

@@ -29,6 +29,7 @@ use crate::sessions::SessionStore;
 use crate::state::{
     normalize_match_input, BranchState, MatchResult, Ticket, TicketKind, TicketStatus,
 };
+use crate::supply::{per_unit_supply, SupplyReader};
 use crate::users::{PublicUser, UserError, UserStore};
 
 #[derive(Clone)]
@@ -36,6 +37,7 @@ pub struct WebState {
     pub branch: BranchState,
     pub mint_rpc: MintRpcClient,
     pub mint_http: MintHttpClient,
+    pub supply: SupplyReader,
     pub config: Arc<AppConfig>,
     pub users: UserStore,
     pub sessions: SessionStore,
@@ -50,6 +52,7 @@ impl WebState {
         branch: BranchState,
         mint_rpc: MintRpcClient,
         mint_http: MintHttpClient,
+        supply: SupplyReader,
         config: AppConfig,
         config_store: ConfigStore,
         users: UserStore,
@@ -61,6 +64,7 @@ impl WebState {
             branch,
             mint_rpc,
             mint_http,
+            supply,
             config: Arc::new(config),
             users,
             sessions,
@@ -279,6 +283,7 @@ struct ApiAppSnapshot {
     active_keyset: Option<crate::clients::KeysetEntry>,
     summary: MintSummary,
     unit_summaries: Vec<ApiUnitSummary>,
+    supply: ApiSupply,
     circulation: Vec<CirculationPoint>,
     open_quotes: Vec<ApiOpenQuote>,
     recent_done: Vec<ApiTicket>,
@@ -357,6 +362,27 @@ struct ApiUnitSummary {
     minted_amount: u64,
     melted_amount: u64,
     net_issued: i128,
+}
+
+/// Audited supply straight from the mint database (per-keyset issued minus
+/// redeemed, split by keyset expiry). `available: false` with no error means
+/// auditing is disabled or the mint has not created its database yet.
+#[derive(Serialize)]
+struct ApiSupply {
+    available: bool,
+    error: Option<String>,
+    units: Vec<ApiUnitSupply>,
+}
+
+#[derive(Serialize)]
+struct ApiUnitSupply {
+    unit: String,
+    /// Redeemable ecash outstanding under non-expired keysets.
+    live: u64,
+    /// Ecash stranded under keysets past their final expiry.
+    demonetized: u64,
+    /// Value burned as input fees.
+    fee_collected: u64,
 }
 
 #[derive(Serialize)]
@@ -584,6 +610,43 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
             }
         }
     }
+    // Audited supply: requires the keyset listing (unit + expiry per keyset)
+    // to classify the audit rows — without it the numbers would be wrong, so
+    // report unavailable instead.
+    let supply = if keysets.ok {
+        match state.supply.read().await {
+            Ok(Some(rows)) => ApiSupply {
+                available: true,
+                error: None,
+                units: per_unit_supply(&rows, &keyset_items, now)
+                    .into_iter()
+                    .map(|unit| ApiUnitSupply {
+                        unit: unit.unit,
+                        live: unit.live,
+                        demonetized: unit.demonetized,
+                        fee_collected: unit.fee_collected,
+                    })
+                    .collect(),
+            },
+            Ok(None) => ApiSupply {
+                available: false,
+                error: None,
+                units: Vec::new(),
+            },
+            Err(e) => ApiSupply {
+                available: false,
+                error: Some(e.to_string()),
+                units: Vec::new(),
+            },
+        }
+    } else {
+        ApiSupply {
+            available: false,
+            error: Some("keyset listing unavailable".to_string()),
+            units: Vec::new(),
+        }
+    };
+
     let unit_summaries = state
         .config
         .units
@@ -647,6 +710,7 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         active_keyset,
         summary,
         unit_summaries,
+        supply,
         circulation: circulation_points(&primary_tickets),
         open_quotes,
         recent_done,

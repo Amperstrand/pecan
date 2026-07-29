@@ -42,6 +42,7 @@ tonic = { version = "0.14.2", default-features = false, features = ["transport",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 
 [profile.release]
 # keep the demo image small; the processor is not perf-sensitive

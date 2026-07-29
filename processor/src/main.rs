@@ -20,6 +20,7 @@ mod clients;
 mod config;
 mod sessions;
 mod state;
+mod supply;
 mod users;
 mod web;
 
@@ -54,6 +55,10 @@ const ENV_MINT_RPC_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_RPC_URL";
 const ENV_MINT_HTTP_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_HTTP_URL";
 const ENV_DEFAULT_MINT_PUBLIC_URL: &str = "CDK_BRANCH_PROCESSOR_DEFAULT_MINT_PUBLIC_URL";
 const ENV_MINT_GRPC_ADDR: &str = "CDK_BRANCH_PROCESSOR_MINT_GRPC_ADDR";
+/// Path of cdk-mintd's sqlite database for the read-only supply audit.
+/// Set to an empty string to disable auditing (e.g. a rig without access to
+/// the mint's work dir).
+const ENV_MINT_DB_PATH: &str = "CDK_BRANCH_PROCESSOR_MINT_DB_PATH";
 
 const DEFAULT_WORK_DIR: &str = "/var/lib/cdk-branch-processor";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/custom-unit-mint/config";
@@ -65,6 +70,7 @@ const DEFAULT_MINT_HTTP_URL: &str = "http://mint:8089";
 const DEFAULT_MINT_RPC_URL: &str = "http://mint:8091";
 const DEFAULT_PUBLIC_URL: &str = "http://localhost:8089";
 const DEFAULT_MINT_GRPC_ADDR: &str = "http://processor";
+const DEFAULT_MINT_DB_PATH: &str = "/var/lib/cdk-mintd/cdk-mintd.sqlite";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -113,6 +119,11 @@ async fn main() -> Result<()> {
         std::env::var(ENV_DEFAULT_MINT_PUBLIC_URL).unwrap_or_else(|_| DEFAULT_PUBLIC_URL.into());
     let mint_grpc_addr =
         std::env::var(ENV_MINT_GRPC_ADDR).unwrap_or_else(|_| DEFAULT_MINT_GRPC_ADDR.into());
+    let mint_db_path = match std::env::var(ENV_MINT_DB_PATH) {
+        Ok(path) if path.trim().is_empty() => None,
+        Ok(path) => Some(PathBuf::from(path)),
+        Err(_) => Some(PathBuf::from(DEFAULT_MINT_DB_PATH)),
+    };
 
     let state_path = work_dir.join("tickets.json");
 
@@ -229,6 +240,7 @@ async fn main() -> Result<()> {
         branch,
         mint_rpc,
         mint_http,
+        supply::SupplyReader::new(mint_db_path),
         app_config,
         config_store.clone(),
         users,

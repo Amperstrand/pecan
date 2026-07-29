@@ -94,6 +94,28 @@ Abandoned quotes expire at the mint (30 min for deposits, 15 min for
 withdrawals) and the processor deletes expired, never-funded tickets
 automatically.
 
+## Supply Figures
+
+The console's circulation numbers are **audited from the mint's own
+database**, not inferred from teller activity: the processor reads the mint's
+per-keyset `keyset_amounts` table (issued / redeemed / fees, maintained by
+cdk on every signature and spend) over a read-only connection and joins it
+with each keyset's final expiry. Per unit it reports:
+
+- **Live supply** — outstanding ecash under keysets that can still be
+  redeemed. This is the real circulation figure.
+- **Demonetized** — ecash issued under keysets that passed their final
+  expiry without being swapped forward or melted. It is gone for good and is
+  deliberately *not* counted as circulating.
+- **Net settled** — the teller ledger (settled deposits minus payouts), kept
+  for reconciliation. It stays above live supply by the demonetized amount,
+  collected input fees, and any paid-but-never-minted quotes.
+
+If the processor cannot reach the mint database (for example a dev rig
+without the shared volume — unset or empty `CDK_BRANCH_PROCESSOR_MINT_DB_PATH`
+disables the audit), the console falls back to the teller ledger and labels
+it accordingly.
+
 ## Wallet Integration Contract
 
 Wallets talking to a branch mint must:
@@ -122,7 +144,7 @@ Docker Compose uses named volumes:
 | Volume | Data |
 |---|---|
 | `config-data` | generated config (`setup.json`), `mint.toml`, user accounts (`users.json`) |
-| `mint-data` | `cdk-mintd` database |
+| `mint-data` | `cdk-mintd` database (also mounted into the processor, which opens it read-only for the supply audit) |
 | `processor-data` | branch ticket store, login sessions, config backup |
 
 Normal rebuilds and recreates keep these volumes. **Upgrade note:** settle or
@@ -198,4 +220,6 @@ commit:
 ```
 
 Keep `Dockerfile` and `processor/Cargo.toml` in sync when updating CDK.
-Rebase and revalidate `patches/cdk-managed-units.patch` at the same time.
+Rebase and revalidate `patches/cdk-managed-units.patch` at the same time,
+and confirm the mint's `keyset_amounts` table still matches the read in
+`processor/src/supply.rs` (the supply audit's only schema coupling).
