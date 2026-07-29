@@ -1,5 +1,5 @@
 export type TicketKind = "incoming" | "outgoing"
-export type TicketStatus = "offered" | "waiting" | "pending" | "paid" | "failed"
+export type TicketStatus = "waiting" | "pending" | "paid" | "failed"
 
 export interface HealthItem {
   ok: boolean
@@ -61,6 +61,8 @@ export interface UnitSummary {
 export interface Ticket {
   id: string
   short_id: string
+  /** The mint's quote id — what the customer's wallet displays. */
+  quote_id?: string | null
   kind: TicketKind
   kind_label: string
   amount: number
@@ -72,12 +74,23 @@ export interface Ticket {
   expires_at?: number | null
   description?: string | null
   notes?: string | null
-  /** Serialized NUT-XX quote offer (`cquoteA...`) — the only thing shown to the wallet. */
-  offer?: string | null
-  /** QR of the offer; present while the offer is unclaimed. */
-  qr_svg?: string | null
-  /** Payout verification code for funded cash-dispense tickets. */
-  verification_code?: string | null
+}
+
+/**
+ * Redacted row of the teller's open-quote list. Only the leading characters of
+ * the quote id are shipped — matching requires the trailing characters, which
+ * must come from the customer's wallet.
+ */
+export interface OpenQuoteSummary {
+  prefix: string
+  kind: TicketKind
+  kind_label: string
+  amount: number
+  unit: string
+  status: TicketStatus
+  status_label: string
+  created_at: number
+  expires_at?: number | null
 }
 
 export interface CirculationPoint {
@@ -133,8 +146,7 @@ export interface AppSnapshot {
   }
   unit_summaries: UnitSummary[]
   circulation: CirculationPoint[]
-  tickets: Ticket[]
-  active_tickets: Ticket[]
+  open_quotes: OpenQuoteSummary[]
   recent_done: Ticket[]
   units: ManagedUnit[]
   capabilities: Capability[]
@@ -207,13 +219,13 @@ export function fetchSnapshot() {
 
 // ---- teller ----
 
-export function createQuote(input: {
-  kind: "mint" | "melt"
-  unit: string
-  amount: number
-  description?: string
-}) {
-  return post<Ticket>("/api/quotes", input)
+/**
+ * Resolve teller input — the last 6+ characters of a quote id typed from the
+ * customer's wallet, or the full id from a scanner — to the one open quote it
+ * identifies. 404 = no match, 409 = ambiguous (type more characters).
+ */
+export function matchQuote(code: string) {
+  return post<Ticket>("/api/quotes/match", { code })
 }
 
 export function markPaid(ticketId: string, notes?: string) {

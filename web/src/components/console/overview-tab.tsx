@@ -67,9 +67,9 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
           icon={<Wallet />}
         />
         <StatTile
-          label="Active quotes"
-          value={String(snapshot.active_tickets.length)}
-          detail="Waiting or pending teller work"
+          label="Open quotes"
+          value={String(snapshot.open_quotes.length)}
+          detail="Wallet-created quotes awaiting the counter"
           icon={<CircleDot />}
         />
       </section>

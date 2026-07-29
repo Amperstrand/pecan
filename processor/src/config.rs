@@ -16,6 +16,15 @@ use serde::{Deserialize, Serialize};
 
 pub const PASSWORD_MIN_LENGTH: usize = 12;
 
+/// Lifetime of a wallet-created mint quote. Rendered into mint.toml, asserted
+/// over the management RPC on every boot, and mirrored by the processor's
+/// ticket expiry — a customer has this long to hand over cash at the counter.
+pub const MINT_QUOTE_TTL_SECS: u64 = 30 * 60;
+
+/// Lifetime of a wallet-created melt quote (cdk's default of 60 s is far too
+/// tight for a counter visit). Same three uses as [`MINT_QUOTE_TTL_SECS`].
+pub const MELT_QUOTE_TTL_SECS: u64 = 15 * 60;
+
 #[derive(Clone, Debug)]
 pub struct ConfigStore {
     app_config_path: PathBuf,
@@ -525,6 +534,12 @@ backend = "memory"
 ttl = 60
 tti = 60
 
+# Seeds a fresh mint database; existing databases are updated over the
+# management RPC at processor boot (QuoteTTL is DB-persisted).
+[info.quote_ttl]
+mint_ttl = {mint_quote_ttl}
+melt_ttl = {melt_quote_ttl}
+
 [mint_info]
 name = "{name}"
 description = "{description}"
@@ -552,6 +567,8 @@ max_outputs = 1000
 "#,
         public_url = toml_escape(&config.endpoints.public_url),
         mnemonic = toml_escape(&config.mint.mnemonic),
+        mint_quote_ttl = MINT_QUOTE_TTL_SECS,
+        melt_quote_ttl = MELT_QUOTE_TTL_SECS,
         name = toml_escape(&config.mint.name),
         description = toml_escape(&config.mint.description),
         description_long = toml_escape(&config.mint.description_long),
@@ -741,6 +758,9 @@ mod tests {
         let rendered = render_mint_toml(&config);
         assert!(rendered.contains("unit = \"ora\"\nmin_mint = 0\nmax_mint = 0"));
         assert!(rendered.contains("unit = \"usd\"\nmin_mint = 1\nmax_mint = 500000"));
+        assert!(rendered.contains(&format!(
+            "[info.quote_ttl]\nmint_ttl = {MINT_QUOTE_TTL_SECS}\nmelt_ttl = {MELT_QUOTE_TTL_SECS}"
+        )));
         assert!(rendered.contains(
             "[grpc_processor.unit_keysets.usd]\namounts = [1, 5, 10]\ninput_fee_ppk = 2\ninitial_final_expiry = 1209602"
         ));
