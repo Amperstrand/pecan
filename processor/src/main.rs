@@ -283,15 +283,18 @@ fn spawn_ticket_sweeper(branch: BranchState) {
 /// mint's database (the generated mint.toml only seeds fresh installs), so
 /// without this an existing deployment would keep the cdk defaults (1 h mint,
 /// 60 s melt) and disagree with the processor's ticket-expiry bookkeeping.
-/// Retries quietly while cdk-mintd is still starting up.
+///
+/// Retries until it succeeds: on a fresh install the mint does not even start
+/// until the operator adds the first unit, which can be arbitrarily later.
+/// (That path is also covered by mint.toml seeding a brand-new database, but
+/// the retry keeps every ordering correct.) Quick retries for the first
+/// minute, then one quiet probe per minute.
 fn spawn_quote_ttl_sync(mint_rpc: MintRpcClient) {
     tokio::spawn(async move {
-        for attempt in 1..=30u32 {
+        let mut attempt = 0u32;
+        loop {
             match mint_rpc
-                .set_quote_ttl(
-                    config::MINT_QUOTE_TTL_SECS,
-                    config::MELT_QUOTE_TTL_SECS,
-                )
+                .set_quote_ttl(config::MINT_QUOTE_TTL_SECS, config::MELT_QUOTE_TTL_SECS)
                 .await
             {
                 Ok(()) => {
@@ -303,10 +306,15 @@ fn spawn_quote_ttl_sync(mint_rpc: MintRpcClient) {
                     return;
                 }
                 Err(e) => {
+                    attempt += 1;
                     if attempt == 30 {
-                        tracing::warn!("could not set mint quote TTLs after {attempt} tries: {e:#}");
+                        tracing::info!(
+                            "mint not reachable yet for the quote-TTL sync (normal until the \
+                             first unit exists); will keep retrying every 60s: {e:#}"
+                        );
                     }
-                    sleep(Duration::from_secs(2)).await;
+                    let delay = if attempt < 30 { 2 } else { 60 };
+                    sleep(Duration::from_secs(delay)).await;
                 }
             }
         }

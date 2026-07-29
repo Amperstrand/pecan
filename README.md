@@ -20,11 +20,13 @@ Open:
 
 First build compiles CDK from source. There is no setup wizard: the first boot
 bootstraps a complete configuration (generated recovery phrase, method
-`branch`, no units) and the mint starts automatically — running, but offering
-nothing to wallets yet. Sign in with the demo credentials **`admin` / `admin`**
-and change the password from the console's **Access** tab before real use — the
-UI warns until you do. Then add the first unit from the console's **Units** tab
-to start issuing ecash. Everything chosen at bootstrap (identity, wallet-facing
+`branch`, no units) and brings up the operator UI immediately. The mint itself
+stays offline until the first unit exists — cdk-mintd requires at least one
+payment backend to start, so the supervisor waits and the console shows the
+mint services as **Standby**. Sign in with the demo credentials
+**`admin` / `admin`** and change the password from the console's **Access**
+tab before real use — the UI warns until you do. Then add the first unit from
+the console's **Units** tab: that starts the mint and begins issuing ecash. Everything chosen at bootstrap (identity, wallet-facing
 URL, keyset policy, users) stays editable from the console; only the recovery
 seed is immutable. Back up the recovery phrase from **Mint → Reveal recovery
 phrase**.
