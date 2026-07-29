@@ -14,9 +14,16 @@ stop_mint() {
 
 trap 'stop_mint; exit 0' INT TERM
 
+# cdk-mintd refuses to start without at least one payment backend, and a
+# fresh install legitimately has zero units (no [[ln]] entries) until the
+# operator adds the first one from the console. Wait instead of crash-looping.
+config_ready() {
+    [ -s "${config_path}" ] && grep -q '^\[\[ln\]\]' "${config_path}"
+}
+
 while true; do
-    while [ ! -s "${config_path}" ]; do
-        echo "waiting for browser setup"
+    while ! config_ready; do
+        echo "waiting for the first unit (mint starts once one is added in the console)"
         sleep 2
     done
 
@@ -34,6 +41,9 @@ while true; do
         fi
     done
 
-    wait "${mint_pid}" 2>/dev/null || true
+    if ! wait "${mint_pid}" 2>/dev/null; then
+        echo "mint exited unexpectedly; retrying in 2s"
+        sleep 2
+    fi
     mint_pid=
 done

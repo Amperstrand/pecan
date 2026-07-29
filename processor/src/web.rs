@@ -16,8 +16,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use futures::stream::{Stream, StreamExt};
-use qrcode::render::svg;
-use qrcode::QrCode;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio::time::{sleep, Duration};
@@ -27,9 +25,11 @@ use crate::clients::{MintHttpClient, MintRpcClient};
 use crate::config::{
     parse_amounts, AppConfig, ConfigStore, RolloverPolicy, UnitLifecycle, PASSWORD_MIN_LENGTH,
 };
-use crate::offer::QuoteOffer;
 use crate::sessions::SessionStore;
-use crate::state::{BranchState, Ticket, TicketKind, TicketStatus};
+use crate::state::{
+    normalize_match_input, BranchState, MatchResult, Ticket, TicketKind, TicketStatus,
+};
+use crate::supply::{per_unit_supply, SupplyReader};
 use crate::users::{PublicUser, UserError, UserStore};
 
 #[derive(Clone)]
@@ -37,11 +37,11 @@ pub struct WebState {
     pub branch: BranchState,
     pub mint_rpc: MintRpcClient,
     pub mint_http: MintHttpClient,
+    pub supply: SupplyReader,
     pub config: Arc<AppConfig>,
     pub users: UserStore,
     pub sessions: SessionStore,
     pub method: Arc<String>,
-    pub mint_public_url: Arc<String>,
     pub default_amounts: Arc<Vec<u64>>,
     pub config_store: ConfigStore,
 }
@@ -52,23 +52,23 @@ impl WebState {
         branch: BranchState,
         mint_rpc: MintRpcClient,
         mint_http: MintHttpClient,
+        supply: SupplyReader,
         config: AppConfig,
         config_store: ConfigStore,
         users: UserStore,
         sessions: SessionStore,
     ) -> Self {
         let method = config.mint.method.clone();
-        let mint_public_url = config.endpoints.public_url.clone();
         let default_amounts = config.rollover.amounts.clone();
         Self {
             branch,
             mint_rpc,
             mint_http,
+            supply,
             config: Arc::new(config),
             users,
             sessions,
             method: Arc::new(method),
-            mint_public_url: Arc::new(mint_public_url),
             default_amounts: Arc::new(default_amounts),
             config_store,
         }
@@ -79,13 +79,11 @@ pub fn router(state: WebState) -> Router {
     Router::new()
         .route("/", get(spa_page))
         .route("/teller", get(spa_page))
-        .route("/keysets", get(spa_page))
-        .route("/settings", get(spa_page))
         .route("/login", get(spa_page))
         .route("/api/app", get(api_app))
         .route("/api/login", post(api_login))
         .route("/api/logout", post(api_logout))
-        .route("/api/quotes", post(api_create_quote))
+        .route("/api/quotes/match", post(api_match_quote))
         .route("/api/tickets/{id}/mark-paid", post(api_mark_paid))
         .route("/api/tickets/{id}/mark-failed", post(api_mark_failed))
         .route("/api/keysets/rotate", post(api_rotate_keyset))
@@ -283,9 +281,9 @@ struct ApiAppSnapshot {
     active_keyset: Option<crate::clients::KeysetEntry>,
     summary: MintSummary,
     unit_summaries: Vec<ApiUnitSummary>,
+    supply: ApiSupply,
     circulation: Vec<CirculationPoint>,
-    tickets: Vec<ApiTicket>,
-    active_tickets: Vec<ApiTicket>,
+    open_quotes: Vec<ApiOpenQuote>,
     recent_done: Vec<ApiTicket>,
     units: Vec<ApiManagedUnit>,
     capabilities: Vec<ApiCapability>,
@@ -364,6 +362,27 @@ struct ApiUnitSummary {
     net_issued: i128,
 }
 
+/// Audited supply straight from the mint database (per-keyset issued minus
+/// redeemed, split by keyset expiry). `available: false` with no error means
+/// auditing is disabled or the mint has not created its database yet.
+#[derive(Serialize)]
+struct ApiSupply {
+    available: bool,
+    error: Option<String>,
+    units: Vec<ApiUnitSupply>,
+}
+
+#[derive(Serialize)]
+struct ApiUnitSupply {
+    unit: String,
+    /// Redeemable ecash outstanding under non-expired keysets.
+    live: u64,
+    /// Ecash stranded under keysets past their final expiry.
+    demonetized: u64,
+    /// Value burned as input fees.
+    fee_collected: u64,
+}
+
 #[derive(Serialize)]
 struct ApiHealth {
     mint_http: ApiHealthItem,
@@ -385,10 +404,15 @@ struct ApiKeysetsSnapshot {
     error: Option<String>,
 }
 
+/// Full ticket view. Ships to the browser only for settled tickets and as the
+/// response to a successful match — never for the open-quote list, whose ids
+/// must stay off the operator's screen.
 #[derive(Serialize)]
 struct ApiTicket {
     id: String,
     short_id: String,
+    /// The mint's quote id — what the customer's wallet displays.
+    quote_id: Option<String>,
     kind: TicketKind,
     kind_label: &'static str,
     amount: u64,
@@ -400,14 +424,43 @@ struct ApiTicket {
     expires_at: Option<u64>,
     description: Option<String>,
     notes: Option<String>,
-    /// Serialized NUT-XX quote offer; the only thing shown to the wallet.
-    offer: Option<String>,
-    /// QR of the offer, present while the ticket is unclaimed.
-    qr_svg: Option<String>,
-    /// Payout verification code for funded melt tickets: last 6 characters of
-    /// the (otherwise secret) melt quote id, uppercased. The customer's wallet
-    /// shows the same code; the operator compares before dispensing cash.
-    verification_code: Option<String>,
+}
+
+/// Redacted row for the teller's open-quote list. `prefix` is the leading 13
+/// characters of the quote id — the UUIDv7 timestamp section — so rows are
+/// tellable apart while the random tail used for matching never renders.
+#[derive(Serialize)]
+struct ApiOpenQuote {
+    prefix: String,
+    kind: TicketKind,
+    kind_label: &'static str,
+    amount: u64,
+    unit: String,
+    status: TicketStatus,
+    status_label: &'static str,
+    created_at: u64,
+    expires_at: Option<u64>,
+}
+
+impl ApiOpenQuote {
+    fn from_ticket(ticket: &Ticket) -> Self {
+        let prefix = ticket
+            .quote_id
+            .as_deref()
+            .map(|quote_id| quote_id.chars().take(13).collect())
+            .unwrap_or_else(|| short_id(&ticket.id));
+        Self {
+            prefix,
+            kind: ticket.kind,
+            kind_label: kind_label(ticket.kind),
+            amount: ticket.amount,
+            unit: ticket.unit.clone(),
+            status: ticket.status,
+            status_label: status_label(ticket.kind, ticket.status),
+            created_at: ticket.created_at,
+            expires_at: ticket.expires_at,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -425,6 +478,15 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         Ok(authed) => authed,
         Err(r) => return r,
     };
+
+    // With no non-retired unit the generated mint.toml has no payment backend
+    // and cdk-mintd cannot start (the supervisor waits) — the mint services
+    // being down is the expected state, not an outage.
+    let standby = !state
+        .config
+        .units
+        .iter()
+        .any(|unit| unit.lifecycle != UnitLifecycle::Retired);
 
     let mut tickets = state.branch.list_all().await;
     tickets.sort_by_key(|ticket| std::cmp::Reverse(ticket.created_at));
@@ -459,19 +521,15 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         },
     };
 
-    let active_tickets = tickets
+    let open_quotes = tickets
         .iter()
         .filter(|t| t.status.is_active())
-        .map(|ticket| ApiTicket::from_ticket(ticket, &state))
+        .map(ApiOpenQuote::from_ticket)
         .collect();
     let recent_done = tickets
         .iter()
         .filter(|t| !t.status.is_active())
         .take(50)
-        .map(|ticket| ApiTicket::from_ticket(ticket, &state))
-        .collect();
-    let api_tickets = tickets
-        .iter()
         .map(|ticket| ApiTicket::from_ticket(ticket, &state))
         .collect();
 
@@ -559,6 +617,43 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
             }
         }
     }
+    // Audited supply: requires the keyset listing (unit + expiry per keyset)
+    // to classify the audit rows — without it the numbers would be wrong, so
+    // report unavailable instead.
+    let supply = if keysets.ok {
+        match state.supply.read().await {
+            Ok(Some(rows)) => ApiSupply {
+                available: true,
+                error: None,
+                units: per_unit_supply(&rows, &keyset_items, now)
+                    .into_iter()
+                    .map(|unit| ApiUnitSupply {
+                        unit: unit.unit,
+                        live: unit.live,
+                        demonetized: unit.demonetized,
+                        fee_collected: unit.fee_collected,
+                    })
+                    .collect(),
+            },
+            Ok(None) => ApiSupply {
+                available: false,
+                error: None,
+                units: Vec::new(),
+            },
+            Err(e) => ApiSupply {
+                available: false,
+                error: Some(e.to_string()),
+                units: Vec::new(),
+            },
+        }
+    } else {
+        ApiSupply {
+            available: false,
+            error: Some("keyset listing unavailable".to_string()),
+            units: Vec::new(),
+        }
+    };
+
     let unit_summaries = state
         .config
         .units
@@ -606,8 +701,8 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         rollover: api_rollover(&state.config.rollover),
         default_amounts: (*state.default_amounts).clone(),
         health: ApiHealth {
-            mint_http: health_item(info_health.as_ref().map(|_| ())),
-            management_rpc: health_item(rpc_health.as_ref().map(|_| ())),
+            mint_http: standby_aware(health_item(info_health.as_ref().map(|_| ())), standby),
+            management_rpc: standby_aware(health_item(rpc_health.as_ref().map(|_| ())), standby),
             payment_backend: ApiHealthItem {
                 ok: true,
                 label: "Listening".to_string(),
@@ -622,9 +717,9 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         active_keyset,
         summary,
         unit_summaries,
+        supply,
         circulation: circulation_points(&primary_tickets),
-        tickets: api_tickets,
-        active_tickets,
+        open_quotes,
         recent_done,
         units,
         capabilities,
@@ -695,50 +790,38 @@ fn health_item<T>(result: Result<T, &anyhow::Error>) -> ApiHealthItem {
     }
 }
 
+/// Reframe an expected zero-unit outage as standby instead of an error.
+fn standby_aware(item: ApiHealthItem, standby: bool) -> ApiHealthItem {
+    if standby && !item.ok {
+        ApiHealthItem {
+            ok: false,
+            label: "Standby".to_string(),
+            detail: "The mint starts once the first unit is added".to_string(),
+        }
+    } else {
+        item
+    }
+}
+
 impl ApiTicket {
     fn from_ticket(ticket: &Ticket, _state: &WebState) -> Self {
-        let qr_svg = match ticket.status {
-            TicketStatus::Offered => ticket.offer.as_deref().and_then(qr_code_svg),
-            _ => None,
-        };
-        let verification_code = match (ticket.kind, ticket.status) {
-            (TicketKind::Outgoing, TicketStatus::Pending) => {
-                ticket.quote_id.as_deref().map(verification_code)
-            }
-            _ => None,
-        };
         Self {
             id: ticket.id.clone(),
             short_id: short_id(&ticket.id),
+            quote_id: ticket.quote_id.clone(),
             kind: ticket.kind,
             kind_label: kind_label(ticket.kind),
             amount: ticket.amount,
             unit: ticket.unit.clone(),
             status: ticket.status,
-            status_label: status_label(ticket.status),
+            status_label: status_label(ticket.kind, ticket.status),
             created_at: ticket.created_at,
             paid_at: ticket.paid_at,
             expires_at: ticket.expires_at,
             description: ticket.description.clone(),
             notes: ticket.notes.clone(),
-            offer: ticket.offer.clone(),
-            qr_svg,
-            verification_code,
         }
     }
-}
-
-/// Last 6 characters of the melt quote id, uppercased — mirrored by the wallet.
-fn verification_code(quote_id: &str) -> String {
-    let tail: String = quote_id
-        .chars()
-        .rev()
-        .take(6)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    tail.to_uppercase()
 }
 
 fn circulation_points(tickets: &[Ticket]) -> Vec<CirculationPoint> {
@@ -809,17 +892,133 @@ async fn api_logout(State(state): State<WebState>, headers: HeaderMap) -> Respon
     resp
 }
 
-async fn api_create_quote(
+#[derive(Deserialize)]
+struct MatchQuoteForm {
+    code: String,
+}
+
+/// Resolve teller input (last 6+ characters typed from the customer's wallet,
+/// or the full quote id from a scanner) to the one open quote it identifies.
+/// The full ticket is revealed only here — the open-quote list stays redacted
+/// so the code must come from the customer.
+async fn api_match_quote(
     State(state): State<WebState>,
     headers: HeaderMap,
-    Json(form): Json<CreateQuoteForm>,
+    Json(form): Json<MatchQuoteForm>,
 ) -> Response {
     if let Err(r) = require_api_auth(&state, &headers).await {
         return r;
     }
-    match create_quote_inner(&state, form).await {
-        Ok(ticket) => Json(ApiTicket::from_ticket(&ticket, &state)).into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    let query = match normalize_match_input(&form.code) {
+        Ok(query) => query,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match state.branch.match_open(&query).await {
+        MatchResult::Ambiguous(n) => api_error(
+            StatusCode::CONFLICT,
+            format!("{n} open quotes end with this code — type more characters or scan the full id"),
+        ),
+        MatchResult::None {
+            inactive_match: true,
+        } => api_error(
+            StatusCode::NOT_FOUND,
+            "this code matches a quote that is no longer open (settled, voided, or expired)",
+        ),
+        MatchResult::None {
+            inactive_match: false,
+        } => api_error(StatusCode::NOT_FOUND, "no open quote matches this code"),
+        MatchResult::Unique(ticket) => {
+            if ticket.expired(unix_now()) {
+                return api_error(
+                    StatusCode::NOT_FOUND,
+                    "this quote has expired; ask the customer to create a fresh one",
+                );
+            }
+            if let Err(r) = verify_with_mint(&state, &ticket).await {
+                return r;
+            }
+            Json(ApiTicket::from_ticket(&ticket, &state)).into_response()
+        }
+    }
+}
+
+/// Cross-check a matched ticket against the mint's own record before the
+/// operator sees a confirm card. Catches orphaned tickets (the mint died
+/// before committing the quote), quotes already settled at the mint, and —
+/// loudly, at the counter — a mint running without cdk-managed-units.patch.
+/// Refuses when the mint is unreachable: confirming cash movements on stale
+/// knowledge is worse than asking the customer to wait a moment.
+async fn verify_with_mint(state: &WebState, ticket: &Ticket) -> Result<(), Response> {
+    let Some(quote_id) = ticket.quote_id.as_deref() else {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "this ticket has no mint quote id and cannot be settled",
+        ));
+    };
+    let method = state.method.as_str();
+    match ticket.kind {
+        TicketKind::Incoming => match state.mint_http.get_mint_quote(method, quote_id).await {
+            Err(e) => Err(api_error(
+                StatusCode::BAD_GATEWAY,
+                format!("cannot verify the quote with the mint right now: {e}"),
+            )),
+            Ok(None) => Err(api_error(
+                StatusCode::CONFLICT,
+                "the mint does not know this quote — do not accept cash for it",
+            )),
+            Ok(Some(quote)) => {
+                if quote.amount_paid > 0 || quote.amount_issued > 0 {
+                    Err(api_error(
+                        StatusCode::CONFLICT,
+                        "this quote is already settled at the mint",
+                    ))
+                } else if quote.request != ticket.id
+                    || quote.amount.is_some_and(|amount| amount != ticket.amount)
+                    || quote.unit.as_deref().is_some_and(|unit| unit != ticket.unit)
+                {
+                    Err(api_error(
+                        StatusCode::CONFLICT,
+                        "the mint's record disagrees with this quote; do not settle it",
+                    ))
+                } else if quote.pubkey.as_deref().unwrap_or("").is_empty() {
+                    // Cannot happen through a patched mint (creation refuses
+                    // unlocked quotes) — seeing it means the mint build is wrong.
+                    Err(api_error(
+                        StatusCode::CONFLICT,
+                        "this quote is not locked to a wallet key (NUT-20); do not accept cash for it",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        },
+        TicketKind::Outgoing => match state.mint_http.get_melt_quote(method, quote_id).await {
+            Err(e) => Err(api_error(
+                StatusCode::BAD_GATEWAY,
+                format!("cannot verify the quote with the mint right now: {e}"),
+            )),
+            Ok(None) => Err(api_error(
+                StatusCode::CONFLICT,
+                "the mint does not know this melt quote — do not pay out",
+            )),
+            Ok(Some(quote)) => {
+                if quote.state.eq_ignore_ascii_case("paid") {
+                    Err(api_error(
+                        StatusCode::CONFLICT,
+                        "this melt is already settled at the mint",
+                    ))
+                } else if quote.amount != ticket.amount
+                    || quote.unit.as_deref().is_some_and(|unit| unit != ticket.unit)
+                {
+                    Err(api_error(
+                        StatusCode::CONFLICT,
+                        "the mint's record disagrees with this quote; do not settle it",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        },
     }
 }
 
@@ -932,17 +1131,37 @@ async fn api_set_unit_lifecycle(
     if let Err(r) = require_api_auth(&state, &headers).await {
         return r;
     }
-    if state
-        .branch
-        .active_tickets()
-        .await
+    // Funded withdrawals hold locked customer proofs — those must be settled
+    // or voided by hand. Open unfunded wallet quotes must NOT block console
+    // actions (anyone can create them); they are voided here instead.
+    let active = state.branch.active_tickets().await;
+    let funded_melts = active
         .iter()
-        .any(|ticket| ticket.unit == unit)
-    {
+        .filter(|ticket| {
+            ticket.unit == unit
+                && ticket.kind == TicketKind::Outgoing
+                && ticket.status == TicketStatus::Pending
+        })
+        .count();
+    if funded_melts > 0 {
         return api_error(
             StatusCode::CONFLICT,
-            format!("finish the active {unit} quote before changing its lifecycle"),
+            format!(
+                "{funded_melts} funded withdrawal(s) for {unit} await payout; settle or void them first"
+            ),
         );
+    }
+    for ticket in active.iter().filter(|ticket| ticket.unit == unit) {
+        if let Err(e) = state
+            .branch
+            .mark_failed(&ticket.id, Some("voided: unit lifecycle changed".into()))
+            .await
+        {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("void open {unit} quotes: {e}"),
+            );
+        }
     }
     if form.lifecycle == UnitLifecycle::Retired {
         let keysets = match state.mint_http.list_keysets().await {
@@ -1352,86 +1571,6 @@ struct LoginForm {
 }
 
 #[derive(Deserialize)]
-struct CreateQuoteForm {
-    kind: String,
-    amount: u64,
-    #[serde(default)]
-    unit: String,
-    #[serde(default)]
-    description: String,
-}
-
-/// How long a displayed offer can be claimed before the teller must reissue.
-const OFFER_TTL_SECS: u64 = 15 * 60;
-
-async fn create_quote_inner(state: &WebState, form: CreateQuoteForm) -> Result<Ticket, String> {
-    if form.amount == 0 {
-        return Err("amount must be greater than zero".to_string());
-    }
-    if !state.branch.active_tickets().await.is_empty() {
-        return Err("finish the active quote before creating another".to_string());
-    }
-
-    let description = match form.description.trim() {
-        "" => None,
-        s => Some(s.to_string()),
-    };
-
-    let unit = if form.unit.trim().is_empty() {
-        state.config.mint.unit.as_str()
-    } else {
-        form.unit.trim()
-    };
-    if unit.is_empty() {
-        return Err("no units are configured yet; add one in the console's Units tab".to_string());
-    }
-    let managed = state
-        .config
-        .managed_unit(unit)
-        .ok_or_else(|| format!("unit {unit} is not managed by this stack"))?;
-    let (kind, operation) = match form.kind.as_str() {
-        "mint" if managed.lifecycle.can_mint() => (TicketKind::Incoming, "mint"),
-        "melt" if managed.lifecycle.can_melt() => (TicketKind::Outgoing, "melt"),
-        "mint" => {
-            return Err(format!(
-                "{unit} is redemption-only; new mint offers are disabled"
-            ))
-        }
-        "melt" => return Err(format!("{unit} is retired; melt offers are disabled")),
-        other => return Err(format!("unknown quote flow: {other}")),
-    };
-
-    // Register the ticket and hand out the serialized offer. The wallet creates
-    // the actual mint/melt quote itself by claiming the ticket (NUT-XX); the
-    // processor no longer pre-creates quotes through the mint's public API.
-    let expires_at = unix_now() + OFFER_TTL_SECS;
-    let mut ticket = Ticket::new_offer(
-        kind,
-        form.amount,
-        unit.to_string(),
-        description.clone(),
-        Some(expires_at),
-    );
-    let offer = QuoteOffer {
-        mint_url: state.mint_public_url.trim_end_matches('/').to_string(),
-        operation,
-        method: state.method.as_str().to_string(),
-        unit: unit.to_string(),
-        ticket: ticket.id.clone(),
-        amount: Some(form.amount),
-        description,
-        expiry: Some(expires_at),
-    };
-    ticket.offer = Some(offer.encode());
-
-    state
-        .branch
-        .insert_active(ticket)
-        .await
-        .map_err(|e| format!("register offer: {e}"))
-}
-
-#[derive(Deserialize)]
 struct NotesForm {
     #[serde(default)]
     notes: String,
@@ -1546,24 +1685,6 @@ fn health_label(ok: bool) -> &'static str {
     }
 }
 
-fn qr_code_svg(data: &str) -> Option<String> {
-    match QrCode::new(data.as_bytes()) {
-        Ok(code) => {
-            let mut image = code
-                .render::<svg::Color>()
-                .min_dimensions(220, 220)
-                .dark_color(svg::Color("#0a0a0a"))
-                .light_color(svg::Color("#ffffff"))
-                .build();
-            if let Some(svg) = image.strip_prefix(r#"<?xml version="1.0" standalone="yes"?>"#) {
-                image = svg.to_string();
-            }
-            Some(image)
-        }
-        Err(_) => None,
-    }
-}
-
 fn short_id(id: &str) -> String {
     // "MINT-5a6c5a9e-..." → "MINT-5a6c5a9e"
     match id
@@ -1582,13 +1703,13 @@ fn kind_label(k: TicketKind) -> &'static str {
     }
 }
 
-fn status_label(s: TicketStatus) -> &'static str {
-    match s {
-        TicketStatus::Offered => "Offered",
-        TicketStatus::Waiting => "Claimed",
-        TicketStatus::Pending => "Pending",
-        TicketStatus::Paid => "Paid",
-        TicketStatus::Failed => "Failed",
+fn status_label(kind: TicketKind, status: TicketStatus) -> &'static str {
+    match (kind, status) {
+        (_, TicketStatus::Waiting) => "Awaiting wallet",
+        (TicketKind::Incoming, TicketStatus::Pending) => "Awaiting cash",
+        (TicketKind::Outgoing, TicketStatus::Pending) => "Ready to pay out",
+        (_, TicketStatus::Paid) => "Paid",
+        (_, TicketStatus::Failed) => "Failed",
     }
 }
 

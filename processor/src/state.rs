@@ -1,21 +1,31 @@
 //! Persistent ticket state for the branch processor.
 //!
-//! All pending and settled mint/melt tickets are stored in a single JSON file on
-//! disk. The file is fully rewritten on every mutation (atomic rename), which is
-//! more than fine at the scale this is built for (manual branch ops, dozens of
+//! A ticket mirrors one wallet-created mint or melt quote at the mint. Tickets
+//! are created when cdk-mintd relays a wallet's quote request over gRPC and are
+//! settled when the operator confirms the cash movement in the teller UI
+//! (matched by quote id). All tickets are stored in a single JSON file on disk.
+//! The file is fully rewritten on every mutation (atomic rename), which is more
+//! than fine at the scale this is built for (manual branch ops, dozens of
 //! tickets per day at most).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use cdk_common::nuts::{CurrencyUnit, MeltQuoteState};
 use cdk_common::payment::{Event, MakePaymentResponse, PaymentIdentifier, WaitPaymentResponse};
-use cdk_common::Amount;
+use cdk_common::{Amount, QuoteId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
+
+/// Upper bound on concurrently open (unsettled) tickets. Quote creation is
+/// unauthenticated at the mint, so this caps how much a hostile wallet can
+/// grow the store and the teller's open-quote list before the expiry sweep
+/// reclaims the slots.
+pub const MAX_OPEN_QUOTES: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,56 +37,31 @@ pub enum TicketKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketStatus {
-    /// Ticket registered and its offer displayed; no wallet has claimed it yet.
-    Offered,
-    /// Outgoing only: a wallet claimed the offer (melt quote exists) but has not
-    /// committed funds yet — the operator must NOT pay out in this state.
+    /// Outgoing only: the melt quote exists but the wallet has not locked
+    /// funds yet — the operator must NOT pay out in this state.
     Waiting,
-    /// Incoming: claimed by a wallet, awaiting cash handover.
+    /// Incoming: open quote awaiting the customer's cash at the counter.
     /// Outgoing: funded by the wallet (proofs locked at the mint), safe to pay out.
     Pending,
     Paid,
+    /// Voided by the operator or unresolvable. Also the landing state for
+    /// legacy `offered` rows written by the removed quote-offer flow.
+    #[serde(alias = "offered")]
     Failed,
 }
 
 impl TicketStatus {
     pub fn is_active(self) -> bool {
-        matches!(
-            self,
-            TicketStatus::Offered | TicketStatus::Waiting | TicketStatus::Pending
-        )
+        matches!(self, TicketStatus::Waiting | TicketStatus::Pending)
     }
 }
-
-/// Why a claim attempt was rejected. The display strings carry the NUT-XX
-/// error-code semantics (20010 unknown/expired, 20011 already claimed) even
-/// though stock cdk flattens processor errors before they reach the wallet.
-#[derive(Debug)]
-pub enum ClaimError {
-    Unknown,
-    Expired,
-    AlreadyClaimed,
-    Mismatch(String),
-}
-
-impl std::fmt::Display for ClaimError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClaimError::Unknown => write!(f, "20010: offer ticket is unknown or expired"),
-            ClaimError::Expired => write!(f, "20010: offer ticket is unknown or expired (expired)"),
-            ClaimError::AlreadyClaimed => write!(f, "20011: offer ticket has already been claimed"),
-            ClaimError::Mismatch(detail) => {
-                write!(f, "quote request does not match the ticket: {detail}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ClaimError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ticket {
     pub id: String,
+    /// The mint's quote id for this ticket. Always set for tickets created by
+    /// the current flow (the ticket id is derived from it); `None` only on
+    /// legacy rows, which are voided at load because they cannot be matched.
     #[serde(default)]
     pub quote_id: Option<String>,
     pub kind: TicketKind,
@@ -88,45 +73,62 @@ pub struct Ticket {
     pub description: Option<String>,
     /// Free-form notes added by the operator.
     pub notes: Option<String>,
-    /// The serialized NUT-XX quote offer (`cquoteA...`) displayed to the wallet.
-    #[serde(default)]
-    pub offer: Option<String>,
-    /// Unix timestamp until which the offer can be claimed.
+    /// Unix timestamp after which an unsettled ticket is dead. Mirrors the
+    /// mint's quote expiry (mint quotes report it over gRPC; melt tickets use
+    /// the melt TTL this processor configures on the mint).
     #[serde(default)]
     pub expires_at: Option<u64>,
 }
 
 impl Ticket {
-    /// A freshly registered teller offer; the serialized offer string is attached
-    /// by the caller once it exists (it embeds this ticket's id).
-    pub fn new_offer(
-        kind: TicketKind,
+    /// A wallet-created mint quote awaiting cash at the counter.
+    pub fn new_incoming(
+        quote_id: String,
         amount: u64,
         unit: String,
         description: Option<String>,
         expires_at: Option<u64>,
     ) -> Self {
-        let prefix = match kind {
-            TicketKind::Incoming => "MINT",
-            TicketKind::Outgoing => "MELT",
-        };
         Self {
-            id: format!("{prefix}-{}", uuid::Uuid::new_v4()),
-            quote_id: None,
-            kind,
+            id: format!("MINT-{quote_id}"),
+            quote_id: Some(quote_id),
+            kind: TicketKind::Incoming,
             amount,
             unit,
-            status: TicketStatus::Offered,
+            status: TicketStatus::Pending,
             created_at: unix_now(),
             paid_at: None,
             description,
             notes: None,
-            offer: None,
             expires_at,
         }
     }
 
-    pub fn claim_expired(&self, now: u64) -> bool {
+    /// A wallet-created melt quote; payout stays blocked until the wallet
+    /// locks its proofs at the mint (`mark_outgoing_submitted`).
+    pub fn new_outgoing(
+        quote_id: String,
+        amount: u64,
+        unit: String,
+        description: Option<String>,
+        expires_at: Option<u64>,
+    ) -> Self {
+        Self {
+            id: format!("MELT-{quote_id}"),
+            quote_id: Some(quote_id),
+            kind: TicketKind::Outgoing,
+            amount,
+            unit,
+            status: TicketStatus::Waiting,
+            created_at: unix_now(),
+            paid_at: None,
+            description,
+            notes: None,
+            expires_at,
+        }
+    }
+
+    pub fn expired(&self, now: u64) -> bool {
         self.expires_at.is_some_and(|e| now > e)
     }
 
@@ -134,6 +136,73 @@ impl Ticket {
         self.unit
             .parse()
             .unwrap_or(CurrencyUnit::Custom(self.unit.clone()))
+    }
+}
+
+/// Normalized teller input for quote matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchQuery {
+    /// A full quote id (scanned): compare hex-equal against the whole id.
+    Exact(String),
+    /// A typed tail of the quote id, ≥ 6 hex characters.
+    Suffix(String),
+}
+
+/// Normalize raw teller input (typed tail or scanned full id) into a match
+/// query. Tolerates surrounding whitespace and CR/LF appended by keyboard-wedge
+/// scanners, mixed case, hyphens typed or omitted, and a leading `MINT-`/`MELT-`
+/// ticket prefix (in case a wallet renders the payment request string instead
+/// of the bare quote id).
+pub fn normalize_match_input(raw: &str) -> Result<MatchQuery, String> {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    let without_prefix = trimmed
+        .strip_prefix("mint-")
+        .or_else(|| trimmed.strip_prefix("melt-"))
+        .unwrap_or(&trimmed);
+    let hex: String = without_prefix.chars().filter(|c| *c != '-').collect();
+    if hex.is_empty() {
+        return Err("enter the last 6+ characters of the quote id".to_string());
+    }
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(
+            "that doesn't look like a quote id — scan or type the id itself, not a link"
+                .to_string(),
+        );
+    }
+    match hex.len() {
+        32 => Ok(MatchQuery::Exact(hex)),
+        6..=31 => Ok(MatchQuery::Suffix(hex)),
+        _ if hex.len() < 6 => Err("enter at least the last 6 characters of the quote id".into()),
+        _ => Err("that is longer than a quote id — scan again".into()),
+    }
+}
+
+/// Outcome of matching teller input against open tickets.
+#[derive(Debug)]
+pub enum MatchResult {
+    Unique(Ticket),
+    /// No open ticket matched. `inactive_match` is true when a settled or
+    /// voided ticket matches the code, so the UI can hint at that without
+    /// revealing which one.
+    None { inactive_match: bool },
+    Ambiguous(usize),
+}
+
+fn hex_normalized(id: &str) -> String {
+    id.chars()
+        .filter(|c| *c != '-')
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn query_matches(query: &MatchQuery, ticket: &Ticket) -> bool {
+    let Some(quote_id) = ticket.quote_id.as_deref() else {
+        return false;
+    };
+    let quote_hex = hex_normalized(quote_id);
+    match query {
+        MatchQuery::Exact(hex) => quote_hex == *hex,
+        MatchQuery::Suffix(suffix) => quote_hex.ends_with(suffix.as_str()),
     }
 }
 
@@ -167,15 +236,50 @@ impl std::fmt::Debug for BranchState {
 
 impl BranchState {
     pub async fn load(path: PathBuf) -> Result<Self> {
-        let tickets = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        let mut tickets = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             let raw = tokio::fs::read(&path)
                 .await
                 .with_context(|| format!("read {}", path.display()))?;
-            let file: StateFile = serde_json::from_slice(&raw).unwrap_or_default();
-            file.tickets
+            match serde_json::from_slice::<StateFile>(&raw) {
+                Ok(file) => {
+                    if raw.windows(9).any(|w| w == b"\"offered\"") {
+                        tracing::warn!(
+                            "tickets.json contains legacy offer tickets from the removed \
+                             quote-offer flow; they were voided"
+                        );
+                    }
+                    file.tickets
+                }
+                Err(e) => {
+                    // Never silently discard the settlement record: move the
+                    // unreadable file aside and start empty.
+                    let quarantine = path.with_extension(format!("json.corrupt-{}", unix_now()));
+                    tokio::fs::rename(&path, &quarantine)
+                        .await
+                        .with_context(|| format!("quarantine {}", path.display()))?;
+                    tracing::error!(
+                        "tickets.json is unreadable ({e}); moved it to {} and starting empty",
+                        quarantine.display()
+                    );
+                    BTreeMap::new()
+                }
+            }
         } else {
             BTreeMap::new()
         };
+        // Legacy open tickets without a quote id cannot be matched by the
+        // teller (the offer flow attached quote ids late or not at all) —
+        // void them rather than leaving unsettleable rows in the list.
+        for ticket in tickets.values_mut() {
+            if ticket.status.is_active() && ticket.quote_id.is_none() {
+                tracing::warn!(
+                    "voiding legacy ticket {} on load: no quote id, cannot be matched",
+                    ticket.id
+                );
+                ticket.status = TicketStatus::Failed;
+                ticket.notes = Some("voided on upgrade: created by the removed offer flow".into());
+            }
+        }
         let (tx, _rx) = broadcast::channel(256);
         let (ui_tx, _ui_rx) = broadcast::channel(256);
         Ok(Self {
@@ -203,19 +307,28 @@ impl BranchState {
             .collect()
     }
 
-    /// Insert a new active teller quote only if no other active quote exists.
-    /// This is the server-side guard that keeps branch settlement one-at-a-time.
-    pub async fn insert_active(&self, ticket: Ticket) -> Result<Ticket> {
+    /// Register a wallet-created quote. Multiple open tickets are normal (one
+    /// per waiting customer); `MAX_OPEN_QUOTES` bounds hostile growth.
+    ///
+    /// Re-registering the same id is allowed only as a transport-level retry:
+    /// the existing ticket must still be open and describe the same quote.
+    /// Anything else is a replay of a used quote id and is rejected.
+    pub async fn insert_open(&self, ticket: Ticket) -> Result<Ticket> {
         let updated = {
             let mut t = self.inner.tickets.write().await;
             if let Some(existing) = t.get(&ticket.id) {
-                return Ok(existing.clone());
+                if existing.status.is_active()
+                    && existing.kind == ticket.kind
+                    && existing.amount == ticket.amount
+                    && existing.unit == ticket.unit
+                {
+                    return Ok(existing.clone());
+                }
+                bail!("quote id {} has already been used", ticket.id);
             }
-            if let Some(active) = t
-                .values()
-                .find(|existing| existing.status.is_active() && existing.id != ticket.id)
-            {
-                bail!("finish active quote {} before creating another", active.id);
+            let open = t.values().filter(|x| x.status.is_active()).count();
+            if open >= MAX_OPEN_QUOTES {
+                bail!("too many open quotes ({open}); try again later");
             }
             t.insert(ticket.id.clone(), ticket.clone());
             ticket
@@ -225,96 +338,27 @@ impl BranchState {
         Ok(updated)
     }
 
-    /// First-claim-wins for an incoming (mint) offer. Atomically transitions
-    /// `Offered` → `Pending` after checking that the wallet's quote request
-    /// matches the registered ticket. Subsequent claims are rejected.
-    pub async fn claim_incoming(
-        &self,
-        ticket_id: &str,
-        amount: u64,
-        unit: &str,
-    ) -> Result<Ticket, ClaimError> {
-        let updated = {
-            let mut t = self.inner.tickets.write().await;
-            let ticket = t.get_mut(ticket_id).ok_or(ClaimError::Unknown)?;
-            if ticket.kind != TicketKind::Incoming {
-                return Err(ClaimError::Unknown);
+    /// Match teller input against open tickets by quote id.
+    pub async fn match_open(&self, query: &MatchQuery) -> MatchResult {
+        let tickets = self.inner.tickets.read().await;
+        let mut open = tickets
+            .values()
+            .filter(|t| t.status.is_active() && query_matches(query, t));
+        let first = open.next().cloned();
+        let extra = open.count();
+        match (first, extra) {
+            (Some(ticket), 0) => MatchResult::Unique(ticket),
+            (Some(_), n) => MatchResult::Ambiguous(n + 1),
+            (None, _) => {
+                let inactive_match = tickets
+                    .values()
+                    .any(|t| !t.status.is_active() && query_matches(query, t));
+                MatchResult::None { inactive_match }
             }
-            match ticket.status {
-                TicketStatus::Offered => {}
-                TicketStatus::Pending | TicketStatus::Waiting | TicketStatus::Paid => {
-                    return Err(ClaimError::AlreadyClaimed)
-                }
-                TicketStatus::Failed => return Err(ClaimError::Unknown),
-            }
-            if ticket.claim_expired(unix_now()) {
-                return Err(ClaimError::Expired);
-            }
-            if ticket.amount != amount {
-                return Err(ClaimError::Mismatch(format!(
-                    "amount {amount} does not match ticket amount {}",
-                    ticket.amount
-                )));
-            }
-            if ticket.unit != unit {
-                return Err(ClaimError::Mismatch(format!(
-                    "unit {unit} does not match ticket unit {}",
-                    ticket.unit
-                )));
-            }
-            ticket.status = TicketStatus::Pending;
-            ticket.clone()
-        };
-        if let Err(e) = self.persist().await {
-            tracing::error!("persist after claim_incoming: {e}");
         }
-        self.notify_ui_change();
-        Ok(updated)
     }
 
-    /// First-claim-wins for an outgoing (melt) offer. Atomically transitions
-    /// `Offered` → `Waiting` and records the mint's melt quote id (used for the
-    /// operator's payout verification code).
-    pub async fn claim_outgoing(
-        &self,
-        ticket_id: &str,
-        unit: &str,
-        quote_id: String,
-    ) -> Result<Ticket, ClaimError> {
-        let updated = {
-            let mut t = self.inner.tickets.write().await;
-            let ticket = t.get_mut(ticket_id).ok_or(ClaimError::Unknown)?;
-            if ticket.kind != TicketKind::Outgoing {
-                return Err(ClaimError::Unknown);
-            }
-            match ticket.status {
-                TicketStatus::Offered => {}
-                TicketStatus::Waiting | TicketStatus::Pending | TicketStatus::Paid => {
-                    return Err(ClaimError::AlreadyClaimed)
-                }
-                TicketStatus::Failed => return Err(ClaimError::Unknown),
-            }
-            if ticket.claim_expired(unix_now()) {
-                return Err(ClaimError::Expired);
-            }
-            if ticket.unit != unit {
-                return Err(ClaimError::Mismatch(format!(
-                    "unit {unit} does not match ticket unit {}",
-                    ticket.unit
-                )));
-            }
-            ticket.quote_id = Some(quote_id);
-            ticket.status = TicketStatus::Waiting;
-            ticket.clone()
-        };
-        if let Err(e) = self.persist().await {
-            tracing::error!("persist after claim_outgoing: {e}");
-        }
-        self.notify_ui_change();
-        Ok(updated)
-    }
-
-    /// Find the outgoing ticket a melt quote id was attached to during claiming.
+    /// Find the outgoing ticket for a mint melt quote id.
     pub async fn outgoing_by_quote_id(&self, quote_id: &str) -> Option<Ticket> {
         self.inner
             .tickets
@@ -325,20 +369,20 @@ impl BranchState {
             .cloned()
     }
 
-    /// Move a pre-created outgoing quote into the state where customer proofs
-    /// are locked by the mint and the operator can safely dispense cash.
+    /// Move a melt ticket into the state where customer proofs are locked by
+    /// the mint and the operator can safely dispense cash.
     pub async fn mark_outgoing_submitted(&self, id: &str) -> Result<Ticket> {
         let mut changed = false;
         let updated = {
             let mut t = self.inner.tickets.write().await;
-            let ticket = t.get_mut(id).ok_or_else(|| {
-                anyhow::anyhow!("outgoing quote {id} was not created by the teller UI")
-            })?;
+            let ticket = t
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("unknown outgoing quote {id}"))?;
             if ticket.kind != TicketKind::Outgoing {
                 bail!("ticket {id} is not an outgoing quote");
             }
-            if ticket.status == TicketStatus::Offered {
-                bail!("ticket {id} has not been claimed by a wallet");
+            if ticket.status == TicketStatus::Failed {
+                bail!("melt quote {id} was voided or expired; it cannot be funded");
             }
             if ticket.status == TicketStatus::Waiting {
                 ticket.status = TicketStatus::Pending;
@@ -353,66 +397,139 @@ impl BranchState {
         Ok(updated)
     }
 
-    /// Mark a ticket as paid. For incoming tickets, also pushes a
-    /// `PaymentReceived` event into the mint's `wait_payment_event` stream so
-    /// the mint flips the mint-quote to PAID without polling.
+    /// Mark a ticket as paid after the operator confirmed the cash movement.
     ///
-    /// Returns the updated ticket. Errors if the ticket doesn't exist.
+    /// Incoming: pushes a `PaymentReceived` event into the mint's
+    /// `wait_payment_event` stream so the mint flips the mint quote to PAID
+    /// without polling. Outgoing: pushes `PaymentSuccessful` so the customer's
+    /// wallet sees the melt finalize immediately instead of on its next poll.
+    /// Events fire only on an actual `Pending → Paid` transition — a repeated
+    /// confirm is a no-op and a voided ticket is rejected outright.
     pub async fn mark_paid(&self, id: &str, notes: Option<String>) -> Result<Ticket> {
-        let updated = {
+        let (updated, transitioned) = {
             let mut t = self.inner.tickets.write().await;
             let ticket = t
                 .get_mut(id)
                 .ok_or_else(|| anyhow::anyhow!("ticket {id} not found"))?;
-            if ticket.status == TicketStatus::Offered {
-                bail!("ticket {id} has not been claimed by a wallet");
-            }
-            if ticket.status == TicketStatus::Waiting {
-                bail!("ticket {id} is waiting for the wallet");
-            }
-            if ticket.status == TicketStatus::Pending {
-                ticket.status = TicketStatus::Paid;
-                ticket.paid_at = Some(unix_now());
-                if let Some(n) = notes {
-                    ticket.notes = Some(n);
+            match ticket.status {
+                TicketStatus::Waiting => {
+                    bail!("ticket {id} is waiting for the wallet to lock funds")
+                }
+                TicketStatus::Failed => bail!("ticket {id} was voided; it cannot be settled"),
+                TicketStatus::Paid => (ticket.clone(), false),
+                TicketStatus::Pending => {
+                    if ticket.kind == TicketKind::Incoming && ticket.expired(unix_now()) {
+                        bail!(
+                            "quote {id} has expired; ask the customer to create a fresh one \
+                             before taking cash"
+                        );
+                    }
+                    ticket.status = TicketStatus::Paid;
+                    ticket.paid_at = Some(unix_now());
+                    if let Some(n) = notes {
+                        ticket.notes = Some(n);
+                    }
+                    (ticket.clone(), true)
                 }
             }
-            ticket.clone()
         };
         self.persist().await?;
 
-        if updated.kind == TicketKind::Incoming {
-            let amount = Amount::new(updated.amount, updated.unit_typed());
-            let event = Event::PaymentReceived(WaitPaymentResponse {
-                payment_identifier: PaymentIdentifier::CustomId(updated.id.clone()),
-                payment_amount: amount,
-                payment_id: format!("{}-receipt", updated.id),
-            });
-            // best-effort — if no subscriber, mint will pick up on next reconnect via check_incoming_payment_status
-            let _ = self.inner.event_tx.send(event);
+        if transitioned {
+            match updated.kind {
+                TicketKind::Incoming => {
+                    let amount = Amount::new(updated.amount, updated.unit_typed());
+                    let event = Event::PaymentReceived(WaitPaymentResponse {
+                        payment_identifier: PaymentIdentifier::CustomId(updated.id.clone()),
+                        payment_amount: amount,
+                        payment_id: format!("{}-receipt", updated.id),
+                    });
+                    // best-effort — without a subscriber the mint picks it up via
+                    // check_incoming_payment_status on the wallet's next poll
+                    let _ = self.inner.event_tx.send(event);
+                }
+                TicketKind::Outgoing => {
+                    if let Some(event) = outgoing_settled_event(&updated) {
+                        let _ = self.inner.event_tx.send(event);
+                    }
+                }
+            }
         }
 
         self.notify_ui_change();
         Ok(updated)
     }
 
+    /// Void a ticket. For a funded melt (proofs locked at the mint) a
+    /// `PaymentFailed` event is pushed so the mint releases the customer's
+    /// proofs immediately.
     pub async fn mark_failed(&self, id: &str, notes: Option<String>) -> Result<Ticket> {
-        let updated = {
+        let (updated, was_funded_melt) = {
             let mut t = self.inner.tickets.write().await;
             let ticket = t
                 .get_mut(id)
                 .ok_or_else(|| anyhow::anyhow!("ticket {id} not found"))?;
-            if ticket.status != TicketStatus::Paid {
+            if ticket.status == TicketStatus::Paid {
+                bail!("ticket {id} is already settled");
+            }
+            let was_funded_melt =
+                ticket.kind == TicketKind::Outgoing && ticket.status == TicketStatus::Pending;
+            if ticket.status != TicketStatus::Failed {
                 ticket.status = TicketStatus::Failed;
                 if let Some(n) = notes {
                     ticket.notes = Some(n);
                 }
             }
-            ticket.clone()
+            (ticket.clone(), was_funded_melt)
         };
         self.persist().await?;
+        if was_funded_melt {
+            if let Some(quote_id) = parse_quote_id(&updated) {
+                let _ = self.inner.event_tx.send(Event::PaymentFailed {
+                    quote_id,
+                    reason: updated
+                        .notes
+                        .clone()
+                        .unwrap_or_else(|| "voided at the counter".to_string()),
+                });
+            }
+        }
         self.notify_ui_change();
         Ok(updated)
+    }
+
+    /// Remove expired tickets no money ever moved for: open mint quotes the
+    /// customer never completed and melt quotes the wallet never funded.
+    /// Funded melts (proofs locked) are never touched — only the operator or
+    /// the wallet may resolve those. Runs in a single write pass so a melt
+    /// funded concurrently cannot slip through mid-sweep.
+    pub async fn sweep_expired(&self) -> usize {
+        let removed = {
+            let mut t = self.inner.tickets.write().await;
+            let now = unix_now();
+            let expired: Vec<String> = t
+                .values()
+                .filter(|ticket| {
+                    matches!(
+                        (ticket.kind, ticket.status),
+                        (TicketKind::Incoming, TicketStatus::Pending)
+                            | (TicketKind::Outgoing, TicketStatus::Waiting)
+                    ) && ticket.expired(now)
+                })
+                .map(|ticket| ticket.id.clone())
+                .collect();
+            for id in &expired {
+                t.remove(id);
+            }
+            expired.len()
+        };
+        if removed > 0 {
+            if let Err(e) = self.persist().await {
+                tracing::error!("persist after sweep_expired: {e}");
+            }
+            self.notify_ui_change();
+        }
+        removed
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
@@ -460,18 +577,7 @@ impl BranchState {
         if t.kind != TicketKind::Outgoing {
             return None;
         }
-        let status = match t.status {
-            TicketStatus::Paid => MeltQuoteState::Paid,
-            TicketStatus::Pending => MeltQuoteState::Pending,
-            TicketStatus::Offered | TicketStatus::Waiting => MeltQuoteState::Unpaid,
-            TicketStatus::Failed => MeltQuoteState::Failed,
-        };
-        Some(MakePaymentResponse {
-            payment_lookup_id: PaymentIdentifier::CustomId(t.id.clone()),
-            payment_proof: t.notes.clone(),
-            status,
-            total_spent: Amount::new(t.amount, t.unit_typed()),
-        })
+        Some(outgoing_payment_response(t))
     }
 
     async fn persist(&self) -> Result<()> {
@@ -482,6 +588,41 @@ impl BranchState {
         tokio::fs::write(&tmp, &bytes).await?;
         tokio::fs::rename(&tmp, &self.inner.path).await?;
         Ok(())
+    }
+}
+
+fn outgoing_payment_response(t: &Ticket) -> MakePaymentResponse {
+    let status = match t.status {
+        TicketStatus::Paid => MeltQuoteState::Paid,
+        TicketStatus::Pending => MeltQuoteState::Pending,
+        TicketStatus::Waiting => MeltQuoteState::Unpaid,
+        TicketStatus::Failed => MeltQuoteState::Failed,
+    };
+    MakePaymentResponse {
+        payment_lookup_id: PaymentIdentifier::CustomId(t.id.clone()),
+        payment_proof: t.notes.clone(),
+        status,
+        total_spent: Amount::new(t.amount, t.unit_typed()),
+    }
+}
+
+/// The `PaymentSuccessful` event for a settled melt, if its quote id parses.
+fn outgoing_settled_event(t: &Ticket) -> Option<Event> {
+    let quote_id = parse_quote_id(t)?;
+    Some(Event::PaymentSuccessful {
+        quote_id,
+        details: outgoing_payment_response(t),
+    })
+}
+
+fn parse_quote_id(t: &Ticket) -> Option<QuoteId> {
+    let raw = t.quote_id.as_deref()?;
+    match QuoteId::from_str(raw) {
+        Ok(quote_id) => Some(quote_id),
+        Err(e) => {
+            tracing::warn!("ticket {} has an unparseable quote id ({e})", t.id);
+            None
+        }
     }
 }
 
@@ -502,108 +643,390 @@ mod tests {
         BranchState::load(path).await.expect("load state")
     }
 
-    fn offered(kind: TicketKind, amount: u64, expires_at: Option<u64>) -> Ticket {
-        Ticket::new_offer(kind, amount, "ora".to_string(), None, expires_at)
+    fn incoming(quote_id: &str, amount: u64) -> Ticket {
+        Ticket::new_incoming(quote_id.into(), amount, "ora".into(), None, None)
+    }
+
+    fn outgoing(quote_id: &str, amount: u64) -> Ticket {
+        Ticket::new_outgoing(quote_id.into(), amount, "ora".into(), None, None)
+    }
+
+    #[test]
+    fn normalizes_match_input() {
+        assert_eq!(
+            normalize_match_input("  9EC0F4\r\n"),
+            Ok(MatchQuery::Suffix("9ec0f4".into()))
+        );
+        assert_eq!(
+            normalize_match_input("2f4-b6e"),
+            Ok(MatchQuery::Suffix("2f4b6e".into()))
+        );
+        let full = "0198c0ef-3f11-7abc-9def-0123456789ab";
+        assert_eq!(
+            normalize_match_input(full),
+            Ok(MatchQuery::Exact(full.replace('-', "")))
+        );
+        assert_eq!(
+            normalize_match_input(&format!("MINT-{full}")),
+            Ok(MatchQuery::Exact(full.replace('-', "")))
+        );
+        assert!(normalize_match_input("12345").is_err()); // too short
+        assert!(normalize_match_input("https://mint/quote/abc123").is_err()); // not an id
+        assert!(normalize_match_input("").is_err());
+        assert!(normalize_match_input(&"f".repeat(40)).is_err()); // longer than an id
     }
 
     #[tokio::test]
-    async fn incoming_claim_is_single_use() {
+    async fn suffix_matching_finds_unique_open_quote() {
         let state = fresh_state().await;
-        let ticket = offered(TicketKind::Incoming, 500, None);
-        let id = ticket.id.clone();
-        state.insert_active(ticket).await.unwrap();
+        state
+            .insert_open(incoming("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 500))
+            .await
+            .unwrap();
+        state
+            .insert_open(incoming("0198c0ef-3f11-7abc-9def-bbbbbb111111", 700))
+            .await
+            .unwrap();
 
-        let claimed = state.claim_incoming(&id, 500, "ora").await.unwrap();
-        assert_eq!(claimed.status, TicketStatus::Pending);
+        let query = normalize_match_input("9EC0F4").unwrap();
+        match state.match_open(&query).await {
+            MatchResult::Unique(t) => assert_eq!(t.amount, 500),
+            other => panic!("expected unique match, got {other:?}"),
+        }
 
-        // second claim loses
+        // full scanned id (with hyphens) matches exactly
+        let query = normalize_match_input("0198c0ef-3f11-7abc-9def-bbbbbb111111").unwrap();
+        match state.match_open(&query).await {
+            MatchResult::Unique(t) => assert_eq!(t.amount, 700),
+            other => panic!("expected unique match, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_and_missing_suffixes_are_reported() {
+        let state = fresh_state().await;
+        state
+            .insert_open(incoming("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 500))
+            .await
+            .unwrap();
+        state
+            .insert_open(outgoing("0198c0ef-3f11-7abc-9def-bbbbbb9ec0f4", 200))
+            .await
+            .unwrap();
+
+        let query = normalize_match_input("9ec0f4").unwrap();
         assert!(matches!(
-            state.claim_incoming(&id, 500, "ora").await,
-            Err(ClaimError::AlreadyClaimed)
+            state.match_open(&query).await,
+            MatchResult::Ambiguous(2)
+        ));
+
+        // longer suffix disambiguates
+        let query = normalize_match_input("bbb9ec0f4").unwrap();
+        assert!(matches!(
+            state.match_open(&query).await,
+            MatchResult::Unique(_)
+        ));
+
+        let query = normalize_match_input("dddddd").unwrap();
+        assert!(matches!(
+            state.match_open(&query).await,
+            MatchResult::None {
+                inactive_match: false
+            }
         ));
     }
 
     #[tokio::test]
-    async fn incoming_claim_rejects_mismatch_and_stays_claimable() {
+    async fn settled_quotes_hint_but_do_not_match() {
         let state = fresh_state().await;
-        let ticket = offered(TicketKind::Incoming, 500, None);
-        let id = ticket.id.clone();
-        state.insert_active(ticket).await.unwrap();
+        let t = state
+            .insert_open(incoming("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 500))
+            .await
+            .unwrap();
+        state.mark_paid(&t.id, None).await.unwrap();
 
+        let query = normalize_match_input("9ec0f4").unwrap();
         assert!(matches!(
-            state.claim_incoming(&id, 400, "ora").await,
-            Err(ClaimError::Mismatch(_))
-        ));
-        assert!(matches!(
-            state.claim_incoming(&id, 500, "usd").await,
-            Err(ClaimError::Mismatch(_))
-        ));
-        // a rejected mismatch does not burn the ticket
-        assert!(state.claim_incoming(&id, 500, "ora").await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn expired_offer_cannot_be_claimed() {
-        let state = fresh_state().await;
-        let ticket = offered(TicketKind::Incoming, 500, Some(unix_now() - 1));
-        let id = ticket.id.clone();
-        state.insert_active(ticket).await.unwrap();
-
-        assert!(matches!(
-            state.claim_incoming(&id, 500, "ora").await,
-            Err(ClaimError::Expired)
+            state.match_open(&query).await,
+            MatchResult::None {
+                inactive_match: true
+            }
         ));
     }
 
     #[tokio::test]
-    async fn unknown_ticket_is_rejected() {
+    async fn incoming_settles_and_emits_event_once() {
         let state = fresh_state().await;
-        assert!(matches!(
-            state.claim_incoming("MINT-nope", 1, "ora").await,
-            Err(ClaimError::Unknown)
-        ));
-        assert!(matches!(
-            state.claim_outgoing("MELT-nope", "ora", "q".into()).await,
-            Err(ClaimError::Unknown)
-        ));
+        let t = state
+            .insert_open(incoming("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 500))
+            .await
+            .unwrap();
+        let mut rx = state.subscribe_events();
+
+        let paid = state.mark_paid(&t.id, Some("till #1".into())).await.unwrap();
+        assert_eq!(paid.status, TicketStatus::Paid);
+        assert!(matches!(rx.try_recv(), Ok(Event::PaymentReceived(_))));
+
+        // repeated confirm is a no-op and must not double-credit
+        let again = state.mark_paid(&t.id, None).await.unwrap();
+        assert_eq!(again.status, TicketStatus::Paid);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn voided_and_expired_tickets_cannot_be_settled() {
+        let state = fresh_state().await;
+        let t = state
+            .insert_open(incoming("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 500))
+            .await
+            .unwrap();
+        state.mark_failed(&t.id, None).await.unwrap();
+        let mut rx = state.subscribe_events();
+        assert!(state.mark_paid(&t.id, None).await.is_err());
+        assert!(rx.try_recv().is_err(), "voided ticket must not emit payment");
+
+        let mut expired = incoming("0198c0ef-3f11-7abc-9def-bbbbbb111111", 700);
+        expired.expires_at = Some(unix_now() - 1);
+        let expired = state.insert_open(expired).await.unwrap();
+        assert!(state.mark_paid(&expired.id, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn quote_id_replay_is_rejected() {
+        let state = fresh_state().await;
+        let quote = "0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4";
+        let t = state.insert_open(incoming(quote, 500)).await.unwrap();
+
+        // transport-level retry with identical parameters echoes the ticket
+        let retry = state.insert_open(incoming(quote, 500)).await.unwrap();
+        assert_eq!(retry.id, t.id);
+
+        // same id with different parameters is a replay
+        assert!(state.insert_open(incoming(quote, 999)).await.is_err());
+
+        // settled ids can never be re-registered
+        state.mark_paid(&t.id, None).await.unwrap();
+        assert!(state.insert_open(incoming(quote, 500)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn open_quote_cap_is_enforced() {
+        let state = fresh_state().await;
+        for i in 0..MAX_OPEN_QUOTES {
+            state
+                .insert_open(incoming(&format!("0198c0ef-3f11-7abc-9def-{i:012x}"), 1))
+                .await
+                .unwrap();
+        }
+        assert!(state
+            .insert_open(incoming("0198c0ef-3f11-7abc-9def-ffffffffffff", 1))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn outgoing_lifecycle_gates_payout() {
         let state = fresh_state().await;
-        let ticket = offered(TicketKind::Outgoing, 700, None);
-        let id = ticket.id.clone();
-        state.insert_active(ticket).await.unwrap();
-
-        // teller cannot pay out an unclaimed or unfunded ticket
-        assert!(state.mark_paid(&id, None).await.is_err());
-
-        let claimed = state
-            .claim_outgoing(&id, "ora", "quote-abc123".to_string())
+        let t = state
+            .insert_open(outgoing("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 700))
             .await
             .unwrap();
-        assert_eq!(claimed.status, TicketStatus::Waiting);
-        assert_eq!(claimed.quote_id.as_deref(), Some("quote-abc123"));
+        assert_eq!(t.status, TicketStatus::Waiting);
 
-        // still unfunded → still no payout
-        assert!(state.mark_paid(&id, None).await.is_err());
+        // wallet has not locked funds → no payout
+        assert!(state.mark_paid(&t.id, None).await.is_err());
 
-        // second claim loses
-        assert!(matches!(
-            state
-                .claim_outgoing(&id, "ora", "quote-other".to_string())
-                .await,
-            Err(ClaimError::AlreadyClaimed)
-        ));
-
-        // wallet funds the melt → Pending, payout allowed
-        let funded = state.mark_outgoing_submitted(&id).await.unwrap();
+        // wallet funds the melt → Pending, payout allowed, success event fires
+        let funded = state.mark_outgoing_submitted(&t.id).await.unwrap();
         assert_eq!(funded.status, TicketStatus::Pending);
-        assert!(state
-            .outgoing_by_quote_id("quote-abc123")
-            .await
-            .is_some_and(|t| t.id == id));
-        let paid = state.mark_paid(&id, None).await.unwrap();
+        let mut rx = state.subscribe_events();
+        let paid = state.mark_paid(&t.id, None).await.unwrap();
         assert_eq!(paid.status, TicketStatus::Paid);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::PaymentSuccessful { .. })
+        ));
+        assert!(state
+            .outgoing_by_quote_id("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4")
+            .await
+            .is_some_and(|x| x.id == t.id));
+    }
+
+    #[tokio::test]
+    async fn voided_melt_cannot_be_funded_and_funded_void_notifies() {
+        let state = fresh_state().await;
+        let t = state
+            .insert_open(outgoing("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 700))
+            .await
+            .unwrap();
+        state.mark_failed(&t.id, None).await.unwrap();
+        assert!(state.mark_outgoing_submitted(&t.id).await.is_err());
+
+        let f = state
+            .insert_open(outgoing("0198c0ef-3f11-7abc-9def-bbbbbb111111", 300))
+            .await
+            .unwrap();
+        state.mark_outgoing_submitted(&f.id).await.unwrap();
+        let mut rx = state.subscribe_events();
+        state.mark_failed(&f.id, Some("customer left".into())).await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Event::PaymentFailed { .. })));
+    }
+
+    #[tokio::test]
+    async fn sweep_deletes_expired_unfunded_only() {
+        let state = fresh_state().await;
+        let past = unix_now() - 10;
+
+        let mut dead_mint = incoming("0198c0ef-3f11-7abc-9def-aaaaaa111111", 10);
+        dead_mint.expires_at = Some(past);
+        let mut dead_melt = outgoing("0198c0ef-3f11-7abc-9def-bbbbbb222222", 20);
+        dead_melt.expires_at = Some(past);
+        let mut funded_melt = outgoing("0198c0ef-3f11-7abc-9def-cccccc333333", 30);
+        funded_melt.expires_at = Some(past);
+        let live = incoming("0198c0ef-3f11-7abc-9def-dddddd444444", 40);
+
+        for t in [
+            dead_mint.clone(),
+            dead_melt.clone(),
+            funded_melt.clone(),
+            live.clone(),
+        ] {
+            state.insert_open(t).await.unwrap();
+        }
+        state
+            .mark_outgoing_submitted(&funded_melt.id)
+            .await
+            .unwrap();
+
+        assert_eq!(state.sweep_expired().await, 2);
+        let remaining: Vec<String> = state
+            .active_tickets()
+            .await
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(remaining.contains(&funded_melt.id));
+        assert!(remaining.contains(&live.id));
+        assert!(!remaining.contains(&dead_mint.id));
+        assert!(!remaining.contains(&dead_melt.id));
+    }
+
+    #[tokio::test]
+    async fn legacy_state_file_loads_and_voids_unmatchable_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "branch-state-legacy-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        // Verbatim shape written by the removed offer flow: an unclaimed offer,
+        // a claimed (pending) incoming without a quote id, a claimed melt with
+        // one, and a settled row.
+        let legacy = r#"{
+          "tickets": {
+            "MINT-11111111-aaaa-bbbb-cccc-dddddddddddd": {
+              "id": "MINT-11111111-aaaa-bbbb-cccc-dddddddddddd",
+              "quote_id": null,
+              "kind": "incoming",
+              "amount": 500,
+              "unit": "ora",
+              "status": "offered",
+              "created_at": 1700000000,
+              "paid_at": null,
+              "description": null,
+              "notes": null,
+              "offer": "cquoteAexample",
+              "expires_at": 1700000900
+            },
+            "MINT-22222222-aaaa-bbbb-cccc-dddddddddddd": {
+              "id": "MINT-22222222-aaaa-bbbb-cccc-dddddddddddd",
+              "quote_id": null,
+              "kind": "incoming",
+              "amount": 700,
+              "unit": "ora",
+              "status": "pending",
+              "created_at": 1700000000,
+              "paid_at": null,
+              "description": null,
+              "notes": null,
+              "expires_at": null
+            },
+            "MELT-33333333-aaaa-bbbb-cccc-dddddddddddd": {
+              "id": "MELT-33333333-aaaa-bbbb-cccc-dddddddddddd",
+              "quote_id": "0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4",
+              "kind": "outgoing",
+              "amount": 200,
+              "unit": "ora",
+              "status": "waiting",
+              "created_at": 1700000000,
+              "paid_at": null,
+              "description": null,
+              "notes": null,
+              "expires_at": null
+            },
+            "MINT-44444444-aaaa-bbbb-cccc-dddddddddddd": {
+              "id": "MINT-44444444-aaaa-bbbb-cccc-dddddddddddd",
+              "quote_id": null,
+              "kind": "incoming",
+              "amount": 900,
+              "unit": "ora",
+              "status": "paid",
+              "created_at": 1700000000,
+              "paid_at": 1700000500,
+              "description": null,
+              "notes": "receipt",
+              "expires_at": null
+            }
+          }
+        }"#;
+        tokio::fs::write(&path, legacy).await.unwrap();
+
+        let state = BranchState::load(path).await.unwrap();
+        let all = state.list_all().await;
+        assert_eq!(all.len(), 4, "no rows may be dropped on upgrade");
+
+        let by_id = |suffix: &str| {
+            all.iter()
+                .find(|t| t.id.starts_with(suffix))
+                .cloned()
+                .unwrap()
+        };
+        // unclaimed offer → Failed via the serde alias
+        assert_eq!(by_id("MINT-1111").status, TicketStatus::Failed);
+        // active legacy row without quote id → voided at load
+        assert_eq!(by_id("MINT-2222").status, TicketStatus::Failed);
+        // claimed melt kept: it has a quote id and stays matchable
+        assert_eq!(by_id("MELT-3333").status, TicketStatus::Waiting);
+        // settled history untouched
+        let settled = by_id("MINT-4444");
+        assert_eq!(settled.status, TicketStatus::Paid);
+        assert_eq!(settled.notes.as_deref(), Some("receipt"));
+    }
+
+    #[tokio::test]
+    async fn corrupt_state_file_is_quarantined_not_wiped() {
+        let path = std::env::temp_dir().join(format!(
+            "branch-state-corrupt-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::write(&path, b"{ definitely not json").await.unwrap();
+
+        let state = BranchState::load(path.clone()).await.unwrap();
+        assert!(state.list_all().await.is_empty());
+        assert!(
+            !tokio::fs::try_exists(&path).await.unwrap(),
+            "corrupt file must be moved aside, not left in place"
+        );
+
+        let dir = path.parent().unwrap();
+        let mut quarantined = false;
+        let prefix = path.file_stem().unwrap().to_string_lossy().to_string();
+        let mut entries = tokio::fs::read_dir(dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) && name.contains("corrupt-") {
+                quarantined = true;
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+        assert!(quarantined, "corrupt file must be preserved under a new name");
     }
 }

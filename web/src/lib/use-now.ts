@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react"
 
 /**
  * A ticking unix-seconds clock, offset-corrected against the server's
- * `snapshot.now` so countdowns don't drift with local clock skew. Fixes the
- * previously frozen offer countdown (which only moved on SSE refreshes).
+ * `snapshot.now` so countdowns (quote expiry) and ages don't drift with
+ * local clock skew.
  */
 export function useNow(serverNow: number, intervalMs = 1000) {
   const offsetRef = useRef(0)

@@ -17,7 +17,7 @@ const NAV = [
 export function AppShell({ children }: { children: ReactNode }) {
   const { snapshot, refresh } = useSnapshot()
   const pathname = usePathname()
-  const activeQuotes = snapshot.active_tickets.length
+  const openQuotes = snapshot.open_quotes.length
 
   async function signOut() {
     await logout()
@@ -66,7 +66,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </nav>
 
           <div className="ml-auto flex items-center gap-1.5">
-            {activeQuotes > 0 && (
+            {openQuotes > 0 && (
               <a
                 href="/teller"
                 onClick={(event) => {
@@ -75,7 +75,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 }}
               >
                 <Badge variant="outline">
-                  {activeQuotes} active quote{activeQuotes === 1 ? "" : "s"}
+                  {openQuotes} open quote{openQuotes === 1 ? "" : "s"}
                 </Badge>
               </a>
             )}
