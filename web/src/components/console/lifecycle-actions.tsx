@@ -19,7 +19,10 @@ import { Button } from "@/components/ui/button"
 /**
  * Lifecycle transitions. Destructive moves confirm via AlertDialog where the
  * solid button is the safe cancel and the outline button commits the change.
- * The server enforces the guards (active tickets, unexpired keysets).
+ * The server enforces the guards: funded withdrawals block the change and
+ * unexpired keysets block retirement; open unfunded wallet quotes for the
+ * unit are voided automatically (anyone can create those, so they must not
+ * be able to block console actions).
  */
 export function LifecycleActions({ unit }: { unit: ManagedUnit }) {
   const { refresh } = useSnapshot()
@@ -50,8 +53,9 @@ export function LifecycleActions({ unit }: { unit: ManagedUnit }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Stop issuing {code}?</AlertDialogTitle>
             <AlertDialogDescription>
-              New deposits are disabled. Existing ecash stays redeemable until every keyset
-              reaches its final expiry. You can resume issuing at any time.
+              New deposits are disabled and any open {code} quotes are voided (funded
+              withdrawals must be settled first). Existing ecash stays redeemable until every
+              keyset reaches its final expiry. You can resume issuing at any time.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -87,9 +91,9 @@ export function LifecycleActions({ unit }: { unit: ManagedUnit }) {
             <AlertDialogHeader>
               <AlertDialogTitle>Retire {code}?</AlertDialogTitle>
               <AlertDialogDescription>
-                Removes the unit from all advertised operations. The server blocks retirement
-                until every keyset has passed its final expiry, so outstanding ecash cannot be
-                stranded. Retirement is permanent.
+                Removes the unit from all advertised operations; any open {code} quotes are
+                voided. The server blocks retirement until every keyset has passed its final
+                expiry, so redeemable ecash cannot be stranded. Retirement is permanent.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

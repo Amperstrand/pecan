@@ -1,15 +1,16 @@
-//! Thin clients used by the operator web UI:
+//! Thin clients used by the operator web UI and the boot sequence:
 //!   * `MintRpcClient` — tonic gRPC client for cdk-mintd's management RPC
-//!     (only used for `RotateNextKeyset`).
-//!   * `MintHttpClient` — reqwest client that talks to the mint's public HTTP
-//!     API (`/v1/keysets`) to list keysets for the dashboard.
+//!     (`RotateNextKeyset`, `UpdateQuoteTtl`).
+//!   * `MintHttpClient` — reqwest client for the mint's public HTTP API:
+//!     keysets and info for the dashboard, plus per-quote lookups used to
+//!     cross-check a teller match against the mint's own records.
 
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use cdk_common::grpc::{VersionInterceptor, VERSION_HEADER};
 use cdk_mint_rpc::cdk_mint_client::CdkMintClient;
-use cdk_mint_rpc::RotateNextKeysetRequest;
+use cdk_mint_rpc::{RotateNextKeysetRequest, UpdateQuoteTtlRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tonic::transport::Channel;
@@ -66,6 +67,22 @@ impl MintRpcClient {
             amounts: response.amounts,
             input_fee_ppk: response.input_fee_ppk,
         })
+    }
+
+    /// Persist the mint's quote TTLs. QuoteTTL lives in the mint's database
+    /// (the toml value only seeds a fresh install), so this is asserted on
+    /// every processor boot to keep existing deployments in sync with the
+    /// ticket-expiry constants.
+    pub async fn set_quote_ttl(&self, mint_ttl: u64, melt_ttl: u64) -> Result<()> {
+        let mut client = self.connect().await?;
+        client
+            .update_quote_ttl(Request::new(UpdateQuoteTtlRequest {
+                mint_ttl: Some(mint_ttl),
+                melt_ttl: Some(melt_ttl),
+            }))
+            .await
+            .map_err(|e| anyhow!("update_quote_ttl: {e}"))?;
+        Ok(())
     }
 
     pub async fn health(&self) -> Result<()> {
@@ -144,4 +161,82 @@ impl MintHttpClient {
         }
         Ok(r.json().await?)
     }
+
+    /// Fetch one mint quote from the mint's public API. `Ok(None)` means the
+    /// mint does not know the quote (404) — for the teller that distinction
+    /// (unknown vs. unreachable mint) decides between "reject" and "retry".
+    pub async fn get_mint_quote(
+        &self,
+        method: &str,
+        quote_id: &str,
+    ) -> Result<Option<MintQuoteSnapshot>> {
+        let base = self.base.trim_end_matches('/');
+        let url = format!("{base}/v1/mint/quote/{method}/{quote_id}");
+        let r = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        if r.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !r.status().is_success() {
+            return Err(anyhow!("get_mint_quote: HTTP {}", r.status()));
+        }
+        Ok(Some(r.json().await?))
+    }
+
+    /// Melt-quote sibling of [`Self::get_mint_quote`].
+    pub async fn get_melt_quote(
+        &self,
+        method: &str,
+        quote_id: &str,
+    ) -> Result<Option<MeltQuoteSnapshot>> {
+        let base = self.base.trim_end_matches('/');
+        let url = format!("{base}/v1/melt/quote/{method}/{quote_id}");
+        let r = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        if r.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !r.status().is_success() {
+            return Err(anyhow!("get_melt_quote: HTTP {}", r.status()));
+        }
+        Ok(Some(r.json().await?))
+    }
+}
+
+/// The wallet-visible state of a custom-method mint quote. Custom quotes have
+/// no `state` field — "open" means nothing paid or issued yet.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MintQuoteSnapshot {
+    /// The processor-issued payment request (the ticket id).
+    pub request: String,
+    #[serde(default)]
+    pub amount: Option<u64>,
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub amount_paid: u64,
+    #[serde(default)]
+    pub amount_issued: u64,
+    /// NUT-20 lock. Absent means the quote is not locked to a wallet key.
+    #[serde(default)]
+    pub pubkey: Option<String>,
+}
+
+/// The wallet-visible state of a custom-method melt quote.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeltQuoteSnapshot {
+    pub amount: u64,
+    /// "UNPAID" | "PENDING" | "PAID" (serialized NUT-05 state).
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub unit: Option<String>,
 }

@@ -6,8 +6,9 @@
 //!     cdk-mintd connects to this and routes all mint/melt for that method to us.
 //!   * a web UI on $CDK_BRANCH_PROCESSOR_HTTP_PORT for branch operators to sign
 //!     in (username + password from the users.json store; first boot seeds a
-//!     demo admin/admin account), see pending mint/melt quotes, mark them paid
-//!     when physical cash is exchanged, and manage units, keysets, and users.
+//!     demo admin/admin account), match wallet-created quotes by quote id,
+//!     mark them paid when physical cash is exchanged, and manage units,
+//!     keysets, and users.
 //!
 //! First boot bootstraps a complete configuration (generated recovery seed,
 //! method "branch", no units) with zero interaction — there is no setup mode.
@@ -17,9 +18,9 @@
 mod backend;
 mod clients;
 mod config;
-mod offer;
 mod sessions;
 mod state;
+mod supply;
 mod users;
 mod web;
 
@@ -54,6 +55,10 @@ const ENV_MINT_RPC_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_RPC_URL";
 const ENV_MINT_HTTP_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_HTTP_URL";
 const ENV_DEFAULT_MINT_PUBLIC_URL: &str = "CDK_BRANCH_PROCESSOR_DEFAULT_MINT_PUBLIC_URL";
 const ENV_MINT_GRPC_ADDR: &str = "CDK_BRANCH_PROCESSOR_MINT_GRPC_ADDR";
+/// Path of cdk-mintd's sqlite database for the read-only supply audit.
+/// Set to an empty string to disable auditing (e.g. a rig without access to
+/// the mint's work dir).
+const ENV_MINT_DB_PATH: &str = "CDK_BRANCH_PROCESSOR_MINT_DB_PATH";
 
 const DEFAULT_WORK_DIR: &str = "/var/lib/cdk-branch-processor";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/custom-unit-mint/config";
@@ -65,6 +70,7 @@ const DEFAULT_MINT_HTTP_URL: &str = "http://mint:8089";
 const DEFAULT_MINT_RPC_URL: &str = "http://mint:8091";
 const DEFAULT_PUBLIC_URL: &str = "http://localhost:8089";
 const DEFAULT_MINT_GRPC_ADDR: &str = "http://processor";
+const DEFAULT_MINT_DB_PATH: &str = "/var/lib/cdk-mintd/cdk-mintd.sqlite";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -113,6 +119,11 @@ async fn main() -> Result<()> {
         std::env::var(ENV_DEFAULT_MINT_PUBLIC_URL).unwrap_or_else(|_| DEFAULT_PUBLIC_URL.into());
     let mint_grpc_addr =
         std::env::var(ENV_MINT_GRPC_ADDR).unwrap_or_else(|_| DEFAULT_MINT_GRPC_ADDR.into());
+    let mint_db_path = match std::env::var(ENV_MINT_DB_PATH) {
+        Ok(path) if path.trim().is_empty() => None,
+        Ok(path) => Some(PathBuf::from(path)),
+        Err(_) => Some(PathBuf::from(DEFAULT_MINT_DB_PATH)),
+    };
 
     let state_path = work_dir.join("tickets.json");
 
@@ -222,11 +233,14 @@ async fn main() -> Result<()> {
         mint_http.clone(),
         branch.clone(),
     );
+    spawn_ticket_sweeper(branch.clone());
+    spawn_quote_ttl_sync(mint_rpc.clone(), branch.clone());
 
     let app = web::router(web::WebState::new(
         branch,
         mint_rpc,
         mint_http,
+        supply::SupplyReader::new(mint_db_path),
         app_config,
         config_store.clone(),
         users,
@@ -248,6 +262,68 @@ async fn main() -> Result<()> {
         let _ = server.stop().await;
     }
     Ok(())
+}
+
+/// Periodically drop expired tickets no money ever moved for, so abandoned
+/// wallet-created quotes neither clutter the teller's open list nor pin the
+/// open-quote cap. Funded melts are never touched (see `sweep_expired`).
+fn spawn_ticket_sweeper(branch: BranchState) {
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(60)).await;
+            let removed = branch.sweep_expired().await;
+            if removed > 0 {
+                tracing::info!("swept {removed} expired unfunded quote(s)");
+            }
+        }
+    });
+}
+
+/// Assert the mint's quote TTLs on every boot. The TTL is persisted in the
+/// mint's database (the generated mint.toml only seeds fresh installs), so
+/// without this an existing deployment would keep the cdk defaults (1 h mint,
+/// 60 s melt) and disagree with the processor's ticket-expiry bookkeeping.
+///
+/// Retries until it succeeds: on a fresh install the mint does not even start
+/// until the operator adds the first unit, which can be arbitrarily later.
+/// (That path is also covered by mint.toml seeding a brand-new database, but
+/// the retry keeps every ordering correct.) Quick retries for the first
+/// minute, then one quiet probe per minute.
+///
+/// First success doubles as the "the mint just came up" signal: it pushes an
+/// SSE change so every open console refetches and its health tiles settle
+/// without a manual reload.
+fn spawn_quote_ttl_sync(mint_rpc: MintRpcClient, branch: BranchState) {
+    tokio::spawn(async move {
+        let mut attempt = 0u32;
+        loop {
+            match mint_rpc
+                .set_quote_ttl(config::MINT_QUOTE_TTL_SECS, config::MELT_QUOTE_TTL_SECS)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        "mint quote TTLs set: mint {}s, melt {}s",
+                        config::MINT_QUOTE_TTL_SECS,
+                        config::MELT_QUOTE_TTL_SECS
+                    );
+                    branch.notify_ui_change();
+                    return;
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt == 30 {
+                        tracing::info!(
+                            "mint not reachable yet for the quote-TTL sync (normal until the \
+                             first unit exists); will keep retrying every 60s: {e:#}"
+                        );
+                    }
+                    let delay = if attempt < 30 { 2 } else { 60 };
+                    sleep(Duration::from_secs(delay)).await;
+                }
+            }
+        }
+    });
 }
 
 fn spawn_rollover_worker(

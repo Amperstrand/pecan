@@ -1,42 +1,47 @@
 import { useState } from "react"
-import { Loader2 } from "lucide-react"
+import { Loader2, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { markFailed, markPaid, type Ticket } from "@/lib/api"
-import { formatAge, formatAmount } from "@/lib/format"
+import { formatAge, formatAmount, formatCountdown } from "@/lib/format"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { StatusBadge } from "@/components/shared/badges"
 import { MonoChip } from "@/components/shared/bits"
 import { ActionPair } from "@/components/teller/action-pair"
-import { OfferPanel } from "@/components/teller/offer-panel"
 
 /**
- * One card per teller state. Interaction contract: at most two big buttons —
- * interrupt (outline, left) and proceed (solid, right). Proceed exists only in
- * `pending`, the single status the server's mark-paid accepts. SSE refreshes
- * advance the card as the wallet acts (offered → waiting → pending).
+ * The confirm card for a matched quote. Interaction contract: at most two big
+ * buttons — interrupt (outline, left) and proceed (solid, right). Proceed
+ * exists only in `pending`, the single status the server's mark-paid accepts.
+ * SSE refreshes advance the card as the wallet acts (waiting → pending).
  */
-export function ActiveTicketCard({
+export function MatchedQuoteCard({
   ticket,
   now,
-  onRefresh,
+  onDismiss,
+  onSettled,
 }: {
   ticket: Ticket
   now: number
-  onRefresh: () => Promise<void>
+  onDismiss: () => void
+  onSettled: () => Promise<void>
 }) {
   const [note, setNote] = useState("")
   const [busy, setBusy] = useState<"proceed" | "interrupt" | null>(null)
 
   const incoming = ticket.kind === "incoming"
-  const offered = ticket.status === "offered"
   const waiting = ticket.status === "waiting"
   const pending = ticket.status === "pending"
-  const expired = offered && ticket.expires_at != null && ticket.expires_at <= now
   const title = incoming ? "Deposit" : "Withdrawal"
+  const amountText = formatAmount(ticket.amount, ticket.unit)
+  const expiresIn =
+    ticket.expires_at != null && ticket.expires_at > now
+      ? formatCountdown(ticket.expires_at, now)
+      : null
 
   async function settle(kind: "paid" | "failed", settledToast: string) {
     setBusy(kind === "paid" ? "proceed" : "interrupt")
@@ -47,7 +52,7 @@ export function ActiveTicketCard({
         await markFailed(ticket.id, note || undefined)
       }
       setNote("")
-      await onRefresh()
+      await onSettled()
       toast(settledToast)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not update the quote.")
@@ -56,7 +61,9 @@ export function ActiveTicketCard({
     }
   }
 
-  const amountText = formatAmount(ticket.amount, ticket.unit)
+  const quoteId = ticket.quote_id ?? ticket.id
+  const idHead = quoteId.slice(0, Math.max(quoteId.length - 6, 0))
+  const idTail = quoteId.slice(Math.max(quoteId.length - 6, 0))
 
   return (
     <Card>
@@ -64,41 +71,55 @@ export function ActiveTicketCard({
         <CardTitle>
           {title} · {amountText}
         </CardTitle>
-        <CardAction>
+        <CardAction className="flex items-center gap-2">
           <StatusBadge status={ticket.status} />
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Dismiss"
+            disabled={busy !== null}
+            onClick={onDismiss}
+          >
+            <X />
+          </Button>
         </CardAction>
       </CardHeader>
       <CardContent className="grid gap-5">
-        {offered && <OfferPanel ticket={ticket} now={now} expired={expired} />}
+        <div className="grid justify-items-center gap-1 text-center">
+          <span className="text-xs text-muted-foreground uppercase tracking-wide">Quote</span>
+          <span className="break-all font-mono text-sm text-muted-foreground">
+            {idHead}
+            <strong className="text-foreground">{idTail}</strong>
+          </span>
+          <p className="m-0 max-w-[46ch] text-xs text-muted-foreground">
+            Check the highlighted characters against the customer's wallet before settling.
+          </p>
+        </div>
 
         {waiting && (
-          <div className="grid gap-3">
-            <Alert variant="emphasis">
-              <Loader2 className="animate-spin" />
-              <AlertTitle>The wallet is committing funds. Do not pay out yet.</AlertTitle>
-              <AlertDescription>This screen updates automatically.</AlertDescription>
-            </Alert>
-          </div>
+          <Alert variant="emphasis">
+            <Loader2 className="animate-spin" />
+            <AlertTitle>The wallet is committing funds. Do not pay out yet.</AlertTitle>
+            <AlertDescription>This screen updates automatically.</AlertDescription>
+          </Alert>
         )}
 
-        {pending && incoming && (
+        {pending && (
           <div className="grid justify-items-center gap-3 py-2 text-center">
             <div className="text-4xl font-semibold tabular-nums">{amountText}</div>
             <p className="m-0 max-w-[44ch] text-sm text-muted-foreground">
-              Take <strong className="text-foreground">{amountText}</strong> in cash from the
-              customer, then confirm.
-            </p>
-          </div>
-        )}
-
-        {pending && !incoming && (
-          <div className="grid justify-items-center gap-3 py-2 text-center">
-            <div className="rounded-lg border bg-muted px-6 py-4 font-mono text-4xl font-semibold tracking-[0.3em]">
-              {ticket.verification_code ?? "——————"}
-            </div>
-            <p className="m-0 max-w-[46ch] text-sm text-muted-foreground">
-              The customer's wallet shows this code. If it matches, pay out{" "}
-              <strong className="text-foreground">{amountText}</strong> in cash.
+              {incoming ? (
+                <>
+                  Take <strong className="text-foreground">{amountText}</strong> in cash from
+                  the customer, then confirm.
+                </>
+              ) : (
+                <>
+                  The ecash is locked at the mint. Pay out{" "}
+                  <strong className="text-foreground">{amountText}</strong> in cash, then
+                  confirm.
+                </>
+              )}
             </p>
           </div>
         )}
@@ -108,6 +129,7 @@ export function ActiveTicketCard({
             Ticket <MonoChip>{ticket.short_id}</MonoChip>
           </span>
           <span>Created {formatAge(ticket.created_at, now)}</span>
+          {expiresIn && (incoming || waiting) && <span>Expires in {expiresIn}</span>}
           {ticket.description && <span>Note: {ticket.description}</span>}
         </div>
 
@@ -122,17 +144,10 @@ export function ActiveTicketCard({
               placeholder="Receipt note (optional)"
             />
           )}
-          {offered && (
-            <ActionPair
-              interruptLabel={expired ? "Discard offer" : "Cancel offer"}
-              onInterrupt={() => void settle("failed", "Offer cancelled")}
-              busy={busy}
-            />
-          )}
           {waiting && (
             <ActionPair
-              interruptLabel="Cancel quote"
-              onInterrupt={() => void settle("failed", "Quote cancelled")}
+              interruptLabel="Void quote"
+              onInterrupt={() => void settle("failed", "Quote voided")}
               busy={busy}
             />
           )}

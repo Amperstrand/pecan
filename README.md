@@ -20,11 +20,13 @@ Open:
 
 First build compiles CDK from source. There is no setup wizard: the first boot
 bootstraps a complete configuration (generated recovery phrase, method
-`branch`, no units) and the mint starts automatically — running, but offering
-nothing to wallets yet. Sign in with the demo credentials **`admin` / `admin`**
-and change the password from the console's **Access** tab before real use — the
-UI warns until you do. Then add the first unit from the console's **Units** tab
-to start issuing ecash. Everything chosen at bootstrap (identity, wallet-facing
+`branch`, no units) and brings up the operator UI immediately. The mint itself
+stays offline until the first unit exists — cdk-mintd requires at least one
+payment backend to start, so the supervisor waits and the console shows the
+mint services as **Standby**. Sign in with the demo credentials
+**`admin` / `admin`** and change the password from the console's **Access**
+tab before real use — the UI warns until you do. Then add the first unit from
+the console's **Units** tab: that starts the mint and begins issuing ecash. Everything chosen at bootstrap (identity, wallet-facing
 URL, keyset policy, users) stays editable from the console; only the recovery
 seed is immutable. Back up the recovery phrase from **Mint → Reveal recovery
 phrase**.
@@ -46,10 +48,13 @@ docker compose up --build --force-recreate -d
 
 Two pages, monochrome:
 
-- **Teller** (`/teller`) — one quote offer at a time. Create a deposit or
-  withdrawal offer (NUT-XX `cquoteA…`), show the QR, and settle with at most
-  two big buttons per step: interrupt (outline, left) or proceed (solid,
-  right).
+- **Teller** (`/teller`) — match-first till. Customers create quotes in their
+  own wallet; the teller resolves the right one by entering the last 6+
+  characters of the quote id from the customer's wallet screen (or scanning
+  the full id with a handheld scanner), then settles it with at most two big
+  buttons: interrupt (outline, left) or proceed (solid, right). The open-quote
+  list shows truncated ids only, so a quote can never be settled without the
+  customer's code.
 - **Operator Console** (`/`) — everything else, in four tabs:
   - **Overview**: health, circulating ecash, unit balances, settled activity.
   - **Units**: add units, edit each unit's keyset policy, rotate keysets, and
@@ -68,16 +73,71 @@ come back and sessions survive the restart.
 
 Deposit (mint):
 
-1. Teller creates a **Deposit** offer; the wallet scans and claims it.
-2. Customer hands over cash.
-3. Teller presses **Cash received**; the wallet receives ecash.
+1. The customer's wallet creates a NUT-20-locked mint quote at the mint
+   (`POST /v1/mint/quote/branch`) and shows its quote id.
+2. The teller matches the quote — scans the id or types its last 6+
+   characters — and checks the amount with the customer.
+3. Customer hands over cash; teller presses **Cash received**. The mint marks
+   the quote paid and the wallet mints the ecash (only that wallet can — the
+   quote is locked to its key, so the quote id is not a bearer secret).
 
 Withdrawal (melt):
 
-1. Teller creates a **Withdraw** offer; the wallet claims it and commits
-   proofs (the screen says when it is safe to pay out).
-2. Teller compares the payment code shown in the customer's wallet, hands
-   over cash, and presses **Cash paid out**; the mint finalizes the melt.
+1. The customer's wallet creates a melt quote (`POST /v1/melt/quote/branch`)
+   declaring the payout amount, then pays its ecash into it — the mint locks
+   the proofs before any cash moves.
+2. The teller matches the melt quote id the same way. The card blocks payout
+   until the wallet's funds are locked ("Awaiting wallet" → "Ready to pay
+   out").
+3. Teller hands over cash and presses **Cash paid out**; the mint finalizes
+   the melt. **Void** at any earlier point releases the customer's proofs.
+
+Abandoned quotes expire at the mint (30 min for deposits, 15 min for
+withdrawals) and the processor deletes expired, never-funded tickets
+automatically.
+
+## Supply Figures
+
+The console's circulation numbers are **audited from the mint's own
+database**, not inferred from teller activity: the processor reads the mint's
+per-keyset `keyset_amounts` table (issued / redeemed / fees, maintained by
+cdk on every signature and spend) over a read-only connection and joins it
+with each keyset's final expiry. Per unit it reports:
+
+- **Live supply** — outstanding ecash under keysets that can still be
+  redeemed. This is the real circulation figure.
+- **Demonetized** — ecash issued under keysets that passed their final
+  expiry without being swapped forward or melted. It is gone for good and is
+  deliberately *not* counted as circulating.
+- **Net settled** — the teller ledger (settled deposits minus payouts), kept
+  for reconciliation. It stays above live supply by the demonetized amount,
+  collected input fees, and any paid-but-never-minted quotes.
+
+If the processor cannot reach the mint database (for example a dev rig
+without the shared volume — unset or empty `CDK_BRANCH_PROCESSOR_MINT_DB_PATH`
+disables the audit), the console falls back to the teller ledger and labels
+it accordingly.
+
+## Wallet Integration Contract
+
+Wallets talking to a branch mint must:
+
+- create **locked** mint quotes: `POST /v1/mint/quote/branch` with `amount`,
+  `unit`, and a NUT-20 `pubkey` (unlocked quotes are rejected), then sign the
+  mint request with that key;
+- display the quote id for the teller: as text with the **last 6 characters
+  emphasized**, and as a QR encoding the **bare quote id** (no URL scheme —
+  handheld scanners type the payload verbatim into the match field);
+- poll `GET /v1/mint/quote/branch/{quote_id}` (or subscribe via NUT-17) and
+  mint once `amount_paid` covers the quote;
+- for withdrawals: `POST /v1/melt/quote/branch` with `unit`, a free-form
+  `request` memo, and the payout declared as a flattened `amount` field, then
+  submit the melt with proofs. The melt may exceed the 60 s synchronous
+  window — handle the pending-timeout response and keep polling the melt
+  quote;
+- expect rejections to surface as generic mint errors (cdk flattens payment
+  processor errors); the specific reason — missing pubkey, unmanaged unit,
+  amount limits, too many open quotes — is logged by the mint and processor.
 
 ## Persistence
 
@@ -86,11 +146,15 @@ Docker Compose uses named volumes:
 | Volume | Data |
 |---|---|
 | `config-data` | generated config (`setup.json`), `mint.toml`, user accounts (`users.json`) |
-| `mint-data` | `cdk-mintd` database |
+| `mint-data` | `cdk-mintd` database (also mounted into the processor, which opens it read-only for the supply audit) |
 | `processor-data` | branch ticket store, login sessions, config backup |
 
-Normal rebuilds and recreates keep these volumes. To reset everything for a
-fresh local demo:
+Normal rebuilds and recreates keep these volumes. **Upgrade note:** settle or
+cancel open teller work before deploying this version — tickets written by the
+removed quote-offer flow have no mint quote id, so any still-open ones are
+voided on first load (settled history is preserved).
+
+To reset everything for a fresh local demo:
 
 ```sh
 docker compose down -v
@@ -158,4 +222,6 @@ commit:
 ```
 
 Keep `Dockerfile` and `processor/Cargo.toml` in sync when updating CDK.
-Rebase and revalidate `patches/cdk-managed-units.patch` at the same time.
+Rebase and revalidate `patches/cdk-managed-units.patch` at the same time,
+and confirm the mint's `keyset_amounts` table still matches the read in
+`processor/src/supply.rs` (the supply audit's only schema coupling).

@@ -71,7 +71,7 @@ function IdentityCard({ snapshot }: { snapshot: AppSnapshot }) {
       <CardHeader>
         <CardTitle>Mint identity</CardTitle>
         <CardDescription>
-          Published to wallets. Saving restarts the mint briefly; you stay signed in.
+          Published to wallets. Saving restarts the service briefly; you stay signed in.
         </CardDescription>
       </CardHeader>
       <CardContent>

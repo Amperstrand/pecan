@@ -1,7 +1,7 @@
-import { CircleAlert, CircleCheck, CircleDot, PlusCircle, Wallet } from "lucide-react"
+import { CircleAlert, CircleCheck, CircleDashed, CircleDot, PlusCircle, Wallet } from "lucide-react"
 
 import type { AppSnapshot, HealthItem } from "@/lib/api"
-import { formatSignedAmount } from "@/lib/format"
+import { formatAmount, formatSignedAmount } from "@/lib/format"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -25,6 +25,12 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
     ["Payment backend", snapshot.health.payment_backend],
   ]
 
+  const supplyFor = (unit: string) =>
+    snapshot.supply.available
+      ? snapshot.supply.units.find((entry) => entry.unit === unit)
+      : undefined
+  const primarySupply = snapshot.mint.unit ? supplyFor(snapshot.mint.unit) : undefined
+
   return (
     <div className="grid gap-4">
       {snapshot.units.length === 0 && (
@@ -32,8 +38,9 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
           <PlusCircle />
           <AlertTitle>No units configured yet</AlertTitle>
           <AlertDescription>
-            The mint is running but offers nothing to wallets. Add the first unit in the Units
-            tab to start issuing ecash.
+            The mint stays offline until it has a unit to serve — cdk requires at least one
+            payment backend to start. Add the first unit in the Units tab; the mint starts
+            automatically.
           </AlertDescription>
         </Alert>
       )}
@@ -45,7 +52,9 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
             label={label}
             value={item.label}
             detail={item.detail}
-            icon={item.ok ? <CircleCheck /> : <CircleAlert />}
+            icon={
+              item.ok ? <CircleCheck /> : item.label === "Standby" ? <CircleDashed /> : <CircleAlert />
+            }
           />
         ))}
         <StatTile
@@ -55,29 +64,37 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
               : "Circulation"
           }
           value={
-            snapshot.mint.unit
-              ? formatSignedAmount(snapshot.summary.net_issued, snapshot.mint.unit)
-              : "—"
+            !snapshot.mint.unit
+              ? "—"
+              : primarySupply
+                ? formatAmount(primarySupply.live, snapshot.mint.unit)
+                : formatSignedAmount(snapshot.summary.net_issued, snapshot.mint.unit)
           }
           detail={
-            snapshot.mint.unit
-              ? "Completed deposits minus completed payouts"
-              : "Add a unit to start issuing"
+            !snapshot.mint.unit
+              ? "Add a unit to start issuing"
+              : primarySupply
+                ? primarySupply.demonetized > 0
+                  ? `Redeemable, audited from the mint — plus ${formatAmount(primarySupply.demonetized, snapshot.mint.unit)} demonetized by expired keysets`
+                  : "Redeemable ecash, audited from the mint database"
+                : "Net settled at the teller (supply audit unavailable)"
           }
           icon={<Wallet />}
         />
         <StatTile
-          label="Active quotes"
-          value={String(snapshot.active_tickets.length)}
-          detail="Waiting or pending teller work"
+          label="Open quotes"
+          value={String(snapshot.open_quotes.length)}
+          detail="Wallet-created quotes awaiting the counter"
           icon={<CircleDot />}
         />
       </section>
 
       <Card>
         <CardHeader>
-          <CardTitle>Circulating ecash</CardTitle>
-          <CardDescription>Net issued balance over settled activity.</CardDescription>
+          <CardTitle>Settled activity</CardTitle>
+          <CardDescription>
+            Teller ledger over time: net of settled deposits and payouts.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <CirculationChart data={snapshot.circulation} unit={snapshot.mint.unit} />
@@ -88,22 +105,26 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
         <Card>
           <CardHeader>
             <CardTitle>Unit balances</CardTitle>
-            <CardDescription>Values from unlike units are never summed.</CardDescription>
+            <CardDescription>
+              Live supply is audited from the mint database; values from unlike units are
+              never summed.
+            </CardDescription>
           </CardHeader>
           <CardContent className="px-0">
-            <Table className="min-w-[480px]">
+            <Table className="min-w-[520px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="pl-6">Unit</TableHead>
                   <TableHead>Lifecycle</TableHead>
-                  <TableHead>Deposits</TableHead>
-                  <TableHead>Payouts</TableHead>
-                  <TableHead className="pr-6">Net issued</TableHead>
+                  <TableHead>Live supply</TableHead>
+                  <TableHead>Demonetized</TableHead>
+                  <TableHead className="pr-6">Net settled</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {snapshot.unit_summaries.map((summary) => {
                   const managed = snapshot.units.find((unit) => unit.unit === summary.unit)
+                  const supply = supplyFor(summary.unit)
                   return (
                     <TableRow key={summary.unit}>
                       <TableCell className="pl-6 font-mono font-medium uppercase">
@@ -116,8 +137,16 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
                           <Badge variant="muted">Observed</Badge>
                         )}
                       </TableCell>
-                      <TableCell>{summary.mint_count}</TableCell>
-                      <TableCell>{summary.melt_count}</TableCell>
+                      <TableCell className="font-mono">
+                        {supply ? formatAmount(supply.live, summary.unit) : "—"}
+                      </TableCell>
+                      <TableCell className="font-mono text-muted-foreground">
+                        {supply
+                          ? supply.demonetized > 0
+                            ? formatAmount(supply.demonetized, summary.unit)
+                            : "0"
+                          : "—"}
+                      </TableCell>
                       <TableCell className="pr-6 font-mono">
                         {formatSignedAmount(summary.net_issued, summary.unit)}
                       </TableCell>

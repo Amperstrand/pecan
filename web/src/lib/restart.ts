@@ -8,19 +8,32 @@ import { navigate } from "@/lib/router"
  * Docker restarts it. Instead of a blind full-page reload, wait for /api/app
  * to answer again and refresh in place. Sessions persist server-side, so the
  * operator stays signed in across the restart.
+ *
+ * The mint restarts slightly behind the processor (and cold-boots on the
+ * first unit, creating its database and keysets), so answering /api/app is
+ * not "settled" yet — keep polling until the mint services report healthy or
+ * deliberately Standby (a mutation can retire the last unit). If the deadline
+ * passes with the processor back, resolve anyway: the configuration itself
+ * applied, and the tiles should show the truthful in-between state.
  */
 export async function awaitRestart(opts: { timeoutMs?: number } = {}): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 45_000
   const started = Date.now()
   await sleep(1500)
   let delay = 700
+  let processorBack = false
   for (;;) {
     if (Date.now() - started > timeoutMs) {
+      if (processorBack) return
       throw new Error("The service did not come back in time. Reload the page to reconnect.")
     }
     try {
-      await fetchSnapshot()
-      return
+      const snapshot = await fetchSnapshot()
+      processorBack = true
+      const settled = [snapshot.health.mint_http, snapshot.health.management_rpc].every(
+        (item) => item.ok || item.label === "Standby",
+      )
+      if (settled) return
     } catch (err) {
       if (err instanceof ApiRequestError && err.status === 401) {
         navigate("/login")

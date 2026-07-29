@@ -70,11 +70,14 @@ grayscale. It is a stock shadcn (new-york, neutral base) interface with every
 color removed: no blue accent, no red danger, no green success. State and
 intent are carried by fill, outline, weight, and icons — never by hue.
 
-The application is two pages. The **Teller** is a focused, single-column till:
-one quote offer at a time, oversized controls, and at most two big buttons per
-step. The **Operator Console** is a tabbed workspace (Overview, Units, Access,
-Mint) for everything an administrator does. There is no setup wizard; the
-stack bootstraps itself and everything is edited on the running instance.
+The application is two pages. The **Teller** is a focused, single-column till,
+match-first: the operator resolves the customer's wallet-created quote by its
+id (typed tail or scan), then settles it — oversized controls, at most two big
+buttons per step, and an open-quote list whose ids stay truncated so nothing
+can be settled without the customer's code. The **Operator Console** is a
+tabbed workspace (Overview, Units, Access, Mint) for everything an
+administrator does. There is no setup wizard; the stack bootstraps itself and
+everything is edited on the running instance.
 
 **Key Characteristics:**
 - Strict grayscale: every color token is chroma-0 oklch, light and dark.
@@ -104,12 +107,12 @@ Dark mode follows `prefers-color-scheme` automatically.
 
 ### Named Rules
 
-**The Zero Chroma Rule.** No color anywhere, including charts, QR plates
-(white by necessity), focus rings, and toasts. If a value has chroma, it is a
-bug; `grep` the built CSS for non-zero oklch chroma to enforce it.
+**The Zero Chroma Rule.** No color anywhere, including charts, focus rings,
+and toasts. If a value has chroma, it is a bug; `grep` the built CSS for
+non-zero oklch chroma to enforce it.
 
-**The Variant Carries Meaning Rule.** Paid/Active = solid badge. Offered/
-Claimed/Pending = outline badge. Inactive/Retired/Observed = muted badge.
+**The Variant Carries Meaning Rule.** Paid/Active = solid badge. Open/
+Awaiting-wallet = outline badge. Inactive/Retired/Observed = muted badge.
 Failed/Expired = outline badge with an X icon. Health = check/alert icon plus
 a text label, never color alone.
 
@@ -120,7 +123,8 @@ button interrupts or destroys ("Void deposit", "Retire unit").
 ## 3. Typography
 
 **Fonts:** Inter (self-hosted, variable) for UI; JetBrains Mono for
-identifiers, unit codes, amounts, URLs, offers, and verification codes.
+identifiers, unit codes, amounts, URLs, and quote ids (including the match
+input itself).
 
 ### Hierarchy
 - **Headline** (600, `24px`): page title on each page — one per page.
@@ -133,9 +137,11 @@ identifiers, unit codes, amounts, URLs, offers, and verification codes.
 ### The Teller Exception
 
 The teller's settlement steps break the no-hero rule on purpose: the amount
-("250 ORA") and the payout verification code render at `36px+` because they
-are the objects being verified across the counter. This is the only oversized
-type in the product.
+("250 ORA") renders at `36px+`, and the match input is an oversized mono
+field, because these are the objects being verified across the counter. On
+the matched card the quote id renders with its last six characters
+emphasized — the exact characters the operator got from the customer. This
+is the only oversized type in the product.
 
 ## 4. Elevation
 
@@ -189,8 +195,9 @@ Wide tables scroll horizontally inside the card.
 
 ### Inputs
 Stock shadcn inputs. **No read-only inputs**: facts render as text detail
-rows; only editable values get form controls. Native `<select>` (restyled,
-chevron) is kept for the teller's unit picker — better touch targets on tills.
+rows; only editable values get form controls. The teller's match input is a
+plain form submit on purpose: keyboard-wedge scanners type the payload and
+press Enter, so scanning and typing share one code path.
 
 ### Toasts
 Sonner, monochrome (`popover` surface). Action feedback ("Deposit settled —
@@ -211,7 +218,8 @@ operator signed in (sessions persist server-side). Never blind-reload.
 - **Do** pair every state with a text label; icons and fills support, never
   replace, words.
 - **Do** explain irreversible decisions inside the confirming dialog.
-- **Do** keep the QR on a white plate in dark mode — scanners need it.
+- **Do** keep open-quote ids truncated to their leading characters — the
+  matching tail must only ever arrive from the customer.
 
 ### Don't:
 - **Don't** introduce any color, including for danger, success, or charts.

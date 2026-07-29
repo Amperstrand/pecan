@@ -312,3 +312,41 @@ index 32b3a957..cdfd51e5 100644
                  if mutated {
                      let updated = serde_json::to_vec(&stored)?;
                      let mut tx = localstore.begin_transaction().await?;
+diff --git a/crates/cdk/src/mint/issue/mod.rs b/crates/cdk/src/mint/issue/mod.rs
+index 1707c28..fcefddb 100644
+--- a/crates/cdk/src/mint/issue/mod.rs
++++ b/crates/cdk/src/mint/issue/mod.rs
+@@ -302,12 +302,28 @@ impl Mint {
+                     let mint_ttl = self.quote_ttl().await?.mint_ttl;
+                     let quote_expiry = unix_time() + mint_ttl;
+ 
+-                    // Convert extra serde_json::Value to JSON string if not null
+-                    let extra_json = if request.extra.is_null() {
+-                        None
+-                    } else {
+-                        Some(request.extra.to_string())
++                    // Forward the mint-generated quote id and the wallet's
++                    // NUT-20 pubkey to the payment processor as extra fields.
++                    // Backends that key their records on the quote id (e.g. a
++                    // managed teller processor matching quotes at a counter)
++                    // need both at creation time. Inserting after parsing the
++                    // wallet's extras means wallet-supplied fields of the same
++                    // names are overwritten and cannot spoof either value.
++                    let mut extra_map = match request.extra {
++                        serde_json::Value::Object(map) => map,
++                        _ => serde_json::Map::new(),
+                     };
++                    extra_map.insert(
++                        "quote_id".to_string(),
++                        serde_json::Value::String(quote_id.to_string()),
++                    );
++                    if let Some(pk) = &pubkey {
++                        extra_map.insert(
++                            "pubkey".to_string(),
++                            serde_json::Value::String(pk.to_string()),
++                        );
++                    }
++                    let extra_json = Some(serde_json::Value::Object(extra_map).to_string());
+ 
+                     let custom_options = CustomIncomingPaymentOptions {
+                         method: payment_method.to_string(),
