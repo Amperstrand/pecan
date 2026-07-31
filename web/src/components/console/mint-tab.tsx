@@ -131,7 +131,10 @@ function FactsCard({ snapshot }: { snapshot: AppSnapshot }) {
     <Card>
       <CardHeader>
         <CardTitle>Fixed configuration</CardTitle>
-        <CardDescription>Set at first boot; not editable from the console.</CardDescription>
+        <CardDescription>
+          Provided by the deployment environment and re-read at every start; not editable from the
+          console.
+        </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-2.5">
         <DetailRow label="Payment method">
@@ -150,6 +153,9 @@ function FactsCard({ snapshot }: { snapshot: AppSnapshot }) {
           <MonoChip>
             {snapshot.endpoints.processor_grpc_addr}:{snapshot.endpoints.processor_grpc_port}
           </MonoChip>
+        </DetailRow>
+        <DetailRow label="Version">
+          <MonoChip>{snapshot.version}</MonoChip>
         </DetailRow>
       </CardContent>
     </Card>

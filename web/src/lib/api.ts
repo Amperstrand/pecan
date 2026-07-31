@@ -172,6 +172,8 @@ export interface AppSnapshot {
   users: UserEntry[]
   demo_password_active: boolean
   password_min_length: number
+  /** Image/build version stamped at build time; "dev" outside CI images. */
+  version: string
 }
 
 export class ApiRequestError extends Error {

@@ -3,7 +3,16 @@ set -eu
 
 config_path=/var/lib/custom-unit-mint/config/mint.toml
 work_dir=/var/lib/cdk-mintd
+state_file=/run/mint-state
+pid_file=/run/mint-pid
 mint_pid=
+
+# Machine-readable state for the container healthcheck (mint-health):
+# waiting | running | restarting. Waiting on the first unit and restarting
+# after a config change are legitimate states, not failures.
+set_state() {
+    printf '%s\n' "$1" > "${state_file}"
+}
 
 stop_mint() {
     if [ -n "${mint_pid}" ] && kill -0 "${mint_pid}" 2>/dev/null; then
@@ -22,6 +31,7 @@ config_ready() {
 }
 
 while true; do
+    set_state waiting
     while ! config_ready; do
         echo "waiting for the first unit (mint starts once one is added in the console)"
         sleep 2
@@ -30,12 +40,15 @@ while true; do
     config_hash=$(sha256sum "${config_path}" | cut -d ' ' -f 1)
     cdk-mintd --config "${config_path}" --work-dir "${work_dir}" &
     mint_pid=$!
+    printf '%s\n' "${mint_pid}" > "${pid_file}"
+    set_state running
 
     while kill -0 "${mint_pid}" 2>/dev/null; do
         sleep 2
         next_hash=$(sha256sum "${config_path}" | cut -d ' ' -f 1)
         if [ "${next_hash}" != "${config_hash}" ]; then
             echo "managed mint configuration changed; restarting mint"
+            set_state restarting
             stop_mint
             break
         fi
@@ -43,6 +56,7 @@ while true; do
 
     if ! wait "${mint_pid}" 2>/dev/null; then
         echo "mint exited unexpectedly; retrying in 2s"
+        set_state restarting
         sleep 2
     fi
     mint_pid=

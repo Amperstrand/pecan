@@ -5,44 +5,68 @@ pinned `cdk-mintd` with the managed-unit compatibility patch in this repository
 and a separate `cdk-branch-processor` that settles mint/melt quotes manually
 through an operator web UI.
 
-## Quick Start
+## Install
+
+On a Linux server (amd64 or arm64) with DNS prepared as below:
 
 ```sh
-docker compose up --build
+curl -fsSL https://raw.githubusercontent.com/zeugmaster/custom-unit-mint/main/install.sh | bash
 ```
 
-Open:
+The installer asks one question — your domain — and does the rest: it offers
+to install Docker if missing, resolves the latest release, downloads that
+release's deployment files into `/opt/custom-unit-mint`, generates a strong
+admin password, pulls the prebuilt image from GHCR, starts the stack with
+automatic HTTPS (bundled Caddy + Let's Encrypt), and prints your login. No
+config file is ever edited by hand; everything else is managed from the
+running console.
 
-| Surface | URL | Purpose |
+Prepare DNS first (both records pointing at the server), and open ports 80
+and 443:
+
+| Record | Name | Serves |
 |---|---|---|
-| Operator UI | http://localhost:9090 | operator console and teller workflow |
-| Mint API | http://localhost:8089 | wallet-facing Cashu API |
+| A/AAAA | `mint.example.org` | wallet-facing Cashu API |
+| A/AAAA | `console.mint.example.org` | operator console (default `console.<domain>`) |
 
-First build compiles CDK from source. There is no setup wizard: the first boot
-bootstraps a complete configuration (generated recovery phrase, method
-`branch`, no units) and brings up the operator UI immediately. The mint itself
-stays offline until the first unit exists — cdk-mintd requires at least one
-payment backend to start, so the supervisor waits and the console shows the
-mint services as **Standby**. Sign in with the demo credentials
-**`admin` / `admin`** and change the password from the console's **Access**
-tab before real use — the UI warns until you do. Then add the first unit from
-the console's **Units** tab: that starts the mint and begins issuing ecash. Everything chosen at bootstrap (identity, wallet-facing
-URL, keyset policy, users) stays editable from the console; only the recovery
-seed is immutable. Back up the recovery phrase from **Mint → Reveal recovery
-phrase**.
+Skipping the domain question installs in plain-HTTP mode on ports 9090
+(console) and 8089 (mint) — fine for a trusted LAN or testing, not for the
+public internet (wallets generally refuse plain-HTTP mints).
 
-To use different host ports:
+Non-interactive form and all flags (`--domain`, `--dir`, `--version`,
+`--ui-port`, …): see the header of [`install.sh`](install.sh) or run
+`mintctl help`.
 
-```sh
-MINT_PORT=18089 UI_PORT=19090 docker compose up --build
-```
+First steps in the console (there is no setup wizard — the first boot
+bootstraps a complete configuration with a generated recovery phrase, method
+`branch`, and zero units):
 
-To update an existing deployment without deleting data:
+1. **Units** tab — add the first unit. The mint stays in **Standby** until
+   one exists (`cdk-mintd` needs at least one payment backend), then starts
+   and begins issuing ecash.
+2. **Mint** tab — reveal the 24-word recovery phrase and back it up. It is
+   immutable and restores the mint's signing keys.
+3. **Access** tab — change the password if you did not keep the printed one,
+   and add teller accounts.
 
-```sh
-git pull
-docker compose up --build --force-recreate -d
-```
+## Operations
+
+The installer drops `mintctl` into the install directory (and symlinks it to
+`/usr/local/bin/mintctl`):
+
+| Command | What it does |
+|---|---|
+| `mintctl status` | containers, health, supervisor state, installed vs. latest version |
+| `mintctl logs [service]` | follow logs (`processor`, `mint`, `caddy`) |
+| `mintctl update [--version vX.Y.Z]` | upgrade to a release: fetches that release's deployment files and image together, restarts, verifies health |
+| `mintctl backup [file]` | stop briefly, archive all three data volumes + `.env`, restart. **The archive contains the recovery seed — store it encrypted, off the server** |
+| `mintctl restore <file>` | replace all state with an archive's contents |
+| `mintctl start` / `stop` | bring the stack up / down (volumes kept) |
+| `mintctl uninstall [--purge]` | remove containers; `--purge` also deletes volumes and the install dir (destroys the mint — typed confirmation required) |
+
+Deeper procedures — restore drills, migrating servers, running a second
+instance, bringing your own reverse proxy, switching HTTP → TLS — live in
+[`docs/operations.md`](docs/operations.md).
 
 ## What The UI Does
 
@@ -63,8 +87,8 @@ Two pages, monochrome:
     appear read-only.
   - **Access**: the user database — add or delete operators, reset passwords,
     change your own.
-  - **Mint**: wallet-facing identity, fixed endpoints, and recovery-phrase
-    reveal (requires re-entering your password).
+  - **Mint**: wallet-facing identity, deployment endpoints, running version,
+    and recovery-phrase reveal (requires re-entering your password).
 
 Config changes restart the stack automatically; the console waits for it to
 come back and sessions survive the restart.
@@ -148,11 +172,10 @@ Docker Compose uses named volumes:
 | `config-data` | generated config (`setup.json`), `mint.toml`, user accounts (`users.json`) |
 | `mint-data` | `cdk-mintd` database (also mounted into the processor, which opens it read-only for the supply audit) |
 | `processor-data` | branch ticket store, login sessions, config backup |
+| `caddy-data`, `caddy-config` | TLS certificates and Caddy state (TLS mode only) |
 
-Normal rebuilds and recreates keep these volumes. **Upgrade note:** settle or
-cancel open teller work before deploying this version — tickets written by the
-removed quote-offer flow have no mint quote id, so any still-open ones are
-voided on first load (settled history is preserved).
+Updates and recreates keep these volumes. `mintctl backup` / `restore` are
+the supported way to snapshot and move them.
 
 To reset everything for a fresh local demo:
 
@@ -167,49 +190,77 @@ final expiry.
 
 ## Security Notes
 
-- Change the demo `admin`/`admin` password immediately; the console banner
-  clears once you do. New and changed passwords must be at least 8 characters;
-  there are no composition rules.
+- Installed via `install.sh`, the admin account starts with a generated
+  password (printed once, kept in `<install-dir>/.env` as a fallback). A bare
+  `docker compose up` dev deployment seeds demo **`admin`/`admin`** instead —
+  change it immediately; the console banner clears once you do. Passwords
+  must be at least 8 characters; there are no composition rules.
 - Back up the recovery phrase (**Mint → Reveal recovery phrase**). It restores
   the mint signing keys and cannot be changed.
 - All users have full operator access; there are no roles. Instances upgraded
   from the single-password era keep their old password as user `admin`.
+- In TLS mode the bundled Caddy is the only public surface (the app ports
+  bind to 127.0.0.1) and session cookies are marked `Secure` automatically.
 - The mint-to-processor gRPC link is plaintext inside the Compose network.
   Add TLS before running it across an untrusted network.
 
 ## Development
 
-Build the frontend:
-
-```sh
-npm --prefix web install
-npm --prefix web run build
-```
-
-Build the processor:
-
-```sh
-cd processor
-cargo build
-```
-
-Run both through Docker for the production-like path:
+From a checkout, `docker-compose.override.yml` adds a local build (tagged
+`custom-unit-mint:dev`), so the classic flow keeps working:
 
 ```sh
 docker compose up --build
 ```
 
+Console on http://localhost:9090 (demo `admin`/`admin`), mint API on
+http://localhost:8089 once the first unit exists. Different host ports:
+`MINT_PORT=18089 UI_PORT=19090 docker compose up --build`. To exercise the
+exact production shape (published image, no local build), use
+`docker compose -f docker-compose.yml up` with a `.env` (see `.env.example`).
+
+Frontend and processor on their own:
+
+```sh
+npm --prefix web install
+npm --prefix web run build
+
+cd processor
+cargo build
+cargo test
+```
+
+To update a pre-installer deployment created from this checkout: `git pull`
+then `docker compose up --build --force-recreate -d` (volumes are kept).
+**Upgrade note:** settle or cancel open teller work before deploying this
+version — tickets written by the removed quote-offer flow have no mint quote
+id, so any still-open ones are voided on first load (settled history is
+preserved).
+
+CI (`.github/workflows/`) builds and tests every PR, verifies the cdk patch
+still applies to the pinned rev, and publishes multi-arch images to
+`ghcr.io/zeugmaster/custom-unit-mint` — `edge` on every main commit,
+`vX.Y.Z` + `latest` on release tags. The GitHub Release is created only
+after the images exist and pass a boot smoke test, so the installer can
+never resolve a broken version.
+
 ## Project Layout
 
 ```text
 .
-├── docker-compose.yml
+├── install.sh                 # curl-able installer; installed as mintctl
+├── docker-compose.yml         # production deployment (published image)
+├── docker-compose.override.yml# dev-only: adds the local build
+├── Caddyfile                  # TLS termination template (profile "tls")
+├── .env.example               # every deployment knob, documented
 ├── Dockerfile
-├── web/                 # React/Vite operator UI, built into the image
-├── processor/           # branch payment processor and web/API server
-├── patches/             # narrow patch applied to the pinned cdk-mintd source
-├── scripts/             # container lifecycle helpers
-└── config/mint.toml     # reference config; default deploy generates its own
+├── .github/workflows/         # CI + multi-arch GHCR publishing
+├── docs/operations.md         # restore drills, migrations, BYO proxy
+├── web/                       # React/Vite operator UI, built into the image
+├── processor/                 # branch payment processor and web/API server
+├── patches/                   # narrow patch applied to the pinned cdk-mintd source
+├── scripts/                   # container lifecycle helpers (supervisor, healthcheck)
+└── config/mint.toml           # reference config; default deploy generates its own
 ```
 
 ## CDK Version
@@ -221,7 +272,8 @@ commit:
 6132607495ae0741e412a63f2acc34e4ccddfc55
 ```
 
-Keep `Dockerfile` and `processor/Cargo.toml` in sync when updating CDK.
-Rebase and revalidate `patches/cdk-managed-units.patch` at the same time,
-and confirm the mint's `keyset_amounts` table still matches the read in
-`processor/src/supply.rs` (the supply audit's only schema coupling).
+Keep `Dockerfile` and `processor/Cargo.toml` in sync when updating CDK (CI's
+`patch-check` job asserts this). Rebase and revalidate
+`patches/cdk-managed-units.patch` at the same time, and confirm the mint's
+`keyset_amounts` table still matches the read in `processor/src/supply.rs`
+(the supply audit's only schema coupling).
