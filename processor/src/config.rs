@@ -139,6 +139,11 @@ pub struct AuthConfig {
     pub password_hash: String,
 }
 
+/// `public_url` is operator-owned: persisted, editable from the console.
+/// Everything else is deployment topology owned by the environment
+/// (compose/installer): re-asserted from env on every boot via
+/// [`AppConfig::apply_infra_endpoints`] and persisted only as a record of the
+/// last boot, so older binaries can still parse the file after a rollback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
     pub public_url: String,
@@ -181,6 +186,16 @@ pub struct ManagedUnit {
     pub lifecycle: UnitLifecycle,
     pub configured_at: u64,
     pub rollover: RolloverPolicy,
+}
+
+/// The deployment-topology subset of [`EndpointConfig`], sourced from env
+/// vars (all of which have defaults) in main and applied on every boot.
+#[derive(Debug, Clone)]
+pub struct InfraEndpoints {
+    pub mint_http_url: String,
+    pub mint_rpc_url: String,
+    pub processor_grpc_addr: String,
+    pub processor_grpc_port: u16,
 }
 
 /// Endpoint values baked into a bootstrapped config, sourced from env vars
@@ -243,6 +258,20 @@ pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Re
 }
 
 impl AppConfig {
+    /// Overwrite the deployment-topology endpoints from the environment.
+    /// Runs on every boot, before the config is saved and mint.toml is
+    /// rendered: env (with its documented defaults) always wins, so moving
+    /// the stack or changing a port never requires editing setup.json — and
+    /// the gRPC port advertised to the mint stays in lockstep with the port
+    /// this process actually binds. `public_url` is deliberately untouched
+    /// (operator-owned, edited in the console).
+    pub fn apply_infra_endpoints(&mut self, infra: &InfraEndpoints) {
+        self.endpoints.mint_http_url = infra.mint_http_url.clone();
+        self.endpoints.mint_rpc_url = infra.mint_rpc_url.clone();
+        self.endpoints.processor_grpc_addr = infra.processor_grpc_addr.clone();
+        self.endpoints.processor_grpc_port = infra.processor_grpc_port;
+    }
+
     pub fn upgrade(&mut self) {
         // Wizard-era configs predate the units list but always carried a
         // primary unit; migrate it. Bootstrapped configs with no units yet
@@ -768,6 +797,38 @@ mod tests {
         assert!(validate_operator_password("12345678", "12345678").is_ok()); // digits only
         assert!(validate_operator_password("password", "password").is_ok()); // letters only
         assert!(validate_operator_password("password", "different").is_err()); // mismatch
+    }
+
+    #[test]
+    fn infra_endpoints_follow_env_and_leave_public_url_alone() {
+        let mut config = test_config();
+        config.endpoints.public_url = "https://mint.example.org".into();
+        let rendered_before = render_mint_toml(&config);
+
+        // Identical values → identical render: a no-op upgrade must not
+        // change mint.toml (the supervisor hash-compares and would restart
+        // the mint on any byte difference).
+        config.apply_infra_endpoints(&InfraEndpoints {
+            mint_http_url: "http://mint:8089".into(),
+            mint_rpc_url: "http://mint:8091".into(),
+            processor_grpc_addr: "processor".into(),
+            processor_grpc_port: 50051,
+        });
+        assert_eq!(render_mint_toml(&config), rendered_before);
+
+        // Changed values flow into the rendered toml; public_url survives.
+        config.apply_infra_endpoints(&InfraEndpoints {
+            mint_http_url: "http://mint-2:8089".into(),
+            mint_rpc_url: "http://mint-2:8091".into(),
+            processor_grpc_addr: "http://processor-2".into(),
+            processor_grpc_port: 60051,
+        });
+        assert_eq!(config.endpoints.public_url, "https://mint.example.org");
+        assert_eq!(config.endpoints.mint_http_url, "http://mint-2:8089");
+        let rendered = render_mint_toml(&config);
+        assert!(rendered.contains("addr = \"http://processor-2\""));
+        assert!(rendered.contains("port = 60051"));
+        assert!(rendered.contains("url = \"https://mint.example.org\""));
     }
 
     #[test]

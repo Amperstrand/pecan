@@ -85,6 +85,15 @@ impl BranchBackend {
         }
     }
 
+    /// Whether cdk-mintd has attached to the payment event stream since this
+    /// processor started. Set in `wait_payment_event`, never cleared on a
+    /// client disconnect — it means "the mint found this backend", not "the
+    /// mint is up right now"; the web layer's live HTTP/RPC probes cover the
+    /// latter.
+    pub fn payment_stream_attached(&self) -> bool {
+        self.stream_active.load(Ordering::SeqCst)
+    }
+
     fn lifecycle(&self, unit: &CurrencyUnit) -> Result<UnitLifecycle, Error> {
         let Some(lifecycle) = self.units.get(unit).copied() else {
             tracing::warn!(

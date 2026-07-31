@@ -21,6 +21,7 @@ use std::convert::Infallible;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::backend::BranchBackend;
 use crate::clients::{MintHttpClient, MintRpcClient};
 use crate::config::{
     parse_amounts, AppConfig, ConfigStore, RolloverPolicy, UnitLifecycle, PASSWORD_MIN_LENGTH,
@@ -35,6 +36,7 @@ use crate::users::{PublicUser, UserError, UserStore};
 #[derive(Clone)]
 pub struct WebState {
     pub branch: BranchState,
+    pub backend: Arc<BranchBackend>,
     pub mint_rpc: MintRpcClient,
     pub mint_http: MintHttpClient,
     pub supply: SupplyReader,
@@ -44,12 +46,15 @@ pub struct WebState {
     pub method: Arc<String>,
     pub default_amounts: Arc<Vec<u64>>,
     pub config_store: ConfigStore,
+    /// Image/build version (CDK_BRANCH_PROCESSOR_VERSION), "dev" outside CI.
+    pub version: Arc<String>,
 }
 
 impl WebState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         branch: BranchState,
+        backend: Arc<BranchBackend>,
         mint_rpc: MintRpcClient,
         mint_http: MintHttpClient,
         supply: SupplyReader,
@@ -57,11 +62,13 @@ impl WebState {
         config_store: ConfigStore,
         users: UserStore,
         sessions: SessionStore,
+        version: String,
     ) -> Self {
         let method = config.mint.method.clone();
         let default_amounts = config.rollover.amounts.clone();
         Self {
             branch,
+            backend,
             mint_rpc,
             mint_http,
             supply,
@@ -71,6 +78,7 @@ impl WebState {
             method: Arc::new(method),
             default_amounts: Arc::new(default_amounts),
             config_store,
+            version: Arc::new(version),
         }
     }
 }
@@ -80,6 +88,9 @@ pub fn router(state: WebState) -> Router {
         .route("/", get(spa_page))
         .route("/teller", get(spa_page))
         .route("/login", get(spa_page))
+        // Unauthenticated liveness probe for container healthchecks and the
+        // installer's wait loop.
+        .route("/healthz", get(healthz))
         .route("/api/app", get(api_app))
         .route("/api/login", post(api_login))
         .route("/api/logout", post(api_logout))
@@ -108,6 +119,28 @@ pub fn router(state: WebState) -> Router {
         .route("/static/inter.woff2", get(font_inter))
         .route("/static/jbm.woff2", get(font_jbm))
         .with_state(state)
+}
+
+#[derive(Serialize)]
+struct HealthzBody {
+    status: &'static str,
+    version: String,
+}
+
+/// Liveness only, deliberately: mint "Standby" (zero units yet) is a normal
+/// long-lived state and must not fail container health, and this is polled
+/// every few seconds — no store reads, no mint probes, no auth. Subsystem
+/// truth lives in the authenticated /api/app health tiles. The version lets
+/// the installer confirm which build is answering after an update.
+async fn healthz(State(state): State<WebState>) -> Response {
+    let mut resp = Json(HealthzBody {
+        status: "ok",
+        version: state.version.as_ref().clone(),
+    })
+    .into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    resp
 }
 
 async fn sse_events(
@@ -291,6 +324,7 @@ struct ApiAppSnapshot {
     users: Vec<PublicUser>,
     demo_password_active: bool,
     password_min_length: usize,
+    version: String,
 }
 
 #[derive(Serialize)]
@@ -684,6 +718,7 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         users: state.users.list().await,
         demo_password_active: state.users.demo_password_active().await,
         password_min_length: PASSWORD_MIN_LENGTH,
+        version: state.version.as_ref().clone(),
         mint: ApiMintConfig {
             name: state.config.mint.name.clone(),
             description: state.config.mint.description.clone(),
@@ -703,15 +738,7 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         health: ApiHealth {
             mint_http: standby_aware(health_item(info_health.as_ref().map(|_| ())), standby),
             management_rpc: standby_aware(health_item(rpc_health.as_ref().map(|_| ())), standby),
-            payment_backend: ApiHealthItem {
-                ok: true,
-                label: "Listening".to_string(),
-                detail: format!(
-                    "{}:{}",
-                    state.config.endpoints.processor_grpc_addr,
-                    state.config.endpoints.processor_grpc_port
-                ),
-            },
+            payment_backend: payment_backend_health(&state, standby),
         },
         keysets,
         active_keyset,
@@ -790,6 +817,36 @@ fn health_item<T>(result: Result<T, &anyhow::Error>) -> ApiHealthItem {
     }
 }
 
+/// Honest payment-backend tile: report whether cdk-mintd has actually
+/// attached to the gRPC payment stream since this processor started, instead
+/// of the unconditional "Listening" it used to claim. The flag never clears
+/// on a later mint outage — the mint_http/management_rpc tiles are the live
+/// probes for that.
+fn payment_backend_health(state: &WebState, standby: bool) -> ApiHealthItem {
+    let grpc_endpoint = format!(
+        "{}:{}",
+        state.config.endpoints.processor_grpc_addr, state.config.endpoints.processor_grpc_port
+    );
+    if state.backend.payment_stream_attached() {
+        ApiHealthItem {
+            ok: true,
+            label: "Connected".to_string(),
+            detail: format!("cdk-mintd is attached to the payment stream ({grpc_endpoint})"),
+        }
+    } else {
+        standby_aware(
+            ApiHealthItem {
+                ok: false,
+                label: "Waiting".to_string(),
+                detail: format!(
+                    "the mint has not attached to {grpc_endpoint} since the processor started"
+                ),
+            },
+            standby,
+        )
+    }
+}
+
 /// Reframe an expected zero-unit outage as standby instead of an error.
 fn standby_aware(item: ApiHealthItem, standby: bool) -> ApiHealthItem {
     if standby && !item.ok {
@@ -855,7 +912,11 @@ fn circulation_points(tickets: &[Ticket]) -> Vec<CirculationPoint> {
         .collect()
 }
 
-async fn api_login(State(state): State<WebState>, Json(form): Json<LoginForm>) -> Response {
+async fn api_login(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(form): Json<LoginForm>,
+) -> Response {
     let username = form.username.trim().to_ascii_lowercase();
     if !state.users.verify(&username, &form.password).await {
         return api_error(StatusCode::UNAUTHORIZED, "incorrect username or password");
@@ -868,7 +929,7 @@ async fn api_login(State(state): State<WebState>, Json(form): Json<LoginForm>) -
     .into_response();
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        format!("{COOKIE_NAME}={sid}; Path=/; HttpOnly; SameSite=Lax")
+        session_cookie(&sid, request_is_https(&headers))
             .parse()
             .unwrap(),
     );
@@ -885,7 +946,7 @@ async fn api_logout(State(state): State<WebState>, headers: HeaderMap) -> Respon
     .into_response();
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        format!("{COOKIE_NAME}=deleted; Path=/; Max-Age=0")
+        clear_session_cookie(request_is_https(&headers))
             .parse()
             .unwrap(),
     );
@@ -1499,6 +1560,34 @@ async fn api_users_reset_password(
 
 const COOKIE_NAME: &str = "branch_session";
 
+/// True when the request reached us over HTTPS through the reverse proxy.
+/// X-Forwarded-Proto is trusted as-is: the bundled Caddy always sets it, and
+/// a client faking the header on a direct HTTP connection only marks its own
+/// cookie Secure — its browser then refuses to store it, harming nobody else.
+fn request_is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+}
+
+/// SameSite=Lax (Strict would drop the cookie on top-level navigations and
+/// bounce operators to /login); no `__Host-` prefix, which would forbid the
+/// cookie entirely on plain-HTTP dev/LAN deployments.
+fn session_cookie(session_id: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{COOKIE_NAME}={session_id}; Path=/; HttpOnly; SameSite=Lax{secure_attr}")
+}
+
+/// Cookie identity is name+path, so clearing works regardless of the Secure
+/// attribute; carrying it keeps strict-secure-cookie browsers happy. The
+/// server-side session removal is the real logout.
+fn clear_session_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{COOKIE_NAME}=deleted; Path=/; Max-Age=0{secure_attr}")
+}
+
 fn cookie_value(headers: &HeaderMap) -> Option<String> {
     let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
     for c in cookie_header.split(';') {
@@ -1718,4 +1807,45 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers_with_proto(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn https_detection_follows_the_first_forwarded_proto() {
+        assert!(!request_is_https(&HeaderMap::new()));
+        assert!(request_is_https(&headers_with_proto("https")));
+        assert!(request_is_https(&headers_with_proto("HTTPS")));
+        assert!(request_is_https(&headers_with_proto(" https , http")));
+        assert!(!request_is_https(&headers_with_proto("http")));
+        assert!(!request_is_https(&headers_with_proto("http, https")));
+    }
+
+    #[test]
+    fn session_cookies_carry_secure_only_over_https() {
+        assert_eq!(
+            session_cookie("sid-1", false),
+            "branch_session=sid-1; Path=/; HttpOnly; SameSite=Lax"
+        );
+        assert_eq!(
+            session_cookie("sid-1", true),
+            "branch_session=sid-1; Path=/; HttpOnly; SameSite=Lax; Secure"
+        );
+        assert_eq!(
+            clear_session_cookie(false),
+            "branch_session=deleted; Path=/; Max-Age=0"
+        );
+        assert_eq!(
+            clear_session_cookie(true),
+            "branch_session=deleted; Path=/; Max-Age=0; Secure"
+        );
+    }
 }

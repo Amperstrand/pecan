@@ -5,19 +5,26 @@
 #               mint/melt for the units added in the console to it.
 #   mint      — pinned cdk-mintd on :8089. Talks to the processor's gRPC and,
 #               for keyset management, exposes its management RPC on :8091.
+#   caddy     — optional TLS termination (profile "tls"): auto-provisions
+#               Let's Encrypt certificates for $DOMAIN (mint API) and
+#               $CONSOLE_DOMAIN (operator UI). Enabled by the installer when
+#               a domain is configured, via COMPOSE_PROFILES=tls in .env.
 #
-# Both run from one image (two binaries). Bring it up with:
-#   docker compose up --build
+# All services run from one image published at ghcr.io/zeugmaster/custom-unit-mint.
+# Production installs are managed by mintctl (see install.sh); from a source
+# checkout, docker-compose.override.yml adds a local build so
+# `docker compose up --build` keeps working.
+#
+# Every ${VAR} below is documented in .env.example. restart: unless-stopped is
+# load-bearing, not cosmetic: the processor applies config changes by exiting
+# and relies on Docker to bring it back.
 
 services:
   processor:
-    build:
-      context: .
-    image: custom-unit-mint:latest
-    container_name: custom-unit-processor
+    image: ghcr.io/zeugmaster/custom-unit-mint:${VERSION:-latest}
     command: ["cdk-branch-processor"]
     ports:
-      - "${UI_PORT:-9090}:9090"          # operator web UI
+      - "${BIND_ADDR:-0.0.0.0}:${UI_PORT:-9090}:9090" # operator web UI
     environment:
       RUST_LOG: "info,h2=warn,hyper=warn,reqwest=warn"
       CDK_BRANCH_PROCESSOR_WORK_DIR: "/var/lib/cdk-branch-processor"
@@ -29,8 +36,11 @@ services:
       CDK_BRANCH_PROCESSOR_MINT_RPC_URL: "http://mint:8091"
       CDK_BRANCH_PROCESSOR_MINT_HTTP_URL: "http://mint:8089"
       CDK_BRANCH_PROCESSOR_MINT_GRPC_ADDR: "http://processor"
-      CDK_BRANCH_PROCESSOR_DEFAULT_MINT_PUBLIC_URL: "http://localhost:${MINT_PORT:-8089}"
+      CDK_BRANCH_PROCESSOR_DEFAULT_MINT_PUBLIC_URL: "${MINT_PUBLIC_URL:-http://localhost:8089}"
       CDK_BRANCH_PROCESSOR_MINT_DB_PATH: "/var/lib/cdk-mintd/cdk-mintd.sqlite"
+      # First boot only (before users.json exists): seeds the admin account
+      # with this password instead of the demo admin/admin credentials.
+      CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:-}"
     volumes:
       - processor-data:/var/lib/cdk-branch-processor
       - config-data:/var/lib/custom-unit-mint/config
@@ -39,23 +49,57 @@ services:
       # the database runs in WAL mode and even readers must write the -shm
       # WAL index file.
       - mint-data:/var/lib/cdk-mintd
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9090/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - custom-unit
 
   mint:
-    image: custom-unit-mint:latest
-    container_name: custom-unit-mint
+    image: ghcr.io/zeugmaster/custom-unit-mint:${VERSION:-latest}
     command: ["mint-supervisor"]
     ports:
-      - "${MINT_PORT:-8089}:8089"        # mint HTTP API (NUT endpoints)
+      - "${BIND_ADDR:-0.0.0.0}:${MINT_PORT:-8089}:8089" # mint HTTP API (NUT endpoints)
     environment:
       RUST_LOG: "info,h2=warn,hyper=warn"
     volumes:
       - config-data:/var/lib/custom-unit-mint/config:ro
       - mint-data:/var/lib/cdk-mintd
+    # Standby (zero units yet) counts as healthy: the supervisor legitimately
+    # idles until the operator adds the first unit from the console.
+    healthcheck:
+      test: ["CMD", "mint-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       - processor
+    restart: unless-stopped
+    networks:
+      - custom-unit
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      DOMAIN: "${DOMAIN:-}"
+      CONSOLE_DOMAIN: "${CONSOLE_DOMAIN:-}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - processor
+      - mint
     restart: unless-stopped
     networks:
       - custom-unit
@@ -68,3 +112,5 @@ volumes:
   mint-data:
   processor-data:
   config-data:
+  caddy-data:
+  caddy-config:

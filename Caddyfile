@@ -1,0 +1,25 @@
+# TLS termination for the Custom Unit Mint (compose profile "tls").
+#
+# DOMAIN and CONSOLE_DOMAIN come from .env via the caddy service environment;
+# certificates are provisioned and renewed automatically (Let's Encrypt /
+# ZeroSSL) and persist in the caddy-data volume. HTTP→HTTPS redirects and the
+# ACME HTTP-01 challenge on :80 are automatic — no extra config needed.
+#
+# To receive ACME account notices, add a global block at the top (mintctl
+# does this when ACME_EMAIL is set in .env):
+# {
+#     email you@example.org
+# }
+
+{$DOMAIN} {
+	reverse_proxy mint:8089
+}
+
+{$CONSOLE_DOMAIN} {
+	# The console live-updates over SSE (GET /events, text/event-stream).
+	# Caddy already flushes event-stream responses immediately;
+	# flush_interval -1 makes that explicit and future-proof.
+	reverse_proxy processor:9090 {
+		flush_interval -1
+	}
+}

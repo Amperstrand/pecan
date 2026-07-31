@@ -59,6 +59,14 @@ const ENV_MINT_GRPC_ADDR: &str = "CDK_BRANCH_PROCESSOR_MINT_GRPC_ADDR";
 /// Set to an empty string to disable auditing (e.g. a rig without access to
 /// the mint's work dir).
 const ENV_MINT_DB_PATH: &str = "CDK_BRANCH_PROCESSOR_MINT_DB_PATH";
+/// First-boot provisioning knob for the installer: seeds the "admin" account
+/// with this password instead of the demo credentials, but only while no
+/// users.json exists. Ignored ever after — not a password reset. Empty or
+/// whitespace-only counts as unset.
+const ENV_INITIAL_ADMIN_PASSWORD: &str = "CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD";
+/// Image/build version stamped by the Dockerfile (git tag or edge-<sha>);
+/// surfaces in /healthz and the console. "dev" when unset.
+const ENV_VERSION: &str = "CDK_BRANCH_PROCESSOR_VERSION";
 
 const DEFAULT_WORK_DIR: &str = "/var/lib/cdk-branch-processor";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/custom-unit-mint/config";
@@ -124,6 +132,13 @@ async fn main() -> Result<()> {
         Ok(path) => Some(PathBuf::from(path)),
         Err(_) => Some(PathBuf::from(DEFAULT_MINT_DB_PATH)),
     };
+    let initial_admin_password = std::env::var(ENV_INITIAL_ADMIN_PASSWORD)
+        .ok()
+        .filter(|password| !password.trim().is_empty());
+    let version = std::env::var(ENV_VERSION)
+        .ok()
+        .filter(|version| !version.trim().is_empty())
+        .unwrap_or_else(|| "dev".to_string());
 
     let state_path = work_dir.join("tickets.json");
 
@@ -151,6 +166,20 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Infra endpoints are deployment topology: env (with its documented
+    // defaults) wins on every boot, so a moved service or corrected port
+    // never requires editing setup.json — and the gRPC port rendered into
+    // mint.toml stays in lockstep with the port this process binds below.
+    // With unchanged env this is an identity operation, so the re-rendered
+    // mint.toml is byte-identical and the supervisor does not restart the
+    // mint. public_url stays persisted (operator-owned, edited in the console).
+    app_config.apply_infra_endpoints(&config::InfraEndpoints {
+        mint_http_url: mint_http_url.clone(),
+        mint_rpc_url: mint_rpc_url.clone(),
+        processor_grpc_addr: mint_grpc_addr.clone(),
+        processor_grpc_port: grpc_port,
+    });
+
     // Auth migration, ordered for crash safety: seed users.json from the
     // legacy operator hash BEFORE stripping it from setup.json. A crash in
     // between converges on the next boot (users.json exists, so the legacy
@@ -161,6 +190,7 @@ async fn main() -> Result<()> {
             .auth
             .as_ref()
             .map(|auth| auth.password_hash.clone()),
+        initial_admin_password,
     )
     .await?;
     if app_config.auth.take().is_some() {
@@ -238,6 +268,7 @@ async fn main() -> Result<()> {
 
     let app = web::router(web::WebState::new(
         branch,
+        backend.clone(),
         mint_rpc,
         mint_http,
         supply::SupplyReader::new(mint_db_path),
@@ -245,6 +276,7 @@ async fn main() -> Result<()> {
         config_store.clone(),
         users,
         sessions,
+        version,
     ));
 
     tracing::info!("branch-processor HTTP on {http_socket}");
