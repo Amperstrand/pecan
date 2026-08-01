@@ -72,6 +72,52 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # mintctl release binaries: static musl on Linux (runs on any distro/libc),
+  # native on macOS. Built on every push to catch breakage early; attached to
+  # the GitHub Release on tags, where install.sh downloads them.
+  mintctl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            asset: mintctl-linux-amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: mintctl-linux-arm64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset: mintctl-darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mintctl
+          key: ${{ matrix.target }}
+      - name: Build
+        working-directory: mintctl
+        env:
+          MINTCTL_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('edge-{0}', github.sha) }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mintctl" "${{ runner.temp }}/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ runner.temp }}/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
   merge:
     needs: build
     runs-on: ubuntu-24.04
@@ -116,11 +162,13 @@ jobs:
             docker buildx imagetools inspect "$tag"
           done
 
-  # Boots the just-published manifest with the production compose file and
-  # walks the full first-run path: healthz → login with the injected initial
-  # password → add the first unit → mint leaves Standby and serves /v1/info.
+  # Installs the just-published manifest through the REAL installer (the
+  # mintctl binary built in this run) and walks the full first-run path:
+  # install → forced password change gates the console → new password → first
+  # unit → mint leaves Standby and serves /v1/info. A second, processor-only
+  # install asserts the connect-a-mint-later mode idles honestly.
   smoke:
-    needs: merge
+    needs: [merge, mintctl]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -132,23 +180,39 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Boot the published image
+      - uses: actions/download-artifact@v4
+        with:
+          name: mintctl-linux-amd64
+      - name: Install via mintctl
         run: |
-          PW="smoke-$(openssl rand -hex 8)"
+          chmod +x mintctl-linux-amd64
+          ./mintctl-linux-amd64 install --yes --plain-http \
+            --dir "$RUNNER_TEMP/mint-a" \
+            --version "${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}" \
+            --artifacts-dir . | tee install.log
+          # The generated readable passphrase is the first-boot credential.
+          PW=$(sed -n 's/^INITIAL_ADMIN_PASSWORD=//p' "$RUNNER_TEMP/mint-a/.env")
+          test -n "$PW"
+          echo "::add-mask::$PW"
           echo "SMOKE_PW=$PW" >> "$GITHUB_ENV"
-          cat > .env <<EOF
-          VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}
-          INITIAL_ADMIN_PASSWORD=$PW
-          EOF
-          docker compose -f docker-compose.yml pull --quiet
-          docker compose -f docker-compose.yml up -d
-      - name: Processor becomes healthy
-        run: curl --retry 60 --retry-delay 2 --retry-all-errors -fsS http://127.0.0.1:9090/healthz
-      - name: First unit starts the mint
+      - name: Forced password change gates the console
         run: |
+          # Sign-in with the installer password reports the forced change.
           curl -fsS -c /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/login \
             -H 'content-type: application/json' \
-            -d "{\"username\":\"admin\",\"password\":\"$SMOKE_PW\"}"
+            -d "{\"username\":\"admin\",\"password\":\"$SMOKE_PW\"}" \
+            | jq -e '.must_change_password == true'
+          # Mutations are locked until a real password is set.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/smoke-cookies \
+            -X POST http://127.0.0.1:9090/api/units \
+            -H 'content-type: application/json' \
+            -d '{"unit":"nope","keyset_lifetime_days":90,"rotate_before_expiry_days":14,"input_fee_ppk":0,"amounts":"1"}')
+          test "$code" = "403"
+          curl -fsS -b /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/me/password \
+            -H 'content-type: application/json' \
+            -d "{\"current_password\":\"$SMOKE_PW\",\"password\":\"smoke-chosen-pw-1\",\"password_confirm\":\"smoke-chosen-pw-1\"}"
+      - name: First unit starts the mint
+        run: |
           curl -fsS -b /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/units \
             -H 'content-type: application/json' \
             -d '{"unit":"smoke","keyset_lifetime_days":90,"rotate_before_expiry_days":14,"input_fee_ppk":0,"amounts":"1,2,4,8,16,32,64"}'
@@ -163,21 +227,52 @@ jobs:
           done
           echo "mint never came up" >&2
           exit 1
+      - name: Processor-only install idles honestly
+        run: |
+          ./mintctl-linux-amd64 install --yes --plain-http --processor-only \
+            --dir "$RUNNER_TEMP/mint-b" --ui-port 9190 --mint-port 8189 --grpc-port 51051 \
+            --version "${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}" \
+            --artifacts-dir .
+          PW_B=$(sed -n 's/^INITIAL_ADMIN_PASSWORD=//p' "$RUNNER_TEMP/mint-b/.env")
+          echo "::add-mask::$PW_B"
+          curl -fsS -c /tmp/smoke-b -X POST http://127.0.0.1:9190/api/login \
+            -H 'content-type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$PW_B\"}" >/dev/null
+          curl -fsS -b /tmp/smoke-b -X POST http://127.0.0.1:9190/api/me/password \
+            -H 'content-type: application/json' \
+            -d "{\"current_password\":\"$PW_B\",\"password\":\"smoke-chosen-pw-2\",\"password_confirm\":\"smoke-chosen-pw-2\"}"
+          # The snapshot reports the not-yet-connected mode; nothing serves 8189.
+          curl -fsS -b /tmp/smoke-b http://127.0.0.1:9190/api/app \
+            | jq -e '.mint_connection.mode == "unset" and .mint_connection.supply_audit == false'
+          ! curl -fsS --max-time 3 http://127.0.0.1:8189/v1/info >/dev/null 2>&1
       - name: Logs on failure
         if: failure()
-        run: docker compose -f docker-compose.yml logs
+        run: |
+          cat install.log 2>/dev/null || true
+          docker compose -f "$RUNNER_TEMP/mint-a/docker-compose.yml" --project-directory "$RUNNER_TEMP/mint-a" logs || true
+          docker compose -f "$RUNNER_TEMP/mint-b/docker-compose.yml" --project-directory "$RUNNER_TEMP/mint-b" logs || true
 
   release:
-    needs: [merge, smoke]
+    needs: [merge, smoke, mintctl]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Create the GitHub Release
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/binaries
+          pattern: mintctl-*
+          merge-multiple: true
+      - name: Create the GitHub Release with mintctl binaries
         env:
           GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ runner.temp }}/binaries
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          sha256sum mintctl-* > SHA256SUMS
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                 --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            mintctl-* SHA256SUMS

@@ -33,16 +33,27 @@ export function OverviewTab({ snapshot }: { snapshot: AppSnapshot }) {
 
   return (
     <div className="grid gap-4">
-      {snapshot.units.length === 0 && (
+      {snapshot.mint_connection.mode === "unset" ? (
         <Alert variant="emphasis">
           <PlusCircle />
-          <AlertTitle>No units configured yet</AlertTitle>
+          <AlertTitle>No mint connected yet</AlertTitle>
           <AlertDescription>
-            The mint stays offline until it has a unit to serve — cdk requires at least one
-            payment backend to start. Add the first unit in the Units tab; the mint starts
-            automatically.
+            This installation runs the processor only. Choose a mint in the Mint tab — use the
+            bundled one, or connect a cdk-mintd you already operate.
           </AlertDescription>
         </Alert>
+      ) : (
+        snapshot.units.length === 0 && (
+          <Alert variant="emphasis">
+            <PlusCircle />
+            <AlertTitle>No units configured yet</AlertTitle>
+            <AlertDescription>
+              {snapshot.mint_connection.mode === "external"
+                ? "Nothing is advertised until a unit exists. Add the first unit in the Units tab, then apply the updated config snippet (Mint tab) to your mintd."
+                : "The mint stays offline until it has a unit to serve — cdk requires at least one payment backend to start. Add the first unit in the Units tab; the mint starts automatically."}
+            </AlertDescription>
+          </Alert>
+        )
       )}
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">

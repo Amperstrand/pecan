@@ -122,6 +122,54 @@ pub struct AppConfig {
     pub units: Vec<ManagedUnit>,
     #[serde(default)]
     pub seed_fingerprint: String,
+    /// Which cdk-mintd this processor drives. Console-owned after install:
+    /// the installer only seeds the initial value (bundled vs not-yet-connected)
+    /// via env on first bootstrap. Absent in pre-existing setup.json files,
+    /// which were all bundled — hence the serde default.
+    #[serde(default)]
+    pub mint_connection: MintConnection,
+}
+
+/// The mint attachment state machine.
+///
+/// `Bundled` keeps today's contract: the compose-internal mint container,
+/// with its URLs env-asserted every boot. `Unset` is a processor-only install
+/// before the operator decided. `External` points at an operator-run
+/// cdk-mintd on the same host or private network — the processor stops
+/// rendering `[[ln]]` blocks into the local mint.toml (the bundled supervisor
+/// then idles forever) and instead offers a config snippet for THEIR mintd.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum MintConnection {
+    #[default]
+    Bundled,
+    Unset,
+    External {
+        /// The mint's public HTTP API, as reachable from this processor.
+        http_url: String,
+        /// The mint's management RPC. Optional: without it, keyset rotation
+        /// and the quote-TTL sync are disabled (honestly, in the UI).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rpc_url: Option<String>,
+        /// THIS processor's payment gRPC endpoint as reachable from the mint
+        /// (e.g. `http://10.0.0.5:50051`) — rendered into their snippet.
+        advertised_grpc: String,
+    },
+}
+
+impl MintConnection {
+    pub fn is_bundled(&self) -> bool {
+        matches!(self, MintConnection::Bundled)
+    }
+
+    /// Whether a management RPC is available in this mode.
+    pub fn has_management_rpc(&self) -> bool {
+        match self {
+            MintConnection::Bundled => true,
+            MintConnection::Unset => false,
+            MintConnection::External { rpc_url, .. } => rpc_url.is_some(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,7 +263,11 @@ pub struct BootstrapEndpoints {
 /// zero interaction, the mint advertises nothing until the operator adds the
 /// first unit from the console, and everything here except the recovery seed
 /// stays editable from the operator UI.
-pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Result<AppConfig> {
+pub fn bootstrap_config(
+    endpoints: BootstrapEndpoints,
+    mint_connection: MintConnection,
+    configured_at: u64,
+) -> Result<AppConfig> {
     let mnemonic = generate_mnemonic()?;
     let rollover = RolloverPolicy {
         enabled: true,
@@ -252,6 +304,7 @@ pub fn bootstrap_config(endpoints: BootstrapEndpoints, configured_at: u64) -> Re
         rollover: rollover.clone(),
         units: Vec::new(),
         seed_fingerprint,
+        mint_connection,
     };
     config.validate_integrity()?;
     Ok(config)
@@ -265,11 +318,58 @@ impl AppConfig {
     /// the gRPC port advertised to the mint stays in lockstep with the port
     /// this process actually binds. `public_url` is deliberately untouched
     /// (operator-owned, edited in the console).
+    ///
+    /// Mode nuance: with an External mint the mint URLs are console-owned
+    /// (the operator typed them), so only OUR gRPC endpoint is asserted.
+    /// Unset keeps the env values — they point at the idle bundled container,
+    /// whose refused connections are what the "not connected" tiles report.
     pub fn apply_infra_endpoints(&mut self, infra: &InfraEndpoints) {
-        self.endpoints.mint_http_url = infra.mint_http_url.clone();
-        self.endpoints.mint_rpc_url = infra.mint_rpc_url.clone();
+        match &self.mint_connection {
+            MintConnection::Bundled | MintConnection::Unset => {
+                self.endpoints.mint_http_url = infra.mint_http_url.clone();
+                self.endpoints.mint_rpc_url = infra.mint_rpc_url.clone();
+            }
+            MintConnection::External { http_url, rpc_url, .. } => {
+                self.endpoints.mint_http_url = http_url.clone();
+                self.endpoints.mint_rpc_url = rpc_url.clone().unwrap_or_default();
+            }
+        }
         self.endpoints.processor_grpc_addr = infra.processor_grpc_addr.clone();
         self.endpoints.processor_grpc_port = infra.processor_grpc_port;
+    }
+
+    /// Switch the mint attachment. Guard: once real units exist under one
+    /// attached mint, silently pointing the processor at a different mint
+    /// would strand every issued proof (different DB, different keysets) —
+    /// so a change between attached modes requires all units retired first.
+    /// Leaving `Unset` is always allowed; that is the connect flow.
+    pub fn set_mint_connection(&mut self, next: MintConnection) -> Result<()> {
+        if let MintConnection::External {
+            http_url,
+            rpc_url,
+            advertised_grpc,
+        } = &next
+        {
+            validate_http_url("mint URL", http_url)?;
+            if let Some(rpc) = rpc_url {
+                validate_http_url("management RPC URL", rpc)?;
+            }
+            validate_http_url("processor gRPC endpoint", advertised_grpc)?;
+        }
+        let attached_change = !matches!(self.mint_connection, MintConnection::Unset)
+            && self.mint_connection != next;
+        let live_units = self
+            .units
+            .iter()
+            .any(|unit| unit.lifecycle != UnitLifecycle::Retired);
+        if attached_change && live_units {
+            bail!(
+                "units are configured against the current mint — retire them first; \
+                 switching mints would strand their issued ecash"
+            );
+        }
+        self.mint_connection = next;
+        Ok(())
     }
 
     pub fn upgrade(&mut self) {
@@ -484,7 +584,11 @@ fn validate_slug(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_mint_toml(config: &AppConfig) -> String {
+/// The `[[ln]]` + `[grpc_processor.unit_keysets.*]` blocks and the
+/// supported_units list for every non-retired unit — the payment-backend
+/// wiring shared by the local mint.toml (bundled mode) and the config
+/// snippet handed to an external mint's operator.
+fn unit_backend_blocks(config: &AppConfig) -> (String, Vec<String>, String) {
     let mut ln_entries = String::new();
     let mut supported_units = Vec::new();
     let mut unit_keysets = String::new();
@@ -536,6 +640,63 @@ initial_final_expiry = {initial_final_expiry}
             initial_final_expiry = initial_final_expiry,
         ));
     }
+    (ln_entries, supported_units, unit_keysets)
+}
+
+/// The config-snippet for an operator-run external cdk-mintd: the payment
+/// backend blocks pointing back at THIS processor. Only meaningful in
+/// External mode.
+pub fn render_external_mint_snippet(config: &AppConfig) -> Option<String> {
+    let MintConnection::External { advertised_grpc, .. } = &config.mint_connection else {
+        return None;
+    };
+    let (addr, port) = split_grpc_endpoint(advertised_grpc);
+    let (ln_entries, supported_units, unit_keysets) = unit_backend_blocks(config);
+    let body = if supported_units.is_empty() {
+        "# No units are configured yet — add the first unit in the console,\n\
+         # then apply the updated snippet."
+            .to_string()
+    } else {
+        format!(
+            "{ln_entries}\n[grpc_processor]\nsupported_units = [{supported}]\naddr = \"{addr}\"\nport = {port}\n{unit_keysets}",
+            supported = supported_units.join(", "),
+            addr = toml_escape(&addr),
+        )
+    };
+    Some(format!(
+        "# Custom Unit Mint — payment backend for your cdk-mintd.\n\
+         # Merge into your mint.toml, replacing any existing [[ln]] and\n\
+         # [grpc_processor] blocks, then restart cdk-mintd.\n\
+         #\n\
+         # Requirements: cdk-mintd built from the SAME pinned cdk revision as\n\
+         # this processor, with patches/cdk-managed-units.patch applied (the\n\
+         # published custom-unit-mint image is exactly that build). The gRPC\n\
+         # link carries no authentication — keep it on a private network.\n\
+         {body}\n"
+    ))
+}
+
+/// `http://host:port` → (`http://host`, port). Ports default to 50051.
+fn split_grpc_endpoint(endpoint: &str) -> (String, u16) {
+    let trimmed = endpoint.trim_end_matches('/');
+    if let Some((addr, port)) = trimmed.rsplit_once(':') {
+        if let Ok(port) = port.parse::<u16>() {
+            return (addr.to_string(), port);
+        }
+    }
+    (trimmed.to_string(), 50051)
+}
+
+fn render_mint_toml(config: &AppConfig) -> String {
+    // A non-bundled connection renders NO [[ln]] blocks: the bundled
+    // supervisor gates cdk-mintd on `[[ln]]` presence, so the idle mint
+    // container stays in standby forever instead of fighting the operator's
+    // external mint over the same units.
+    let (ln_entries, supported_units, unit_keysets) = if config.mint_connection.is_bundled() {
+        unit_backend_blocks(config)
+    } else {
+        (String::new(), Vec::new(), String::new())
+    };
 
     format!(
         r#"# Generated by the Custom Unit Mint setup UI.
@@ -602,6 +763,21 @@ fn toml_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn validate_http_url(label: &str, url: &str) -> Result<()> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or_else(|| anyhow!("{label} must start with http:// or https://"))?;
+    if rest.is_empty() || rest.starts_with('/') {
+        bail!("{label} needs a host, e.g. http://10.0.0.5:8089");
+    }
+    if url.contains(char::is_whitespace) {
+        bail!("{label} must not contain whitespace");
+    }
+    Ok(())
+}
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -638,7 +814,7 @@ mod tests {
     }
 
     fn test_config() -> AppConfig {
-        let mut config = bootstrap_config(test_endpoints(), 1).expect("valid config");
+        let mut config = bootstrap_config(test_endpoints(), MintConnection::Bundled, 1).expect("valid config");
         config.mint.name = "Branch mint".into();
         let rollover = RolloverPolicy {
             enabled: true,
@@ -653,7 +829,7 @@ mod tests {
 
     #[test]
     fn bootstrap_produces_a_valid_unitless_config() {
-        let config = bootstrap_config(test_endpoints(), 42).expect("bootstrap");
+        let config = bootstrap_config(test_endpoints(), MintConnection::Bundled, 42).expect("bootstrap");
         assert!(config.validate_integrity().is_ok());
         assert!(config.auth.is_none());
         assert_eq!(config.version, 3);
@@ -669,7 +845,7 @@ mod tests {
 
     #[test]
     fn first_added_unit_claims_the_primary_slot() {
-        let mut config = bootstrap_config(test_endpoints(), 42).expect("bootstrap");
+        let mut config = bootstrap_config(test_endpoints(), MintConnection::Bundled, 42).expect("bootstrap");
         let policy = RolloverPolicy {
             enabled: true,
             keyset_lifetime_days: 30,
@@ -699,7 +875,7 @@ mod tests {
         assert_eq!(wizard_era.units.len(), 1);
         assert_eq!(wizard_era.units[0].unit, "ora");
 
-        let mut fresh = bootstrap_config(test_endpoints(), 42).expect("bootstrap");
+        let mut fresh = bootstrap_config(test_endpoints(), MintConnection::Bundled, 42).expect("bootstrap");
         fresh.upgrade();
         assert!(fresh.units.is_empty());
     }
@@ -837,5 +1013,122 @@ mod tests {
         config.mint.mnemonic =
             "legal winner thank year wave sausage worth useful legal winner thank yellow".into();
         assert!(config.validate_integrity().is_err());
+    }
+
+    fn external_connection() -> MintConnection {
+        MintConnection::External {
+            http_url: "http://10.0.0.7:8089".into(),
+            rpc_url: Some("http://10.0.0.7:8091".into()),
+            advertised_grpc: "http://10.0.0.5:50051".into(),
+        }
+    }
+
+    #[test]
+    fn non_bundled_modes_render_no_payment_backend() {
+        // A configured unit under an external mint must NOT start the bundled
+        // supervisor: no [[ln]] blocks, empty supported_units.
+        let mut config = test_config();
+        config.mint_connection = external_connection();
+        let rendered = render_mint_toml(&config);
+        assert!(!rendered.contains("[[ln]]"));
+        assert!(rendered.contains("supported_units = []"));
+
+        config.mint_connection = MintConnection::Unset;
+        assert!(!render_mint_toml(&config).contains("[[ln]]"));
+
+        config.mint_connection = MintConnection::Bundled;
+        assert!(render_mint_toml(&config).contains("[[ln]]"));
+    }
+
+    #[test]
+    fn external_snippet_carries_units_and_advertised_grpc() {
+        let mut config = test_config();
+        config.mint_connection = external_connection();
+        let snippet = render_external_mint_snippet(&config).expect("snippet in external mode");
+        assert!(snippet.contains("[[ln]]"));
+        assert!(snippet.contains("unit = \"ora\""));
+        assert!(snippet.contains("addr = \"http://10.0.0.5\""));
+        assert!(snippet.contains("port = 50051"));
+        assert!(snippet.contains("[grpc_processor.unit_keysets.ora]"));
+        assert!(render_external_mint_snippet(&test_config()).is_none());
+    }
+
+    #[test]
+    fn mint_connection_switch_is_guarded_by_live_units() {
+        // With a live unit, switching attached mints is refused both ways.
+        let mut config = test_config();
+        assert!(config.set_mint_connection(external_connection()).is_err());
+
+        // Retiring the unit unlocks the switch.
+        config.units[0].lifecycle = UnitLifecycle::Retired;
+        config.set_mint_connection(external_connection()).expect("switch");
+        assert!(!config.mint_connection.is_bundled());
+
+        // Leaving Unset is always allowed — that IS the connect flow.
+        let mut fresh =
+            bootstrap_config(test_endpoints(), MintConnection::Unset, 42).expect("bootstrap");
+        let policy = RolloverPolicy {
+            enabled: true,
+            keyset_lifetime_days: 30,
+            rotate_before_expiry_days: 7,
+            input_fee_ppk: 0,
+            amounts: vec![1, 2],
+        };
+        fresh.add_unit("ora", policy, 43).expect("unit in unset mode");
+        fresh
+            .set_mint_connection(MintConnection::Bundled)
+            .expect("unset -> bundled with units is the connect flow");
+    }
+
+    #[test]
+    fn external_urls_are_validated() {
+        let mut config = bootstrap_config(test_endpoints(), MintConnection::Unset, 1).expect("ok");
+        for bad in [
+            ("ftp://x:1", Some("http://a:1".into()), "http://b:1"),
+            ("http://", Some("http://a:1".into()), "http://b:1"),
+            ("http://x:1", Some("nope".into()), "http://b:1"),
+            ("http://x:1", None, "b:50051"),
+        ] {
+            assert!(config
+                .set_mint_connection(MintConnection::External {
+                    http_url: bad.0.into(),
+                    rpc_url: bad.1.clone(),
+                    advertised_grpc: bad.2.into(),
+                })
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn infra_endpoints_respect_the_connection_mode() {
+        let infra = InfraEndpoints {
+            mint_http_url: "http://mint:8089".into(),
+            mint_rpc_url: "http://mint:8091".into(),
+            processor_grpc_addr: "http://processor".into(),
+            processor_grpc_port: 50051,
+        };
+        let mut config = bootstrap_config(test_endpoints(), MintConnection::Unset, 1).expect("ok");
+        config.set_mint_connection(external_connection()).expect("connect");
+        config.apply_infra_endpoints(&infra);
+        // Console-owned mint URLs survive; our gRPC endpoint is env-asserted.
+        assert_eq!(config.endpoints.mint_http_url, "http://10.0.0.7:8089");
+        assert_eq!(config.endpoints.mint_rpc_url, "http://10.0.0.7:8091");
+        assert_eq!(config.endpoints.processor_grpc_addr, "http://processor");
+
+        config.set_mint_connection(MintConnection::Bundled).expect("switch back");
+        config.apply_infra_endpoints(&infra);
+        assert_eq!(config.endpoints.mint_http_url, "http://mint:8089");
+    }
+
+    #[test]
+    fn grpc_endpoint_split_handles_ports() {
+        assert_eq!(
+            split_grpc_endpoint("http://10.0.0.5:50051"),
+            ("http://10.0.0.5".to_string(), 50051)
+        );
+        assert_eq!(
+            split_grpc_endpoint("http://processor"),
+            ("http://processor".to_string(), 50051)
+        );
     }
 }

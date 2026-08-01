@@ -55,6 +55,11 @@ pub struct UserRecord {
     pub username: String,
     pub password_hash: String,
     pub created_at: u64,
+    /// True while the account still uses a password the operator did not
+    /// choose themselves (the installer-provisioned first-boot password).
+    /// Cleared the first time the user sets their own password.
+    #[serde(default)]
+    pub must_change_password: bool,
 }
 
 /// Snapshot-safe projection: never carries the hash.
@@ -134,7 +139,7 @@ impl UserStore {
                 (users, false)
             }
             None => {
-                let hash = match (legacy_hash, initial_password) {
+                let (hash, must_change_password) = match (legacy_hash, initial_password) {
                     // An existing install's chosen password always wins; the
                     // env var provisions first boots, it never resets.
                     (Some(hash), _) => {
@@ -142,7 +147,7 @@ impl UserStore {
                             "seeding {} from the existing operator password as user {DEMO_USERNAME:?}",
                             path.display()
                         );
-                        hash
+                        (hash, false)
                     }
                     (None, Some(password)) => {
                         // Fail hard on an invalid value: nothing exists yet
@@ -160,7 +165,9 @@ impl UserStore {
                              CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD",
                             path.display()
                         );
-                        hash_password(&password)
+                        // The installer chose this password, not the operator:
+                        // force a change at first sign-in.
+                        (hash_password(&password), true)
                     }
                     // Demo seed: deliberately exempt from the password
                     // complexity rule; the UI warns until it is changed.
@@ -169,7 +176,7 @@ impl UserStore {
                             "seeding {} with demo credentials {DEMO_USERNAME}/{DEMO_PASSWORD}",
                             path.display()
                         );
-                        hash_password(DEMO_PASSWORD)
+                        (hash_password(DEMO_PASSWORD), false)
                     }
                 };
                 let mut users = BTreeMap::new();
@@ -179,6 +186,7 @@ impl UserStore {
                         username: DEMO_USERNAME.to_string(),
                         password_hash: hash,
                         created_at: unix_now(),
+                        must_change_password,
                     },
                 );
                 (users, true)
@@ -244,6 +252,17 @@ impl UserStore {
         *self.inner.demo_password_active.read().await
     }
 
+    /// Whether this account is still on its installer-provisioned password
+    /// and must set its own before using the console.
+    pub async fn must_change_password(&self, username: &str) -> bool {
+        self.inner
+            .users
+            .read()
+            .await
+            .get(&normalize_username(username))
+            .is_some_and(|user| user.must_change_password)
+    }
+
     pub async fn create(
         &self,
         username: &str,
@@ -257,6 +276,7 @@ impl UserStore {
             username: username.clone(),
             password_hash: hash_password(password),
             created_at: unix_now(),
+            must_change_password: false,
         };
         {
             let mut users = self.inner.users.write().await;
@@ -307,6 +327,9 @@ impl UserStore {
                 .get_mut(&username)
                 .ok_or(UserError::Unknown(username.clone()))?;
             user.password_hash = hash_password(password);
+            // Any successful change means the account now runs on a password
+            // someone deliberately set — the provisioning flag has done its job.
+            user.must_change_password = false;
         }
         if username == DEMO_USERNAME {
             // The complexity rule makes literal "admin" unreachable here.
@@ -521,6 +544,46 @@ mod tests {
         assert!(store.verify(DEMO_USERNAME, "installer-secret").await);
         assert!(!store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
         assert!(!store.demo_password_active().await);
+        assert!(store.must_change_password(DEMO_USERNAME).await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn forced_change_survives_reload_and_clears_on_set_password() {
+        let path = temp_path("must-change");
+        let store = UserStore::load(path.clone(), None, Some("installer-secret".into()))
+            .await
+            .expect("load");
+        drop(store);
+        // The flag is persisted, not recomputed: a restart before the first
+        // sign-in must still force the change.
+        let reloaded = UserStore::load(path.clone(), None, None).await.expect("reload");
+        assert!(reloaded.must_change_password(DEMO_USERNAME).await);
+        reloaded
+            .set_password(DEMO_USERNAME, "Chosen-pass-1!", "Chosen-pass-1!")
+            .await
+            .expect("change");
+        assert!(!reloaded.must_change_password(DEMO_USERNAME).await);
+        drop(reloaded);
+        let again = UserStore::load(path.clone(), None, None).await.expect("reload");
+        assert!(!again.must_change_password(DEMO_USERNAME).await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn demo_and_legacy_seeds_do_not_force_a_change() {
+        let path = temp_path("no-force-demo");
+        let store = UserStore::load(path.clone(), None, None).await.expect("load");
+        assert!(!store.must_change_password(DEMO_USERNAME).await);
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let path = temp_path("no-force-legacy");
+        let legacy = hash_password("Old-passw0rd!");
+        let store = UserStore::load(path.clone(), Some(legacy), None)
+            .await
+            .expect("load");
+        assert!(!store.must_change_password(DEMO_USERNAME).await);
+        assert!(!store.must_change_password("unknown-user").await);
         let _ = tokio::fs::remove_file(&path).await;
     }
 

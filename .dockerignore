@@ -11,4 +11,5 @@ docs
 install.sh
 Caddyfile
 docker-compose*.yml
+mintctl
 **/.DS_Store
