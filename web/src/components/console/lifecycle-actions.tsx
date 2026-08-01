@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { setUnitLifecycle, type ManagedUnit, type UnitLifecycle } from "@/lib/api"
+import { ApiRequestError, setUnitLifecycle, type ManagedUnit, type UnitLifecycle } from "@/lib/api"
 import { runRestartingMutation } from "@/lib/restart"
 import { useSnapshot } from "@/lib/snapshot"
 import {
@@ -27,13 +27,33 @@ import { Button } from "@/components/ui/button"
 export function LifecycleActions({ unit }: { unit: ManagedUnit }) {
   const { refresh } = useSnapshot()
   const [busy, setBusy] = useState(false)
+  // Retirement against an unreachable EXTERNAL mint: the server refused the
+  // keyset-expiry check; this arms a second, explicit "retire anyway" dialog.
+  const [unreachableRetire, setUnreachableRetire] = useState(false)
 
-  async function change(lifecycle: UnitLifecycle, label: string) {
+  async function change(
+    lifecycle: UnitLifecycle,
+    label: string,
+    options: { forceUnverified?: boolean } = {},
+  ) {
     setBusy(true)
     try {
-      await runRestartingMutation(label, () => setUnitLifecycle(unit.unit, lifecycle), refresh)
-    } catch {
-      // toast already shown by runRestartingMutation
+      await runRestartingMutation(
+        label,
+        () => setUnitLifecycle(unit.unit, lifecycle, options),
+        refresh,
+      )
+      setUnreachableRetire(false)
+    } catch (err) {
+      // Toast already shown by runRestartingMutation; additionally arm the
+      // escape hatch when the external mint could not be reached.
+      if (
+        lifecycle === "retired" &&
+        err instanceof ApiRequestError &&
+        err.message.startsWith("mint unreachable:")
+      ) {
+        setUnreachableRetire(true)
+      }
     } finally {
       setBusy(false)
     }
@@ -100,6 +120,29 @@ export function LifecycleActions({ unit }: { unit: ManagedUnit }) {
               <AlertDialogCancel>Keep redemptions</AlertDialogCancel>
               <AlertDialogAction onClick={() => void change("retired", `Retiring ${code}…`)}>
                 Retire unit
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        <AlertDialog open={unreachableRetire} onOpenChange={setUnreachableRetire}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Your mint is unreachable — retire {code} anyway?</AlertDialogTitle>
+              <AlertDialogDescription>
+                The keyset-expiry check needs your external mint, and it did not answer. If the
+                mint is only briefly down, bring it back and retry — the check protects
+                redeemable {code} ecash. Retire without the check only if that mint is gone for
+                good.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Wait for the mint</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() =>
+                  void change("retired", `Retiring ${code}…`, { forceUnverified: true })
+                }
+              >
+                Retire without the check
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

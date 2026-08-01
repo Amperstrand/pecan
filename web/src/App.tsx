@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { AppShell } from "@/components/layout/app-shell"
+import { PasswordGate } from "@/components/password-gate"
 import { ConsolePage } from "@/pages/console"
 import { LoginPage } from "@/pages/login"
 import { TellerPage } from "@/pages/teller"
@@ -36,7 +37,9 @@ function App() {
             </main>
           )}
         >
-          <AppShell>{pathname.startsWith("/teller") ? <TellerPage /> : <ConsolePage />}</AppShell>
+          <PasswordGate>
+            <AppShell>{pathname.startsWith("/teller") ? <TellerPage /> : <ConsolePage />}</AppShell>
+          </PasswordGate>
         </SnapshotProvider>
       )}
       <Toaster />

@@ -6,11 +6,13 @@
 //!
 //! Seeding rules on load:
 //!   * missing file + legacy operator hash → migrate it as user "admin"
-//!   * missing file, no legacy hash → demo credentials admin/admin
+//!   * missing file + installer-provided initial password → user "admin"
+//!     with that password (no demo-credential window on public installs)
+//!   * missing file, neither of the above → demo credentials admin/admin
 //!   * unparseable file → preserved as users.json.corrupt-<ts>, then reseeded
-//!     (this is an appliance; refusing to boot would brick the whole stack,
-//!     and anyone who can corrupt the file can already read the mnemonic that
-//!     lives in the same directory)
+//!     through the same matrix (this is an appliance; refusing to boot would
+//!     brick the whole stack, and anyone who can corrupt the file can already
+//!     read the mnemonic that lives in the same directory)
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -53,6 +55,11 @@ pub struct UserRecord {
     pub username: String,
     pub password_hash: String,
     pub created_at: u64,
+    /// True while the account still uses a password the operator did not
+    /// choose themselves (the installer-provisioned first-boot password).
+    /// Cleared the first time the user sets their own password.
+    #[serde(default)]
+    pub must_change_password: bool,
 }
 
 /// Snapshot-safe projection: never carries the hash.
@@ -87,8 +94,16 @@ impl UserStore {
     /// Load or seed the user store. `legacy_hash` carries the deprecated
     /// single-operator password hash from setup.json; when the store does not
     /// exist yet, that hash becomes user "admin" so existing instances keep
-    /// their password across the migration.
-    pub async fn load(path: PathBuf, legacy_hash: Option<String>) -> Result<Self> {
+    /// their password across the migration. `initial_password` carries
+    /// CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD, a first-boot provisioning
+    /// knob for the installer: it seeds "admin" only when no store exists and
+    /// no legacy hash applies, and is ignored ever after — it is not a
+    /// password-reset mechanism.
+    pub async fn load(
+        path: PathBuf,
+        legacy_hash: Option<String>,
+        initial_password: Option<String>,
+    ) -> Result<Self> {
         let mut users: Option<BTreeMap<String, UserRecord>> = None;
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             let raw = tokio::fs::read(&path)
@@ -114,24 +129,54 @@ impl UserStore {
         }
 
         let (users, seeded) = match users {
-            Some(users) => (users, false),
+            Some(users) => {
+                if initial_password.is_some() {
+                    tracing::info!(
+                        "{} already exists; CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD is ignored",
+                        path.display()
+                    );
+                }
+                (users, false)
+            }
             None => {
-                let hash = match legacy_hash {
-                    Some(hash) => {
+                let (hash, must_change_password) = match (legacy_hash, initial_password) {
+                    // An existing install's chosen password always wins; the
+                    // env var provisions first boots, it never resets.
+                    (Some(hash), _) => {
                         tracing::info!(
                             "seeding {} from the existing operator password as user {DEMO_USERNAME:?}",
                             path.display()
                         );
-                        hash
+                        (hash, false)
+                    }
+                    (None, Some(password)) => {
+                        // Fail hard on an invalid value: nothing exists yet
+                        // that could be bricked, and silently falling back to
+                        // admin/admin on a public install would be worse than
+                        // an error the installer's health wait surfaces.
+                        validate_operator_password(&password, &password).map_err(|e| {
+                            anyhow!(
+                                "CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD: {e}; \
+                                 refusing to seed the first operator account"
+                            )
+                        })?;
+                        tracing::info!(
+                            "seeding {} for user {DEMO_USERNAME:?} from \
+                             CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD",
+                            path.display()
+                        );
+                        // The installer chose this password, not the operator:
+                        // force a change at first sign-in.
+                        (hash_password(&password), true)
                     }
                     // Demo seed: deliberately exempt from the password
                     // complexity rule; the UI warns until it is changed.
-                    None => {
+                    (None, None) => {
                         tracing::info!(
                             "seeding {} with demo credentials {DEMO_USERNAME}/{DEMO_PASSWORD}",
                             path.display()
                         );
-                        hash_password(DEMO_PASSWORD)
+                        (hash_password(DEMO_PASSWORD), false)
                     }
                 };
                 let mut users = BTreeMap::new();
@@ -141,6 +186,7 @@ impl UserStore {
                         username: DEMO_USERNAME.to_string(),
                         password_hash: hash,
                         created_at: unix_now(),
+                        must_change_password,
                     },
                 );
                 (users, true)
@@ -206,6 +252,17 @@ impl UserStore {
         *self.inner.demo_password_active.read().await
     }
 
+    /// Whether this account is still on its installer-provisioned password
+    /// and must set its own before using the console.
+    pub async fn must_change_password(&self, username: &str) -> bool {
+        self.inner
+            .users
+            .read()
+            .await
+            .get(&normalize_username(username))
+            .is_some_and(|user| user.must_change_password)
+    }
+
     pub async fn create(
         &self,
         username: &str,
@@ -219,6 +276,7 @@ impl UserStore {
             username: username.clone(),
             password_hash: hash_password(password),
             created_at: unix_now(),
+            must_change_password: false,
         };
         {
             let mut users = self.inner.users.write().await;
@@ -269,6 +327,9 @@ impl UserStore {
                 .get_mut(&username)
                 .ok_or(UserError::Unknown(username.clone()))?;
             user.password_hash = hash_password(password);
+            // Any successful change means the account now runs on a password
+            // someone deliberately set — the provisioning flag has done its job.
+            user.must_change_password = false;
         }
         if username == DEMO_USERNAME {
             // The complexity rule makes literal "admin" unreachable here.
@@ -346,14 +407,16 @@ mod tests {
     #[tokio::test]
     async fn seeds_demo_admin_and_flags_it() {
         let path = temp_path("seed");
-        let store = UserStore::load(path.clone(), None).await.expect("load");
+        let store = UserStore::load(path.clone(), None, None).await.expect("load");
         assert!(store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
         assert!(!store.verify(DEMO_USERNAME, "wrong").await);
         assert!(!store.verify("nobody", DEMO_PASSWORD).await);
         assert!(store.demo_password_active().await);
         assert_eq!(store.list().await.len(), 1);
         // Reload uses the persisted file, not reseeding.
-        let reloaded = UserStore::load(path.clone(), None).await.expect("reload");
+        let reloaded = UserStore::load(path.clone(), None, None)
+            .await
+            .expect("reload");
         assert!(reloaded.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
         let _ = tokio::fs::remove_file(&path).await;
     }
@@ -362,14 +425,14 @@ mod tests {
     async fn migration_reuses_legacy_hash() {
         let path = temp_path("migrate");
         let legacy = hash_password("Old-passw0rd!");
-        let store = UserStore::load(path.clone(), Some(legacy))
+        let store = UserStore::load(path.clone(), Some(legacy), None)
             .await
             .expect("load");
         assert!(store.verify("admin", "Old-passw0rd!").await);
         assert!(!store.verify("admin", DEMO_PASSWORD).await);
         assert!(!store.demo_password_active().await);
         // Once the file exists, a later legacy hash is ignored.
-        let again = UserStore::load(path.clone(), Some(hash_password("Other-pass-2!")))
+        let again = UserStore::load(path.clone(), Some(hash_password("Other-pass-2!")), None)
             .await
             .expect("reload");
         assert!(again.verify("admin", "Old-passw0rd!").await);
@@ -379,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn create_validates_and_rejects_duplicates() {
         let path = temp_path("create");
-        let store = UserStore::load(path.clone(), None).await.expect("load");
+        let store = UserStore::load(path.clone(), None, None).await.expect("load");
         assert!(store.create("teller1", "weak", "weak").await.is_err());
         assert!(store
             .create("Bad Name!", "Te11er-pass!", "Te11er-pass!")
@@ -404,7 +467,7 @@ mod tests {
     #[tokio::test]
     async fn delete_guards_self_and_last_user() {
         let path = temp_path("delete");
-        let store = UserStore::load(path.clone(), None).await.expect("load");
+        let store = UserStore::load(path.clone(), None, None).await.expect("load");
         let err = store.delete("admin", "admin").await.expect_err("self");
         assert!(matches!(
             err.downcast_ref::<UserError>(),
@@ -435,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn password_change_clears_demo_flag() {
         let path = temp_path("password");
-        let store = UserStore::load(path.clone(), None).await.expect("load");
+        let store = UserStore::load(path.clone(), None, None).await.expect("load");
         assert!(store.demo_password_active().await);
         assert!(store.set_password("admin", "weak", "weak").await.is_err());
         store
@@ -451,7 +514,7 @@ mod tests {
     async fn corrupt_file_is_quarantined_and_reseeded() {
         let path = temp_path("quarantine");
         tokio::fs::write(&path, b"{ not json").await.expect("write");
-        let store = UserStore::load(path.clone(), None).await.expect("load");
+        let store = UserStore::load(path.clone(), None, None).await.expect("load");
         assert!(store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
         let stem = path
             .file_stem()
@@ -469,6 +532,125 @@ mod tests {
             }
         }
         assert!(found_quarantine, "expected a quarantined corrupt file");
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn initial_password_seeds_admin_without_demo_flag() {
+        let path = temp_path("initial");
+        let store = UserStore::load(path.clone(), None, Some("installer-secret".into()))
+            .await
+            .expect("load");
+        assert!(store.verify(DEMO_USERNAME, "installer-secret").await);
+        assert!(!store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
+        assert!(!store.demo_password_active().await);
+        assert!(store.must_change_password(DEMO_USERNAME).await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn forced_change_survives_reload_and_clears_on_set_password() {
+        let path = temp_path("must-change");
+        let store = UserStore::load(path.clone(), None, Some("installer-secret".into()))
+            .await
+            .expect("load");
+        drop(store);
+        // The flag is persisted, not recomputed: a restart before the first
+        // sign-in must still force the change.
+        let reloaded = UserStore::load(path.clone(), None, None).await.expect("reload");
+        assert!(reloaded.must_change_password(DEMO_USERNAME).await);
+        reloaded
+            .set_password(DEMO_USERNAME, "Chosen-pass-1!", "Chosen-pass-1!")
+            .await
+            .expect("change");
+        assert!(!reloaded.must_change_password(DEMO_USERNAME).await);
+        drop(reloaded);
+        let again = UserStore::load(path.clone(), None, None).await.expect("reload");
+        assert!(!again.must_change_password(DEMO_USERNAME).await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn demo_and_legacy_seeds_do_not_force_a_change() {
+        let path = temp_path("no-force-demo");
+        let store = UserStore::load(path.clone(), None, None).await.expect("load");
+        assert!(!store.must_change_password(DEMO_USERNAME).await);
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let path = temp_path("no-force-legacy");
+        let legacy = hash_password("Old-passw0rd!");
+        let store = UserStore::load(path.clone(), Some(legacy), None)
+            .await
+            .expect("load");
+        assert!(!store.must_change_password(DEMO_USERNAME).await);
+        assert!(!store.must_change_password("unknown-user").await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_hash_wins_over_initial_password() {
+        let path = temp_path("initial-vs-legacy");
+        let legacy = hash_password("Old-passw0rd!");
+        let store = UserStore::load(path.clone(), Some(legacy), Some("installer-secret".into()))
+            .await
+            .expect("load");
+        assert!(store.verify("admin", "Old-passw0rd!").await);
+        assert!(!store.verify("admin", "installer-secret").await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn existing_store_ignores_initial_password() {
+        let path = temp_path("initial-ignored");
+        let store = UserStore::load(path.clone(), None, None).await.expect("load");
+        store
+            .set_password("admin", "Chosen-pass-1!", "Chosen-pass-1!")
+            .await
+            .expect("change");
+        drop(store);
+        let reloaded = UserStore::load(path.clone(), None, Some("installer-secret".into()))
+            .await
+            .expect("reload");
+        assert!(reloaded.verify("admin", "Chosen-pass-1!").await);
+        assert!(!reloaded.verify("admin", "installer-secret").await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn short_initial_password_fails_the_boot_without_writing() {
+        let path = temp_path("initial-short");
+        let err = match UserStore::load(path.clone(), None, Some("short".into())).await {
+            Ok(_) => panic!("must refuse a short initial password"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD"));
+        assert!(!tokio::fs::try_exists(&path).await.unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn corrupt_file_reseeds_from_the_initial_password() {
+        let path = temp_path("quarantine-initial");
+        tokio::fs::write(&path, b"{ not json").await.expect("write");
+        let store = UserStore::load(path.clone(), None, Some("installer-secret".into()))
+            .await
+            .expect("load");
+        assert!(store.verify(DEMO_USERNAME, "installer-secret").await);
+        assert!(!store.demo_password_active().await);
+        let dir = path.parent().expect("parent");
+        let stem = path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .expect("stem")
+            .to_string();
+        let mut entries = tokio::fs::read_dir(dir).await.expect("read dir");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&stem) && name.contains(".json.corrupt-") {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
         let _ = tokio::fs::remove_file(&path).await;
     }
 }

@@ -2,7 +2,14 @@
 web/node_modules
 web/dist
 .git
+.github
 .gitignore
 .env
+.env.example
 *.md
+docs
+install.sh
+Caddyfile
+docker-compose*.yml
+mintctl
 **/.DS_Store

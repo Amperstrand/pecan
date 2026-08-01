@@ -259,9 +259,11 @@ export function AddUnitDialog({ snapshot }: { snapshot: AppSnapshot }) {
           <DialogHeader>
             <DialogTitle>Add a unit</DialogTitle>
             <DialogDescription>
-              {snapshot.units.length === 0
-                ? `Creates a signing keyset, advertises ${snapshot.mint.method} deposit and withdrawal support, and starts the mint (it stays offline while no unit exists).`
-                : `Creates a signing keyset and advertises ${snapshot.mint.method} deposit and withdrawal support. Applying restarts the mint briefly.`}
+              {snapshot.mint_connection.mode === "external"
+                ? `Creates a signing keyset and advertises ${snapshot.mint.method} deposit and withdrawal support. Afterwards, apply the updated config snippet (Mint tab) to your mintd and restart it.`
+                : snapshot.units.length === 0
+                  ? `Creates a signing keyset, advertises ${snapshot.mint.method} deposit and withdrawal support, and starts the mint (it stays offline while no unit exists).`
+                  : `Creates a signing keyset and advertises ${snapshot.mint.method} deposit and withdrawal support. Applying restarts the mint briefly.`}
             </DialogDescription>
           </DialogHeader>
           <Field label="Unit code" help="Lowercase; cannot be renamed later." htmlFor="add-unit-code">
