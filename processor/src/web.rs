@@ -102,6 +102,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/units/{unit}/lifecycle", post(api_set_unit_lifecycle))
         .route("/api/units/{unit}/policy", post(api_set_unit_policy))
         .route("/api/settings/identity", post(api_update_identity))
+        .route("/api/settings/mint-connection", post(api_set_mint_connection))
         .route("/api/settings/mnemonic", post(api_reveal_mnemonic))
         .route("/api/users", post(api_users_create))
         .route("/api/users/{username}", delete(api_users_delete))
@@ -284,6 +285,15 @@ struct ApiMessage {
     message: &'static str,
 }
 
+#[derive(Serialize)]
+struct LoginResponse {
+    message: &'static str,
+    must_change_password: bool,
+    /// The login page renders the set-a-new-password step before any
+    /// authenticated snapshot exists, so the rule ships with the response.
+    password_min_length: usize,
+}
+
 fn api_error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ApiError { error: msg.into() })).into_response()
 }
@@ -292,13 +302,32 @@ fn api_error(status: StatusCode, msg: impl Into<String>) -> Response {
 struct Authed {
     session_id: String,
     username: String,
+    /// Still on the installer-provisioned password; must set their own first.
+    must_change_password: bool,
 }
 
-async fn require_api_auth(state: &WebState, headers: &HeaderMap) -> Result<Authed, Response> {
+/// Session-only check for the routes that must stay usable while a forced
+/// password change is pending: the snapshot (the change screen renders from
+/// it) and the password-change endpoint itself.
+async fn require_api_session(state: &WebState, headers: &HeaderMap) -> Result<Authed, Response> {
     match authenticated(state, headers).await {
         Some(authed) => Ok(authed),
         None => Err(api_error(StatusCode::UNAUTHORIZED, "unauthorized")),
     }
+}
+
+/// Default auth for API handlers. A pending forced password change locks the
+/// account down to `/api/app` and `/api/me/password` — every other route lands
+/// here so a newly added handler is gated unless it opts out deliberately.
+async fn require_api_auth(state: &WebState, headers: &HeaderMap) -> Result<Authed, Response> {
+    let authed = require_api_session(state, headers).await?;
+    if authed.must_change_password {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "set your own password before continuing",
+        ));
+    }
+    Ok(authed)
 }
 
 #[derive(Serialize)]
@@ -325,11 +354,29 @@ struct ApiAppSnapshot {
     demo_password_active: bool,
     password_min_length: usize,
     version: String,
+    mint_connection: ApiMintConnection,
+}
+
+#[derive(Serialize)]
+struct ApiMintConnection {
+    /// "bundled" | "unset" | "external"
+    mode: &'static str,
+    http_url: Option<String>,
+    rpc_url: Option<String>,
+    advertised_grpc: Option<String>,
+    /// Feature availability in this mode, stated instead of implied.
+    supply_audit: bool,
+    management_rpc: bool,
+    /// External mode: the mint.toml fragment for the operator's cdk-mintd.
+    external_snippet: Option<String>,
 }
 
 #[derive(Serialize)]
 struct ApiSessionInfo {
     username: String,
+    /// Mirrors the login response so a reload mid-flow still lands on the
+    /// forced-change screen instead of the console.
+    must_change_password: bool,
 }
 
 #[derive(Serialize)]
@@ -508,7 +555,9 @@ struct CirculationPoint {
 }
 
 async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response {
-    let authed = match require_api_auth(&state, &headers).await {
+    // Session-only: the forced-password-change screen renders from this
+    // snapshot, so it must stay readable while the change is pending.
+    let authed = match require_api_session(&state, &headers).await {
         Ok(authed) => authed,
         Err(r) => return r,
     };
@@ -714,6 +763,7 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         now,
         session: ApiSessionInfo {
             username: authed.username,
+            must_change_password: authed.must_change_password,
         },
         users: state.users.list().await,
         demo_password_active: state.users.demo_password_active().await,
@@ -736,8 +786,16 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         rollover: api_rollover(&state.config.rollover),
         default_amounts: (*state.default_amounts).clone(),
         health: ApiHealth {
-            mint_http: standby_aware(health_item(info_health.as_ref().map(|_| ())), standby),
-            management_rpc: standby_aware(health_item(rpc_health.as_ref().map(|_| ())), standby),
+            mint_http: standby_aware(
+                health_item(info_health.as_ref().map(|_| ())),
+                standby,
+                &state.config.mint_connection,
+            ),
+            management_rpc: management_rpc_health(
+                &state,
+                health_item(rpc_health.as_ref().map(|_| ())),
+                standby,
+            ),
             payment_backend: payment_backend_health(&state, standby),
         },
         keysets,
@@ -754,8 +812,46 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
             ok: consistency_issues.is_empty(),
             issues: consistency_issues,
         },
+        mint_connection: api_mint_connection(&state),
     })
     .into_response()
+}
+
+fn api_mint_connection(state: &WebState) -> ApiMintConnection {
+    use crate::config::MintConnection;
+    match &state.config.mint_connection {
+        MintConnection::Bundled => ApiMintConnection {
+            mode: "bundled",
+            http_url: None,
+            rpc_url: None,
+            advertised_grpc: None,
+            supply_audit: true,
+            management_rpc: true,
+            external_snippet: None,
+        },
+        MintConnection::Unset => ApiMintConnection {
+            mode: "unset",
+            http_url: None,
+            rpc_url: None,
+            advertised_grpc: None,
+            supply_audit: false,
+            management_rpc: false,
+            external_snippet: None,
+        },
+        MintConnection::External {
+            http_url,
+            rpc_url,
+            advertised_grpc,
+        } => ApiMintConnection {
+            mode: "external",
+            http_url: Some(http_url.clone()),
+            rpc_url: rpc_url.clone(),
+            advertised_grpc: Some(advertised_grpc.clone()),
+            supply_audit: false,
+            management_rpc: rpc_url.is_some(),
+            external_snippet: crate::config::render_external_mint_snippet(&state.config),
+        },
+    }
 }
 
 fn api_rollover(policy: &RolloverPolicy) -> ApiRollover {
@@ -843,20 +939,55 @@ fn payment_backend_health(state: &WebState, standby: bool) -> ApiHealthItem {
                 ),
             },
             standby,
+            &state.config.mint_connection,
         )
     }
 }
 
-/// Reframe an expected zero-unit outage as standby instead of an error.
-fn standby_aware(item: ApiHealthItem, standby: bool) -> ApiHealthItem {
-    if standby && !item.ok {
-        ApiHealthItem {
+/// The management-RPC tile: in external mode without an RPC URL the probe
+/// is not failing, the feature is off — say that instead of alarming.
+fn management_rpc_health(state: &WebState, item: ApiHealthItem, standby: bool) -> ApiHealthItem {
+    use crate::config::MintConnection;
+    if let MintConnection::External { rpc_url: None, .. } = &state.config.mint_connection {
+        return ApiHealthItem {
+            ok: true,
+            label: "Not configured".to_string(),
+            detail: "No management RPC for the external mint — keyset rotation and \
+                     quote-TTL sync are disabled"
+                .to_string(),
+        };
+    }
+    standby_aware(item, standby, &state.config.mint_connection)
+}
+
+/// Reframe an expected outage as standby instead of an error: zero units on
+/// an attached mint, or a processor-only install with nothing connected yet.
+fn standby_aware(
+    item: ApiHealthItem,
+    standby: bool,
+    connection: &crate::config::MintConnection,
+) -> ApiHealthItem {
+    use crate::config::MintConnection;
+    if item.ok {
+        return item;
+    }
+    match connection {
+        MintConnection::Unset => ApiHealthItem {
+            ok: false,
+            label: "Not connected".to_string(),
+            detail: "No mint is connected yet — choose one in the Mint tab".to_string(),
+        },
+        MintConnection::External { .. } if standby => ApiHealthItem {
+            ok: false,
+            label: "Standby".to_string(),
+            detail: "Add the first unit, then apply the config snippet to your mint".to_string(),
+        },
+        MintConnection::Bundled if standby => ApiHealthItem {
             ok: false,
             label: "Standby".to_string(),
             detail: "The mint starts once the first unit is added".to_string(),
-        }
-    } else {
-        item
+        },
+        _ => item,
     }
 }
 
@@ -923,8 +1054,12 @@ async fn api_login(
     }
     let sid = uuid::Uuid::new_v4().to_string();
     state.sessions.insert(&sid, &username).await;
-    let mut resp = Json(ApiMessage {
+    let mut resp = Json(LoginResponse {
         message: "signed_in",
+        // Tells the login page to go straight into the set-a-new-password
+        // step instead of the console.
+        must_change_password: state.users.must_change_password(&username).await,
+        password_min_length: PASSWORD_MIN_LENGTH,
     })
     .into_response();
     resp.headers_mut().insert(
@@ -1140,6 +1275,11 @@ struct AddUnitForm {
 #[derive(Deserialize)]
 struct UnitLifecycleForm {
     lifecycle: UnitLifecycle,
+    /// External mints only: retire even though the mint is unreachable and
+    /// the keyset-expiry guard cannot run. The console asks for this
+    /// explicitly so an operator is never locked into a dead external mint.
+    #[serde(default)]
+    force_unverified: bool,
 }
 
 #[derive(Deserialize)]
@@ -1225,8 +1365,29 @@ async fn api_set_unit_lifecycle(
         }
     }
     if form.lifecycle == UnitLifecycle::Retired {
+        let external = !state.config.mint_connection.is_bundled();
         let keysets = match state.mint_http.list_keysets().await {
             Ok(keysets) => keysets,
+            // An unreachable EXTERNAL mint must not hold the config hostage:
+            // with the explicit acknowledgement the expiry guard is skipped
+            // (the funded-withdrawal guard above already ran). The bundled
+            // mint is ours to reach — no override there.
+            Err(_) if external && form.force_unverified => {
+                tracing::warn!(
+                    "retiring {unit} without the keyset-expiry check: the external \
+                     mint is unreachable and the operator acknowledged it"
+                );
+                Vec::new()
+            }
+            Err(e) if external => {
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "mint unreachable: could not verify {unit} keyset expiry ({e}); \
+                         bring your mint back up, or retire anyway if it is gone for good"
+                    ),
+                )
+            }
             Err(e) => {
                 return api_error(
                     StatusCode::BAD_GATEWAY,
@@ -1291,6 +1452,69 @@ async fn api_update_identity(
         form.description_long.trim().to_string()
     };
     config.endpoints.public_url = public_url.to_string();
+    match persist_config_and_restart(&state, &config).await {
+        Ok(()) => Json(ApiMessage {
+            message: "restarting",
+        })
+        .into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct MintConnectionForm {
+    /// "bundled" or "external" — Unset is an install-time state, never a target.
+    mode: String,
+    #[serde(default)]
+    http_url: String,
+    #[serde(default)]
+    rpc_url: String,
+    #[serde(default)]
+    advertised_grpc: String,
+}
+
+async fn api_set_mint_connection(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(form): Json<MintConnectionForm>,
+) -> Response {
+    use crate::config::MintConnection;
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    let next = match form.mode.as_str() {
+        "bundled" => MintConnection::Bundled,
+        "external" => {
+            let rpc = form.rpc_url.trim().trim_end_matches('/');
+            MintConnection::External {
+                http_url: form.http_url.trim().trim_end_matches('/').to_string(),
+                rpc_url: (!rpc.is_empty()).then(|| rpc.to_string()),
+                advertised_grpc: form.advertised_grpc.trim().trim_end_matches('/').to_string(),
+            }
+        }
+        other => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                format!("mode must be \"bundled\" or \"external\", not {other:?}"),
+            )
+        }
+    };
+    let mut config = (*state.config).clone();
+    if config.mint_connection == next {
+        return Json(ApiMessage {
+            message: "unchanged",
+        })
+        .into_response();
+    }
+    if let Err(e) = config.set_mint_connection(next) {
+        return api_error(StatusCode::CONFLICT, e.to_string());
+    }
+    // Keep setup.json's endpoint record coherent immediately; the restarted
+    // process re-derives them anyway (env for bundled, config for external).
+    if let MintConnection::External { http_url, rpc_url, .. } = &config.mint_connection {
+        config.endpoints.mint_http_url = http_url.clone();
+        config.endpoints.mint_rpc_url = rpc_url.clone().unwrap_or_default();
+    }
     match persist_config_and_restart(&state, &config).await {
         Ok(()) => Json(ApiMessage {
             message: "restarting",
@@ -1488,7 +1712,9 @@ async fn api_me_password(
     headers: HeaderMap,
     Json(form): Json<PasswordChangeForm>,
 ) -> Response {
-    let authed = match require_api_auth(&state, &headers).await {
+    // Session-only: this is the one mutation a forced password change allows —
+    // it is how the account gets out of that state.
+    let authed = match require_api_session(&state, &headers).await {
         Ok(authed) => authed,
         Err(r) => return r,
     };
@@ -1608,9 +1834,11 @@ async fn authenticated(state: &WebState, headers: &HeaderMap) -> Option<Authed> 
         state.sessions.remove(&session_id).await;
         return None;
     }
+    let must_change_password = state.users.must_change_password(&username).await;
     Some(Authed {
         session_id,
         username,
+        must_change_password,
     })
 }
 

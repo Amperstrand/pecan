@@ -35,6 +35,23 @@ jobs:
       - run: cargo test --locked
         working-directory: processor
 
+  mintctl:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mintctl
+      - run: cargo build --locked
+        working-directory: mintctl
+      - run: cargo test --locked
+        working-directory: mintctl
+      - run: cargo clippy --all-targets --locked -- -D warnings
+        working-directory: mintctl
+
   # The cdk-mintd build depends on patches/cdk-managed-units.patch applying
   # cleanly to the pinned rev; catch drift without compiling all of cdk.
   patch-check:

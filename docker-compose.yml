@@ -25,6 +25,12 @@ services:
     command: ["cdk-branch-processor"]
     ports:
       - "${BIND_ADDR:-0.0.0.0}:${UI_PORT:-9090}:9090" # operator web UI
+      # Payment gRPC for an EXTERNAL cdk-mintd (processor-only installs).
+      # Loopback by default; a LAN mint needs GRPC_BIND_ADDR=0.0.0.0 in .env
+      # plus a firewall rule — the link carries no authentication. The host
+      # port defaults to 0 (ephemeral) so installs that predate the key never
+      # collide; the installer writes GRPC_PORT=50051 (or the chosen port).
+      - "${GRPC_BIND_ADDR:-127.0.0.1}:${GRPC_PORT:-0}:50051"
     environment:
       RUST_LOG: "info,h2=warn,hyper=warn,reqwest=warn"
       CDK_BRANCH_PROCESSOR_WORK_DIR: "/var/lib/cdk-branch-processor"
@@ -41,6 +47,10 @@ services:
       # First boot only (before users.json exists): seeds the admin account
       # with this password instead of the demo admin/admin credentials.
       CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:-}"
+      # First bootstrap only: "bundled" wires the compose-internal mint;
+      # "external-pending" (processor-only installs) waits for the operator
+      # to connect a mint in the console. Console-owned afterwards.
+      CDK_BRANCH_PROCESSOR_MINT_MODE: "${MINT_MODE:-bundled}"
     volumes:
       - processor-data:/var/lib/cdk-branch-processor
       - config-data:/var/lib/custom-unit-mint/config

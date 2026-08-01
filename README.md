@@ -7,35 +7,41 @@ through an operator web UI.
 
 ## Install
 
-On a Linux server (amd64 or arm64) with DNS prepared as below:
+On a Linux server (amd64 or arm64):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/zeugmaster/custom-unit-mint/main/install.sh | bash
 ```
 
-The installer asks one question — your domain — and does the rest: it offers
-to install Docker if missing, resolves the latest release, downloads that
-release's deployment files into `/opt/custom-unit-mint`, generates a strong
-admin password, pulls the prebuilt image from GHCR, starts the stack with
-automatic HTTPS (bundled Caddy + Let's Encrypt), and prints your login. No
-config file is ever edited by hand; everything else is managed from the
-running console.
+This bootstraps `mintctl` (a small static binary, checksum-verified) and
+starts a guided installer that checks the host first — Docker (offering to
+install it), Compose v2, port availability, your public IP — and then walks
+through the choices:
 
-Prepare DNS first (both records pointing at the server), and open ports 80
-and 443:
+- **What to set up** — the full stack (mint + processor, pre-wired), or the
+  processor only, connecting a `cdk-mintd` you already run later in the
+  console.
+- **How people reach it** — a domain with automatic HTTPS (bundled Caddy +
+  Let's Encrypt), running **behind your own reverse proxy** (auto-suggested
+  when something already listens on 80/443; you get ready-made Caddy/nginx
+  server blocks targeting loopback ports), or plain HTTP for a trusted LAN.
+  With a domain, the installer shows the exact DNS records needed and
+  live-checks them against public resolvers before starting, then waits for
+  the certificates to go live.
 
 | Record | Name | Serves |
 |---|---|---|
 | A/AAAA | `mint.example.org` | wallet-facing Cashu API |
 | A/AAAA | `console.mint.example.org` | operator console (default `console.<domain>`) |
 
-Skipping the domain question installs in plain-HTTP mode on ports 9090
-(console) and 8089 (mint) — fine for a trusted LAN or testing, not for the
-public internet (wallets generally refuse plain-HTTP mints).
+The install finishes with your sign-in: user `admin` and a generated
+five-word passphrase. It is valid for the first sign-in only — the console
+asks you to choose your own password before anything else.
 
-Non-interactive form and all flags (`--domain`, `--dir`, `--version`,
-`--ui-port`, …): see the header of [`install.sh`](install.sh) or run
-`mintctl help`.
+Every question has a flag twin for automation (`--yes --domain … --dir …
+--version … --processor-only --plain-http --behind-proxy`, …); run
+`mintctl install --help` for the full list. `mintctl domain` re-runs the
+access step later (plain HTTP → TLS, new domain, or behind-proxy).
 
 First steps in the console (there is no setup wizard — the first boot
 bootstraps a complete configuration with a generated recovery phrase, method
@@ -43,30 +49,31 @@ bootstraps a complete configuration with a generated recovery phrase, method
 
 1. **Units** tab — add the first unit. The mint stays in **Standby** until
    one exists (`cdk-mintd` needs at least one payment backend), then starts
-   and begins issuing ecash.
+   and begins issuing ecash. (Processor-only installs: connect your mint in
+   the **Mint** tab first — bundled or external.)
 2. **Mint** tab — reveal the 24-word recovery phrase and back it up. It is
    immutable and restores the mint's signing keys.
-3. **Access** tab — change the password if you did not keep the printed one,
-   and add teller accounts.
+3. **Access** tab — add teller accounts.
 
 ## Operations
 
-The installer drops `mintctl` into the install directory (and symlinks it to
-`/usr/local/bin/mintctl`):
+The installer drops the `mintctl` binary into the install directory (and
+symlinks it to `/usr/local/bin/mintctl`):
 
 | Command | What it does |
 |---|---|
 | `mintctl status` | containers, health, supervisor state, installed vs. latest version |
 | `mintctl logs [service]` | follow logs (`processor`, `mint`, `caddy`) |
-| `mintctl update [--version vX.Y.Z]` | upgrade to a release: fetches that release's deployment files and image together, restarts, verifies health |
+| `mintctl update [--version vX.Y.Z]` | upgrade to a release: fetches that release's deployment files, mintctl binary, and image together, restarts, verifies health |
+| `mintctl domain` | change how the mint is reached: domain + automatic HTTPS, behind your own proxy, or plain HTTP |
 | `mintctl backup [file]` | stop briefly, archive all three data volumes + `.env`, restart. **The archive contains the recovery seed — store it encrypted, off the server** |
 | `mintctl restore <file>` | replace all state with an archive's contents |
 | `mintctl start` / `stop` | bring the stack up / down (volumes kept) |
 | `mintctl uninstall [--purge]` | remove containers; `--purge` also deletes volumes and the install dir (destroys the mint — typed confirmation required) |
 
 Deeper procedures — restore drills, migrating servers, running a second
-instance, bringing your own reverse proxy, switching HTTP → TLS — live in
-[`docs/operations.md`](docs/operations.md).
+instance, bringing your own reverse proxy, connecting an external mint —
+live in [`docs/operations.md`](docs/operations.md).
 
 ## What The UI Does
 
