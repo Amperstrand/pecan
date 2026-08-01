@@ -124,9 +124,23 @@ export interface UserEntry {
   created_at: number
 }
 
+export type MintConnectionMode = "bundled" | "unset" | "external"
+
+export interface MintConnectionInfo {
+  mode: MintConnectionMode
+  http_url?: string | null
+  rpc_url?: string | null
+  advertised_grpc?: string | null
+  /** Feature availability in this mode, stated by the server. */
+  supply_audit: boolean
+  management_rpc: boolean
+  /** External mode: the mint.toml fragment for the operator's cdk-mintd. */
+  external_snippet?: string | null
+}
+
 export interface AppSnapshot {
   now: number
-  session: { username: string }
+  session: { username: string; must_change_password: boolean }
   mint: {
     name: string
     description: string
@@ -172,6 +186,9 @@ export interface AppSnapshot {
   users: UserEntry[]
   demo_password_active: boolean
   password_min_length: number
+  /** Image/build version stamped at build time; "dev" outside CI images. */
+  version: string
+  mint_connection: MintConnectionInfo
 }
 
 export class ApiRequestError extends Error {
@@ -221,8 +238,15 @@ function post<T>(path: string, body?: unknown) {
 
 // ---- auth ----
 
+export interface LoginResult {
+  message: string
+  /** Installer-provisioned password still active: the UI must collect a new one before the console. */
+  must_change_password: boolean
+  password_min_length: number
+}
+
 export function login(username: string, password: string) {
-  return post<{ message: string }>("/api/login", { username, password })
+  return post<LoginResult>("/api/login", { username, password })
 }
 
 export function logout() {
@@ -270,9 +294,15 @@ export function addUnit(input: {
   return post<{ message: string }>("/api/units", input) // restarts the stack
 }
 
-export function setUnitLifecycle(unit: string, lifecycle: UnitLifecycle) {
+export function setUnitLifecycle(
+  unit: string,
+  lifecycle: UnitLifecycle,
+  options: { forceUnverified?: boolean } = {},
+) {
   return post<{ message: string }>(`/api/units/${encodeURIComponent(unit)}/lifecycle`, {
     lifecycle,
+    // External mints only: retire although the mint is unreachable.
+    force_unverified: options.forceUnverified ?? false,
   }) // restarts the stack
 }
 
@@ -311,6 +341,23 @@ export function updateIdentity(input: {
 
 export function revealMnemonic(password: string) {
   return post<{ mnemonic: string }>("/api/settings/mnemonic", { password })
+}
+
+// ---- mint connection ----
+
+export function useBundledMint() {
+  return post<{ message: string }>("/api/settings/mint-connection", { mode: "bundled" }) // restarts
+}
+
+export function connectExternalMint(input: {
+  http_url: string
+  rpc_url: string
+  advertised_grpc: string
+}) {
+  return post<{ message: string }>("/api/settings/mint-connection", {
+    mode: "external",
+    ...input,
+  }) // restarts the stack
 }
 
 // ---- users ----

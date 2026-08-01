@@ -1,0 +1,270 @@
+//! Docker / docker compose plumbing and the installed-stack context.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use anyhow::{bail, Context as _, Result};
+
+use crate::ui::{self, Ui};
+
+pub const BIN_LINK: &str = "/usr/local/bin/mintctl";
+pub const DEFAULT_LINUX_DIR: &str = "/opt/custom-unit-mint";
+
+/// An existing installation (subcommand context): the directory holding
+/// docker-compose.yml, .env, and the mintctl binary itself.
+pub struct Stack {
+    pub install_dir: PathBuf,
+}
+
+impl Stack {
+    /// Resolve like the bash `require_install_dir`: MINTCTL_DIR wins, else the
+    /// directory this binary lives in (symlinks resolved); a .env must exist.
+    pub fn discover() -> Result<Self> {
+        let install_dir = if let Ok(dir) = std::env::var("MINTCTL_DIR") {
+            PathBuf::from(dir)
+        } else {
+            let exe = std::env::current_exe().context("resolve this binary's path")?;
+            let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+            exe.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        if !install_dir.join(".env").is_file() {
+            bail!(
+                "no installation found next to this binary ({}). \
+                 Set MINTCTL_DIR=/path/to/install or run the installer first.",
+                install_dir.display()
+            );
+        }
+        Ok(Self { install_dir })
+    }
+
+    pub fn env_path(&self) -> PathBuf {
+        self.install_dir.join(".env")
+    }
+
+    /// `docker compose` pinned to this install's compose file and project dir
+    /// (never auto-loads overrides), streaming output to the terminal.
+    pub fn compose(&self, args: &[&str]) -> Result<()> {
+        let status = self.compose_command(args).status().context("run docker compose")?;
+        if !status.success() {
+            bail!("docker compose {} failed", args.join(" "));
+        }
+        Ok(())
+    }
+
+    /// Buffered variant for the wizard: nothing prints unless it fails, in
+    /// which case the tail of the combined output rides along in the error.
+    pub fn compose_quiet(&self, args: &[&str]) -> Result<()> {
+        let output = self
+            .compose_command(args)
+            .output()
+            .context("run docker compose")?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        let tail: Vec<&str> = combined
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        bail!(
+            "docker compose {} failed:\n{}",
+            args.join(" "),
+            tail.join("\n")
+        );
+    }
+
+    /// Same, but capture stdout; failures return an empty string (callers use
+    /// this for best-effort probes like reading /run/mint-state).
+    pub fn compose_capture(&self, args: &[&str]) -> String {
+        self.compose_command(args)
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default()
+    }
+
+    fn compose_command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new("docker");
+        cmd.arg("compose")
+            .arg("-f")
+            .arg(self.install_dir.join("docker-compose.yml"))
+            .arg("--project-directory")
+            .arg(&self.install_dir)
+            .args(args);
+        cmd
+    }
+}
+
+/// Compose project name derived from the install dir (bash `project_name`).
+pub fn project_name(install_dir: &Path) -> String {
+    let base = install_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| "custom-unit-mint".into());
+    base.chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+pub fn docker_available() -> bool {
+    Command::new("docker")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn docker_daemon_running() -> bool {
+    Command::new("docker")
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn compose_v2_available() -> bool {
+    Command::new("docker")
+        .args(["compose", "version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn is_root() -> bool {
+    // Effective uid without a libc dependency: id -u is POSIX.
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+/// Port of bash `ensure_docker`, including the get.docker.com install offer.
+pub fn ensure_docker(ui: Ui) -> Result<()> {
+    if !docker_available() {
+        if cfg!(target_os = "macos") {
+            bail!(
+                "Docker is not installed. Install Docker Desktop from \
+                 https://docs.docker.com/desktop/ (or OrbStack) and re-run."
+            );
+        }
+        ui::say("Docker is not installed.");
+        if ui.confirm("Install Docker now via https://get.docker.com?") {
+            let status = Command::new("sh")
+                .args(["-c", "curl -fsSL https://get.docker.com | sh"])
+                .status()
+                .context("run the Docker convenience installer")?;
+            if !status.success() {
+                bail!("the Docker installer failed");
+            }
+        } else {
+            bail!("Docker is required. Install it and re-run.");
+        }
+    }
+    if !docker_daemon_running() {
+        if !is_root() && !cfg!(target_os = "macos") {
+            bail!(
+                "cannot talk to the Docker daemon. Re-run as root \
+                 (curl ... | sudo bash) or add this user to the docker group."
+            );
+        }
+        bail!("the Docker daemon is not responding. Is it running?");
+    }
+    if !compose_v2_available() {
+        bail!(
+            "Docker Compose v2 is required (the 'docker compose' plugin). \
+             Install docker-compose-plugin and re-run."
+        );
+    }
+    Ok(())
+}
+
+/// Poll the processor's /healthz until it answers (bash `wait_healthy`).
+pub fn wait_healthy(ui_port: u16, budget: Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    let url = format!("http://127.0.0.1:{ui_port}/healthz");
+    while std::time::Instant::now() < deadline {
+        if probe_healthz(&url).is_some() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    false
+}
+
+/// GET /healthz and return the reported build version, if any.
+pub fn probe_healthz(url: &str) -> Option<String> {
+    let resp = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .get(url)
+        .call()
+        .ok()?;
+    let body: serde_json::Value = resp.into_json().ok()?;
+    Some(
+        body.get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+pub fn detect_public_ip() -> Option<String> {
+    // ifconfig.me serves HTML to non-curl user agents — use the /ip endpoint
+    // and refuse anything that does not parse as an address.
+    for url in ["https://ifconfig.me/ip", "https://icanhazip.com"] {
+        let Ok(resp) = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .get(url)
+            .call()
+        else {
+            continue;
+        };
+        if let Ok(body) = resp.into_string() {
+            let ip = body.trim();
+            if ip.parse::<std::net::IpAddr>().is_ok() {
+                return Some(ip.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_name_sanitizes_like_bash() {
+        assert_eq!(project_name(Path::new("/opt/custom-unit-mint")), "custom-unit-mint");
+        assert_eq!(project_name(Path::new("/srv/My Mint!")), "my-mint-");
+        assert_eq!(project_name(Path::new("/x/under_score.dot")), "under_score-dot");
+    }
+}

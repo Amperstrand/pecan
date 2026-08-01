@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      # tsc -b inside the build script is the type gate.
+      - run: npm run build
+        working-directory: web
+
+  processor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: processor
+      - run: cargo build --locked
+        working-directory: processor
+      - run: cargo test --locked
+        working-directory: processor
+
+  mintctl:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mintctl
+      - run: cargo build --locked
+        working-directory: mintctl
+      - run: cargo test --locked
+        working-directory: mintctl
+      - run: cargo clippy --all-targets --locked -- -D warnings
+        working-directory: mintctl
+
+  # The cdk-mintd build depends on patches/cdk-managed-units.patch applying
+  # cleanly to the pinned rev; catch drift without compiling all of cdk.
+  patch-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch applies to the pinned cdk rev
+        run: |
+          CDK_REV=$(sed -n 's/^ARG CDK_REV=//p' Dockerfile)
+          test -n "$CDK_REV"
+          # Dockerfile and processor/Cargo.toml must pin the same rev — the
+          # payment-processor protocol check is strict-equality.
+          grep -q "rev = \"$CDK_REV\"" processor/Cargo.toml
+          git init -q cdk-pin-check
+          cd cdk-pin-check
+          git remote add origin https://github.com/cashubtc/cdk
+          git fetch --depth 1 origin "$CDK_REV"
+          git checkout -q FETCH_HEAD
+          git apply --check ../patches/cdk-managed-units.patch
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck install.sh scripts/*.sh
