@@ -4,7 +4,7 @@ Research for an upstream-contribution decision. Stock cdk pinned at rev
 `6132607495ae0741e412a63f2acc34e4ccddfc55` (tag `v0.17.2`, 2026-06-29), read from
 `/Users/dariolass/.cargo/git/checkouts/cdk-57defa95db2b7762/6132607` (below: `cdk:`).
 Upstream `main` checked at `77256eb0c335101ba085962044219d229551cb67` (2026-07-30).
-Downstream repo: `/Users/dariolass/Developer/cashu/custom-unit-mint` (below: `dw:`).
+Downstream repo: `/Users/dariolass/Developer/cashu/pecan` (below: `dw:`).
 Facts are cited `file:line`; anything not directly observed is marked **inference**.
 
 ---
