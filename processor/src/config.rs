@@ -1,48 +1,83 @@
-//! Persistent lifecycle configuration for the browser-managed mint.
+//! Processor configuration: one unit, one attached mint.
 //!
-//! First boot bootstraps a complete configuration from env + defaults (no
-//! setup wizard) with zero units: the mint runs but advertises nothing until
-//! the operator adds the first unit from the console. The recovery seed is
-//! immutable after provisioning. Units are managed through explicit lifecycle
-//! migrations so the generated mint configuration, payment backend, advertised
-//! NUT settings, and keysets stay aligned.
+//! The processor never writes mint configuration. `setup.json` holds only what
+//! this process needs to serve the "branch" payment method and to verify the
+//! attached mint: the unit, the mint's public URL, and how the mint reaches
+//! our gRPC endpoint (rendered into the config snippet the mint's operator
+//! applies by hand). First boot bootstraps an empty config with zero
+//! interaction; the operator completes setup in the console.
+//!
+//! Version 3 files (the managed-stack era: mnemonic, managed units, rollover
+//! policies, mint.toml rendering) are migrated on load. The old file — which
+//! contains the recovery mnemonic — is preserved verbatim next to the new one
+//! and never deleted; the seed belongs to whoever operates the mint now.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use bip39::{Language, Mnemonic};
 use bitcoin_hashes::{sha256, Hash};
 use serde::{Deserialize, Serialize};
 
 pub const PASSWORD_MIN_LENGTH: usize = 8;
 
-/// Lifetime of a wallet-created mint quote. Rendered into mint.toml, asserted
-/// over the management RPC on every boot, and mirrored by the processor's
-/// ticket expiry — a customer has this long to hand over cash at the counter.
-pub const MINT_QUOTE_TTL_SECS: u64 = 30 * 60;
+/// The cdk revision both sides of the payment-processor link must be built
+/// from (strict protocol-version equality, "4.0.0" at this rev). This is the
+/// head of PR cashubtc/cdk#2295; update together with processor/Cargo.toml
+/// and docker/mintd/Dockerfile when the PR merges or a release ships.
+pub const COMPATIBLE_CDK_REV: &str = "f3478044380d057d337174d7c6631ffc3159bf2c";
 
-/// Lifetime of a wallet-created melt quote (cdk's default of 60 s is far too
-/// tight for a counter visit). Same three uses as [`MINT_QUOTE_TTL_SECS`].
-pub const MELT_QUOTE_TTL_SECS: u64 = 15 * 60;
+/// Human-readable pointer shown wherever the rev alone would be cryptic.
+pub const COMPATIBLE_CDK_NOTE: &str =
+    "cashubtc/cdk PR #2295 (github.com/zeugmaster/cdk, branch feat/custom-incoming-quote-id-pubkey)";
+
+/// Bookkeeping lifetime for a melt ticket the wallet never funds. The mint's
+/// own melt-quote TTL governs the wallet; this only bounds how long an
+/// unfunded payout row stays in the teller's open list before the sweeper
+/// reclaims it.
+pub const MELT_TICKET_TTL_SECS: u64 = 15 * 60;
+
+/// Filename the pre-rescope (v3, "managed mint") setup.json is preserved
+/// under. It contains the recovery mnemonic of the formerly-bundled mint and
+/// must never be deleted by this software.
+pub const LEGACY_BACKUP_FILENAME: &str = "setup.json.v3-managed.bak";
 
 #[derive(Clone, Debug)]
 pub struct ConfigStore {
     app_config_path: PathBuf,
-    mint_config_path: PathBuf,
-    backup_path: Option<PathBuf>,
+    legacy_backup_target: PathBuf,
+    /// The managed-stack era mirrored setup.json into the work dir; it is
+    /// read (only) as a legacy migration source when setup.json is missing.
+    legacy_mirror_path: Option<PathBuf>,
+}
+
+/// What `ConfigStore::load` found on disk.
+pub enum LoadedConfig {
+    /// A current (v4) configuration.
+    Current(AppConfig),
+    /// A v3 managed-stack configuration, already converted. The caller must
+    /// seed the user store from `auth_hash` (if any) **before** calling
+    /// [`ConfigStore::finish_migration`], so a crash mid-migration never
+    /// leaves the operator password in zero places.
+    Legacy {
+        config: AppConfig,
+        auth_hash: Option<String>,
+        raw: Vec<u8>,
+    },
 }
 
 impl ConfigStore {
     pub fn new(config_dir: PathBuf) -> Self {
         Self {
             app_config_path: config_dir.join("setup.json"),
-            mint_config_path: config_dir.join("mint.toml"),
-            backup_path: None,
+            legacy_backup_target: config_dir.join(LEGACY_BACKUP_FILENAME),
+            legacy_mirror_path: None,
         }
     }
 
-    pub fn with_backup_path(mut self, backup_path: PathBuf) -> Self {
-        self.backup_path = Some(backup_path);
+    /// Register the managed-stack era mirror file (work dir) as an additional
+    /// legacy migration source.
+    pub fn with_legacy_mirror(mut self, path: PathBuf) -> Self {
+        self.legacy_mirror_path = Some(path);
         self
     }
 
@@ -50,444 +85,471 @@ impl ConfigStore {
         &self.app_config_path
     }
 
-    pub async fn load(&self) -> Result<Option<AppConfig>> {
-        if !tokio::fs::try_exists(&self.app_config_path)
-            .await
-            .unwrap_or(false)
-        {
-            let Some(backup_path) = self.backup_path.as_ref() else {
-                return Ok(None);
-            };
-            if !tokio::fs::try_exists(backup_path).await.unwrap_or(false) {
-                return Ok(None);
-            }
-            let raw = tokio::fs::read(backup_path)
-                .await
-                .with_context(|| format!("read recovery backup {}", backup_path.display()))?;
-            let mut config: AppConfig = serde_json::from_slice(&raw)
-                .with_context(|| format!("parse recovery backup {}", backup_path.display()))?;
-            config.upgrade();
-            config.validate_integrity()?;
-            self.save(&config).await?;
-            return Ok(Some(config));
+    pub async fn load(&self) -> Result<Option<LoadedConfig>> {
+        let mut sources = vec![self.app_config_path.clone()];
+        if let Some(mirror) = &self.legacy_mirror_path {
+            sources.push(mirror.clone());
         }
-        let raw = tokio::fs::read(&self.app_config_path)
-            .await
-            .with_context(|| format!("read {}", self.app_config_path.display()))?;
-        let mut config: AppConfig = serde_json::from_slice(&raw)
-            .with_context(|| format!("parse {}", self.app_config_path.display()))?;
-        config.upgrade();
-        config.validate_integrity()?;
-        Ok(Some(config))
+        for path in sources {
+            if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                continue;
+            }
+            let raw = tokio::fs::read(&path)
+                .await
+                .with_context(|| format!("read {}", path.display()))?;
+            return Ok(Some(parse_config(&raw).with_context(|| {
+                format!("parse {}", path.display())
+            })?));
+        }
+        Ok(None)
     }
 
     pub async fn save(&self, config: &AppConfig) -> Result<()> {
-        config.validate_integrity()?;
+        config.validate()?;
         if let Some(parent) = self.app_config_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         let bytes = serde_json::to_vec_pretty(config)?;
-        write_atomic(&self.app_config_path, &bytes).await?;
-        if let Some(backup_path) = self.backup_path.as_ref() {
-            if let Some(parent) = backup_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            write_atomic(backup_path, &bytes).await?;
-        }
-        Ok(())
+        write_atomic(&self.app_config_path, &bytes).await
     }
 
-    pub async fn write_mint_config(&self, config: &AppConfig) -> Result<()> {
-        if let Some(parent) = self.mint_config_path.parent() {
+    /// Preserve the legacy v3 file verbatim, then persist the converted
+    /// config. The backup is written first and never overwritten once it
+    /// exists — it holds the old mint's recovery mnemonic.
+    pub async fn finish_migration(&self, config: &AppConfig, legacy_raw: &[u8]) -> Result<()> {
+        if let Some(parent) = self.legacy_backup_target.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let rendered = render_mint_toml(config);
-        write_atomic(&self.mint_config_path, rendered.as_bytes()).await
+        if !tokio::fs::try_exists(&self.legacy_backup_target)
+            .await
+            .unwrap_or(false)
+        {
+            write_atomic(&self.legacy_backup_target, legacy_raw).await?;
+        }
+        self.save(config).await
     }
 }
+
+fn parse_config(raw: &[u8]) -> Result<LoadedConfig> {
+    #[derive(Deserialize)]
+    struct VersionProbe {
+        #[serde(default)]
+        version: u32,
+    }
+    let probe: VersionProbe = serde_json::from_slice(raw)?;
+    if probe.version >= 4 {
+        let config: AppConfig = serde_json::from_slice(raw)?;
+        config.validate()?;
+        return Ok(LoadedConfig::Current(config));
+    }
+    let legacy: LegacyConfig = serde_json::from_slice(raw)?;
+    let auth_hash = legacy.auth.as_ref().map(|auth| auth.password_hash.clone());
+    let config = legacy.into_v4();
+    config.validate()?;
+    Ok(LoadedConfig::Legacy {
+        config,
+        auth_hash,
+        raw: raw.to_vec(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Current configuration (v4)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub version: u32,
     pub configured_at: u64,
-    pub mint: MintSetup,
-    /// Deprecated single-operator password from the pre-user-database era.
-    /// Optional so old setup.json files still parse; main migrates the hash
-    /// into users.json as user "admin" and strips this field on save.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth: Option<AuthConfig>,
-    pub endpoints: EndpointConfig,
-    pub rollover: RolloverPolicy,
+    /// The custom payment method this processor implements. Constant in
+    /// practice; kept in the file so the value is visible and greppable.
+    pub method: String,
+    /// The single currency unit this install serves. Empty until the operator
+    /// completes setup. Must match the attached mint's `[[ln]] unit` and
+    /// `[grpc_processor].supported_units` entry byte-for-byte — guaranteed by
+    /// generating the config snippet from this value.
     #[serde(default)]
-    pub units: Vec<ManagedUnit>,
+    pub unit: String,
+    /// The attached mint's public HTTP base URL (the same URL wallets use).
+    /// Empty = not attached yet.
     #[serde(default)]
-    pub seed_fingerprint: String,
-    /// Which cdk-mintd this processor drives. Console-owned after install:
-    /// the installer only seeds the initial value (bundled vs not-yet-connected)
-    /// via env on first bootstrap. Absent in pre-existing setup.json files,
-    /// which were all bundled — hence the serde default.
+    pub mint_url: String,
+    /// This processor's gRPC endpoint as reachable from the mint,
+    /// `host[:port]` (no scheme). Only used to render the config snippet.
     #[serde(default)]
-    pub mint_connection: MintConnection,
+    pub advertised_grpc: String,
+    /// Set once the unit has been exercised (first successful self-test).
+    /// A locked unit is read-only in the console: issued ecash and quotes
+    /// reference it, so changing it is a documented manual file edit.
+    #[serde(default)]
+    pub unit_locked: bool,
+    /// True when this file was migrated from a v3 managed-stack config; the
+    /// console shows a one-time notice pointing at the preserved backup
+    /// (which contains the old mint's recovery mnemonic).
+    #[serde(default)]
+    pub migrated_from_managed: bool,
 }
 
-/// The mint attachment state machine.
-///
-/// `Bundled` keeps today's contract: the compose-internal mint container,
-/// with its URLs env-asserted every boot. `Unset` is a processor-only install
-/// before the operator decided. `External` points at an operator-run
-/// cdk-mintd on the same host or private network — the processor stops
-/// rendering `[[ln]]` blocks into the local mint.toml (the bundled supervisor
-/// then idles forever) and instead offers a config snippet for THEIR mintd.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Build the first-boot configuration: method fixed, nothing attached, no
+/// unit. The console guides the operator through the rest.
+pub fn bootstrap_config(configured_at: u64) -> AppConfig {
+    AppConfig {
+        version: 4,
+        configured_at,
+        method: "branch".to_string(),
+        unit: String::new(),
+        mint_url: String::new(),
+        advertised_grpc: String::new(),
+        unit_locked: false,
+        migrated_from_managed: false,
+    }
+}
+
+impl AppConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.method.trim().is_empty() {
+            bail!("payment method is required");
+        }
+        if !self.unit.is_empty() {
+            validate_slug("unit", &self.unit)?;
+        }
+        if !self.mint_url.is_empty() {
+            validate_http_url("mint URL", &self.mint_url)?;
+        }
+        if !self.advertised_grpc.is_empty() {
+            validate_grpc_endpoint(&self.advertised_grpc)?;
+        }
+        Ok(())
+    }
+
+    pub fn is_attached(&self) -> bool {
+        !self.mint_url.is_empty()
+    }
+
+    pub fn setup_complete(&self) -> bool {
+        !self.unit.is_empty() && self.is_attached()
+    }
+
+    /// Apply the console's attachment form. `unit` is `None` to keep the
+    /// current unit. Changing the unit is refused once it is locked; the
+    /// caller additionally guards on existing tickets.
+    pub fn set_attachment(
+        &mut self,
+        unit: Option<&str>,
+        mint_url: &str,
+        advertised_grpc: &str,
+    ) -> Result<()> {
+        if let Some(unit) = unit {
+            let unit = unit.trim().to_ascii_lowercase();
+            if unit != self.unit {
+                if self.unit_locked {
+                    bail!(
+                        "the unit is locked: ecash and quotes reference {}; \
+                         see the operations guide before changing it",
+                        self.unit
+                    );
+                }
+                validate_slug("unit", &unit)?;
+                self.unit = unit;
+            }
+        }
+        let mint_url = mint_url.trim().trim_end_matches('/');
+        if !mint_url.is_empty() {
+            validate_http_url("mint URL", mint_url)?;
+        }
+        self.mint_url = mint_url.to_string();
+        let advertised = normalize_grpc_endpoint(advertised_grpc)?;
+        self.advertised_grpc = advertised;
+        Ok(())
+    }
+
+    pub fn lock_unit(&mut self) {
+        if !self.unit.is_empty() {
+            self.unit_locked = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The mint-side config snippet
+// ---------------------------------------------------------------------------
+
+/// Render the `mint.toml` fragment the mint's operator merges into their
+/// cdk-mintd config. `grpc_tls` reflects whether THIS processor serves TLS
+/// (CDK_BRANCH_PROCESSOR_TLS_DIR): it decides between `tls_dir` and
+/// `allow_insecure` on the mint side. Returns `None` until the unit and the
+/// advertised gRPC endpoint are configured.
+pub fn render_mint_snippet(config: &AppConfig, grpc_tls: bool) -> Option<String> {
+    if config.unit.is_empty() || config.advertised_grpc.is_empty() {
+        return None;
+    }
+    let (host, port) = split_host_port(&config.advertised_grpc);
+    let transport = if grpc_tls {
+        "# This processor serves TLS: point tls_dir at a directory containing\n\
+         # ca.pem plus a client certificate/key issued by that CA.\n\
+         tls_dir = \"/path/to/processor-tls\""
+            .to_string()
+    } else {
+        "# The gRPC link is plaintext — keep it on the same host or a private\n\
+         # network, never the open internet.\n\
+         allow_insecure = true"
+            .to_string()
+    };
+    Some(format!(
+        r#"# Branch settlement backend — merge into your cdk-mintd mint.toml,
+# then restart your mintd.
+#
+# Requires cdk-mintd built from cdk rev {rev}
+# ({note}) — the payment-processor
+# protocol check is strict, so other builds are rejected at connect time.
+
+[[ln]]
+ln_backend = "grpcprocessor"
+unit = "{unit}"
+min_mint = 1
+max_mint = 500000
+min_melt = 1
+max_melt = 500000
+
+[grpc_processor]
+supported_units = ["{unit}"]
+address = "{host}"
+port = {port}
+{transport}
+
+# Fresh mint databases only — seeds counter-friendly quote lifetimes.
+# (cdk's default melt TTL of 60 s is too short for a counter visit; on an
+# existing database, adjust it over your management RPC instead.)
+[info.quote_ttl]
+mint_ttl = 1800
+melt_ttl = 900
+"#,
+        rev = COMPATIBLE_CDK_REV,
+        note = COMPATIBLE_CDK_NOTE,
+        unit = toml_escape(&config.unit),
+        host = toml_escape(&host),
+        port = port,
+        transport = transport,
+    ))
+}
+
+/// `host[:port]` → (`host`, port), defaulting the port to 50051. Any scheme
+/// prefix was already stripped by [`normalize_grpc_endpoint`].
+fn split_host_port(endpoint: &str) -> (String, u16) {
+    if let Some((host, port)) = endpoint.rsplit_once(':') {
+        if let Ok(port) = port.parse::<u16>() {
+            return (host.to_string(), port);
+        }
+    }
+    (endpoint.to_string(), 50051)
+}
+
+/// Accept `host`, `host:port`, or a full `http(s)://host:port`, and store the
+/// bare `host[:port]` form (cdk-mintd's `[grpc_processor].address` is a host,
+/// not a URL).
+fn normalize_grpc_endpoint(raw: &str) -> Result<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let bare = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .unwrap_or(trimmed);
+    validate_grpc_endpoint(bare)?;
+    Ok(bare.to_string())
+}
+
+fn validate_grpc_endpoint(endpoint: &str) -> Result<()> {
+    if endpoint.is_empty() {
+        bail!("processor gRPC endpoint is required");
+    }
+    if endpoint.contains(char::is_whitespace) || endpoint.contains('/') {
+        bail!("processor gRPC endpoint must be host or host:port, e.g. 10.0.0.5:50051");
+    }
+    if let Some((host, port)) = endpoint.rsplit_once(':') {
+        if host.is_empty() {
+            bail!("processor gRPC endpoint needs a host, e.g. 10.0.0.5:50051");
+        }
+        port.parse::<u16>()
+            .map_err(|_| anyhow!("processor gRPC port must be a number, got {port:?}"))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Legacy (v3, managed stack) migration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct LegacyConfig {
+    #[serde(default)]
+    configured_at: u64,
+    mint: LegacyMintSetup,
+    #[serde(default)]
+    auth: Option<LegacyAuthConfig>,
+    #[serde(default)]
+    endpoints: Option<LegacyEndpoints>,
+    #[serde(default)]
+    units: Vec<LegacyUnit>,
+    #[serde(default)]
+    mint_connection: LegacyConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyMintSetup {
+    #[serde(default)]
+    unit: String,
+    #[serde(default = "default_method")]
+    method: String,
+    // The mnemonic is deliberately not deserialized: it stays only in the
+    // preserved raw bytes of the old file.
+}
+
+fn default_method() -> String {
+    "branch".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyAuthConfig {
+    password_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyEndpoints {
+    #[serde(default)]
+    public_url: String,
+    #[serde(default)]
+    processor_grpc_addr: String,
+    #[serde(default)]
+    processor_grpc_port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyUnit {
+    unit: String,
+    #[serde(default)]
+    lifecycle: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
-pub enum MintConnection {
+enum LegacyConnection {
     #[default]
     Bundled,
     Unset,
     External {
-        /// The mint's public HTTP API, as reachable from this processor.
+        #[serde(default)]
         http_url: String,
-        /// The mint's management RPC. Optional: without it, keyset rotation
-        /// and the quote-TTL sync are disabled (honestly, in the UI).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rpc_url: Option<String>,
-        /// THIS processor's payment gRPC endpoint as reachable from the mint
-        /// (e.g. `http://10.0.0.5:50051`) — rendered into their snippet.
+        #[serde(default)]
         advertised_grpc: String,
     },
 }
 
-impl MintConnection {
-    pub fn is_bundled(&self) -> bool {
-        matches!(self, MintConnection::Bundled)
-    }
-
-    /// Whether a management RPC is available in this mode.
-    pub fn has_management_rpc(&self) -> bool {
-        match self {
-            MintConnection::Bundled => true,
-            MintConnection::Unset => false,
-            MintConnection::External { rpc_url, .. } => rpc_url.is_some(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MintSetup {
-    pub name: String,
-    pub description: String,
-    pub description_long: String,
-    pub unit: String,
-    pub method: String,
-    pub mnemonic: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthConfig {
-    pub password_hash: String,
-}
-
-/// `public_url` is operator-owned: persisted, editable from the console.
-/// Everything else is deployment topology owned by the environment
-/// (compose/installer): re-asserted from env on every boot via
-/// [`AppConfig::apply_infra_endpoints`] and persisted only as a record of the
-/// last boot, so older binaries can still parse the file after a rollback.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EndpointConfig {
-    pub public_url: String,
-    pub mint_http_url: String,
-    pub mint_rpc_url: String,
-    pub processor_grpc_addr: String,
-    pub processor_grpc_port: u16,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RolloverPolicy {
-    pub enabled: bool,
-    pub keyset_lifetime_days: u64,
-    pub rotate_before_expiry_days: u64,
-    pub input_fee_ppk: u64,
-    pub amounts: Vec<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UnitLifecycle {
-    Active,
-    RedemptionOnly,
-    Retired,
-}
-
-impl UnitLifecycle {
-    pub fn can_mint(self) -> bool {
-        self == Self::Active
-    }
-
-    pub fn can_melt(self) -> bool {
-        matches!(self, Self::Active | Self::RedemptionOnly)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManagedUnit {
-    pub unit: String,
-    pub lifecycle: UnitLifecycle,
-    pub configured_at: u64,
-    pub rollover: RolloverPolicy,
-}
-
-/// The deployment-topology subset of [`EndpointConfig`], sourced from env
-/// vars (all of which have defaults) in main and applied on every boot.
-#[derive(Debug, Clone)]
-pub struct InfraEndpoints {
-    pub mint_http_url: String,
-    pub mint_rpc_url: String,
-    pub processor_grpc_addr: String,
-    pub processor_grpc_port: u16,
-}
-
-/// Endpoint values baked into a bootstrapped config, sourced from env vars
-/// (all of which have defaults) in main.
-#[derive(Debug, Clone)]
-pub struct BootstrapEndpoints {
-    pub public_url: String,
-    pub mint_http_url: String,
-    pub mint_rpc_url: String,
-    pub processor_grpc_addr: String,
-    pub processor_grpc_port: u16,
-}
-
-/// Build a complete first-run configuration with generated defaults — a fresh
-/// recovery mnemonic, the "branch" method, the stock rollover policy, and no
-/// units. Replaces the browser setup wizard: the stack comes up working with
-/// zero interaction, the mint advertises nothing until the operator adds the
-/// first unit from the console, and everything here except the recovery seed
-/// stays editable from the operator UI.
-pub fn bootstrap_config(
-    endpoints: BootstrapEndpoints,
-    mint_connection: MintConnection,
-    configured_at: u64,
-) -> Result<AppConfig> {
-    let mnemonic = generate_mnemonic()?;
-    let rollover = RolloverPolicy {
-        enabled: true,
-        keyset_lifetime_days: 90,
-        rotate_before_expiry_days: 14,
-        input_fee_ppk: 0,
-        amounts: default_amounts(),
-    };
-    let seed_fingerprint = mnemonic_fingerprint(&mnemonic);
-    let config = AppConfig {
-        version: 3,
-        configured_at,
-        mint: MintSetup {
-            name: "Custom Unit Mint".to_string(),
-            description: "Cashu mint for a custom unit with branch settlement.".to_string(),
-            description_long: "A stock cdk-mintd instance managed from the browser UI. Mint and melt quotes settle manually through the branch operator workflow.".to_string(),
-            // The primary unit is claimed by the first unit the operator adds.
-            unit: String::new(),
-            method: "branch".to_string(),
-            mnemonic,
-        },
-        auth: None,
-        endpoints: EndpointConfig {
-            public_url: endpoints
-                .public_url
-                .trim()
-                .trim_end_matches('/')
-                .to_string(),
-            mint_http_url: endpoints.mint_http_url,
-            mint_rpc_url: endpoints.mint_rpc_url,
-            processor_grpc_addr: endpoints.processor_grpc_addr,
-            processor_grpc_port: endpoints.processor_grpc_port,
-        },
-        rollover: rollover.clone(),
-        units: Vec::new(),
-        seed_fingerprint,
-        mint_connection,
-    };
-    config.validate_integrity()?;
-    Ok(config)
-}
-
-impl AppConfig {
-    /// Overwrite the deployment-topology endpoints from the environment.
-    /// Runs on every boot, before the config is saved and mint.toml is
-    /// rendered: env (with its documented defaults) always wins, so moving
-    /// the stack or changing a port never requires editing setup.json — and
-    /// the gRPC port advertised to the mint stays in lockstep with the port
-    /// this process actually binds. `public_url` is deliberately untouched
-    /// (operator-owned, edited in the console).
-    ///
-    /// Mode nuance: with an External mint the mint URLs are console-owned
-    /// (the operator typed them), so only OUR gRPC endpoint is asserted.
-    /// Unset keeps the env values — they point at the idle bundled container,
-    /// whose refused connections are what the "not connected" tiles report.
-    pub fn apply_infra_endpoints(&mut self, infra: &InfraEndpoints) {
-        match &self.mint_connection {
-            MintConnection::Bundled | MintConnection::Unset => {
-                self.endpoints.mint_http_url = infra.mint_http_url.clone();
-                self.endpoints.mint_rpc_url = infra.mint_rpc_url.clone();
-            }
-            MintConnection::External { http_url, rpc_url, .. } => {
-                self.endpoints.mint_http_url = http_url.clone();
-                self.endpoints.mint_rpc_url = rpc_url.clone().unwrap_or_default();
-            }
-        }
-        self.endpoints.processor_grpc_addr = infra.processor_grpc_addr.clone();
-        self.endpoints.processor_grpc_port = infra.processor_grpc_port;
-    }
-
-    /// Switch the mint attachment. Guard: once real units exist under one
-    /// attached mint, silently pointing the processor at a different mint
-    /// would strand every issued proof (different DB, different keysets) —
-    /// so a change between attached modes requires all units retired first.
-    /// Leaving `Unset` is always allowed; that is the connect flow.
-    pub fn set_mint_connection(&mut self, next: MintConnection) -> Result<()> {
-        if let MintConnection::External {
-            http_url,
-            rpc_url,
-            advertised_grpc,
-        } = &next
-        {
-            validate_http_url("mint URL", http_url)?;
-            if let Some(rpc) = rpc_url {
-                validate_http_url("management RPC URL", rpc)?;
-            }
-            validate_http_url("processor gRPC endpoint", advertised_grpc)?;
-        }
-        let attached_change = !matches!(self.mint_connection, MintConnection::Unset)
-            && self.mint_connection != next;
-        let live_units = self
+impl LegacyConfig {
+    fn into_v4(self) -> AppConfig {
+        // Primary unit first; otherwise the first unit that was not retired.
+        let unit = if !self.mint.unit.is_empty() {
+            self.mint.unit.clone()
+        } else {
+            self.units
+                .iter()
+                .find(|unit| unit.lifecycle.as_deref() != Some("retired"))
+                .map(|unit| unit.unit.clone())
+                .unwrap_or_default()
+        };
+        let dropped: Vec<&str> = self
             .units
             .iter()
-            .any(|unit| unit.lifecycle != UnitLifecycle::Retired);
-        if attached_change && live_units {
-            bail!(
-                "units are configured against the current mint — retire them first; \
-                 switching mints would strand their issued ecash"
+            .map(|u| u.unit.as_str())
+            .filter(|u| *u != unit)
+            .collect();
+        if !dropped.is_empty() {
+            tracing::warn!(
+                "migrating multi-unit managed config: keeping {unit:?}, dropping units {:?} \
+                 (their historical tickets remain; new quotes are single-unit)",
+                dropped
             );
         }
-        self.mint_connection = next;
-        Ok(())
-    }
-
-    pub fn upgrade(&mut self) {
-        // Wizard-era configs predate the units list but always carried a
-        // primary unit; migrate it. Bootstrapped configs with no units yet
-        // have an empty primary, which is a valid state, not a legacy one.
-        if self.units.is_empty() && !self.mint.unit.is_empty() {
-            self.units.push(ManagedUnit {
-                unit: self.mint.unit.clone(),
-                lifecycle: UnitLifecycle::Active,
-                configured_at: self.configured_at,
-                rollover: self.rollover.clone(),
-            });
-        }
-        if self.seed_fingerprint.is_empty() {
-            self.seed_fingerprint = mnemonic_fingerprint(&self.mint.mnemonic);
-        }
-        self.version = 3;
-    }
-
-    pub fn validate_integrity(&self) -> Result<()> {
-        let actual = mnemonic_fingerprint(&self.mint.mnemonic);
-        if self.seed_fingerprint != actual {
-            bail!(
-                "configured recovery seed does not match the immutable seed fingerprint; refusing to continue"
-            );
-        }
-        for managed in &self.units {
-            validate_slug("unit", &managed.unit)?;
-            validate_rollover(&managed.rollover)?;
-        }
-        Ok(())
-    }
-
-    pub fn managed_unit(&self, unit: &str) -> Option<&ManagedUnit> {
-        self.units.iter().find(|candidate| candidate.unit == unit)
-    }
-
-    pub fn add_unit(
-        &mut self,
-        unit: &str,
-        rollover: RolloverPolicy,
-        configured_at: u64,
-    ) -> Result<()> {
-        validate_slug("unit", unit)?;
-        validate_rollover(&rollover)?;
-        let unit = unit.trim().to_ascii_lowercase();
-        if self.managed_unit(&unit).is_some() {
-            bail!("unit {unit} is already managed");
-        }
-        // The first unit ever added claims the primary slot (a fresh install
-        // bootstraps with none), putting the config in the same shape the
-        // wizard used to produce. The legacy top-level policy mirrors it.
-        if self.mint.unit.is_empty() {
-            self.mint.unit = unit.clone();
-            self.rollover = rollover.clone();
-        }
-        self.units.push(ManagedUnit {
+        let (mint_url, advertised_grpc) = match &self.mint_connection {
+            LegacyConnection::External {
+                http_url,
+                advertised_grpc,
+            } => (
+                http_url.clone(),
+                normalize_grpc_endpoint(advertised_grpc).unwrap_or_default(),
+            ),
+            LegacyConnection::Bundled => {
+                let endpoints = self.endpoints.as_ref();
+                let mint_url = endpoints
+                    .map(|e| e.public_url.trim_end_matches('/').to_string())
+                    .unwrap_or_default();
+                let advertised = endpoints
+                    .map(|e| {
+                        let port = e.processor_grpc_port.unwrap_or(50051);
+                        format!("{}:{port}", e.processor_grpc_addr)
+                    })
+                    .and_then(|endpoint| normalize_grpc_endpoint(&endpoint).ok())
+                    .unwrap_or_default();
+                (mint_url, advertised)
+            }
+            LegacyConnection::Unset => (String::new(), String::new()),
+        };
+        AppConfig {
+            version: 4,
+            configured_at: self.configured_at,
+            method: self.mint.method,
+            // A managed install with a unit has (or had) ecash under it:
+            // lock conservatively so the migrated console cannot re-point it.
+            unit_locked: !unit.is_empty(),
             unit,
-            lifecycle: UnitLifecycle::Active,
-            configured_at,
-            rollover,
-        });
-        self.units.sort_by(|a, b| a.unit.cmp(&b.unit));
-        Ok(())
-    }
-
-    pub fn set_unit_lifecycle(&mut self, unit: &str, lifecycle: UnitLifecycle) -> Result<()> {
-        let managed = self
-            .units
-            .iter_mut()
-            .find(|candidate| candidate.unit == unit)
-            .ok_or_else(|| anyhow!("unit {unit} is not managed"))?;
-        managed.lifecycle = lifecycle;
-        Ok(())
-    }
-
-    /// Replace an existing unit's rollover policy. Future rotations (manual and
-    /// automatic) use the new policy after the restart that follows.
-    pub fn set_unit_rollover(&mut self, unit: &str, rollover: RolloverPolicy) -> Result<()> {
-        validate_rollover(&rollover)?;
-        let managed = self
-            .units
-            .iter_mut()
-            .find(|candidate| candidate.unit == unit)
-            .ok_or_else(|| anyhow!("unit {unit} is not managed"))?;
-        managed.rollover = rollover.clone();
-        if self.mint.unit == unit {
-            // The legacy top-level policy mirrors the primary unit.
-            self.rollover = rollover;
+            mint_url,
+            advertised_grpc,
+            migrated_from_managed: true,
         }
-        Ok(())
     }
 }
 
-pub fn default_amounts() -> Vec<u64> {
-    (0..32).map(|i| 2u64.pow(i)).collect()
-}
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
 
-pub fn generate_mnemonic() -> Result<String> {
-    let mnemonic = Mnemonic::generate_in(Language::English, 24)?;
-    Ok(mnemonic.to_string())
-}
-
-pub fn parse_amounts(raw: &str) -> Result<Vec<u64>> {
-    let mut amounts: Vec<u64> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<u64>().map_err(|e| anyhow!("{s}: {e}")))
-        .collect::<Result<_>>()?;
-    amounts.sort_unstable();
-    amounts.dedup();
-    if amounts.is_empty() {
-        bail!("at least one amount is required");
+fn validate_slug(label: &str, value: &str) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{label} is required");
     }
-    Ok(amounts)
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        bail!("{label} may only contain lowercase letters, digits, hyphen, and underscore");
+    }
+    Ok(())
 }
+
+fn validate_http_url(label: &str, url: &str) -> Result<()> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or_else(|| anyhow!("{label} must start with http:// or https://"))?;
+    if rest.is_empty() || rest.starts_with('/') {
+        bail!("{label} needs a host, e.g. https://mint.example.org");
+    }
+    if url.contains(char::is_whitespace) {
+        bail!("{label} must not contain whitespace");
+    }
+    Ok(())
+}
+
+fn toml_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+// ---------------------------------------------------------------------------
+// Passwords (unchanged from the managed era)
+// ---------------------------------------------------------------------------
 
 /// Length is the only strength requirement — no composition rules.
 pub fn validate_operator_password(password: &str, password_confirm: &str) -> Result<()> {
@@ -550,234 +612,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn mnemonic_fingerprint(mnemonic: &str) -> String {
-    let digest = sha256::Hash::hash(mnemonic.as_bytes()).to_string();
-    format!("sha256:{}", &digest[..16])
-}
-
-fn validate_rollover(rollover: &RolloverPolicy) -> Result<()> {
-    if rollover.keyset_lifetime_days < 2 {
-        bail!("keyset lifetime must be at least 2 days");
-    }
-    if rollover.rotate_before_expiry_days == 0
-        || rollover.rotate_before_expiry_days >= rollover.keyset_lifetime_days
-    {
-        bail!("rotate-before-expiry must be shorter than the keyset lifetime");
-    }
-    if rollover.amounts.is_empty() || rollover.amounts.contains(&0) {
-        bail!("denomination amounts must be greater than zero");
-    }
-    Ok(())
-}
-
-fn validate_slug(label: &str, value: &str) -> Result<()> {
-    let value = value.trim();
-    if value.is_empty() {
-        bail!("{label} is required");
-    }
-    if !value
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-    {
-        bail!("{label} may only contain lowercase letters, digits, hyphen, and underscore");
-    }
-    Ok(())
-}
-
-/// The `[[ln]]` + `[grpc_processor.unit_keysets.*]` blocks and the
-/// supported_units list for every non-retired unit — the payment-backend
-/// wiring shared by the local mint.toml (bundled mode) and the config
-/// snippet handed to an external mint's operator.
-fn unit_backend_blocks(config: &AppConfig) -> (String, Vec<String>, String) {
-    let mut ln_entries = String::new();
-    let mut supported_units = Vec::new();
-    let mut unit_keysets = String::new();
-    for managed in config
-        .units
-        .iter()
-        .filter(|unit| unit.lifecycle != UnitLifecycle::Retired)
-    {
-        supported_units.push(format!("\"{}\"", toml_escape(&managed.unit)));
-        let max_mint = if managed.lifecycle.can_mint() {
-            500_000
-        } else {
-            0
-        };
-        ln_entries.push_str(&format!(
-            r#"
-[[ln]]
-ln_backend = "grpcprocessor"
-unit = "{unit}"
-min_mint = {min_mint}
-max_mint = {max_mint}
-min_melt = 1
-max_melt = 500000
-"#,
-            unit = toml_escape(&managed.unit),
-            min_mint = if max_mint == 0 { 0 } else { 1 },
-            max_mint = max_mint,
-        ));
-        let amounts = managed
-            .rollover
-            .amounts
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let initial_final_expiry = managed
-            .configured_at
-            .saturating_add(managed.rollover.keyset_lifetime_days.saturating_mul(86_400));
-        unit_keysets.push_str(&format!(
-            r#"
-[grpc_processor.unit_keysets.{unit}]
-amounts = [{amounts}]
-input_fee_ppk = {input_fee_ppk}
-initial_final_expiry = {initial_final_expiry}
-"#,
-            unit = toml_escape(&managed.unit),
-            amounts = amounts,
-            input_fee_ppk = managed.rollover.input_fee_ppk,
-            initial_final_expiry = initial_final_expiry,
-        ));
-    }
-    (ln_entries, supported_units, unit_keysets)
-}
-
-/// The config-snippet for an operator-run external cdk-mintd: the payment
-/// backend blocks pointing back at THIS processor. Only meaningful in
-/// External mode.
-pub fn render_external_mint_snippet(config: &AppConfig) -> Option<String> {
-    let MintConnection::External { advertised_grpc, .. } = &config.mint_connection else {
-        return None;
-    };
-    let (addr, port) = split_grpc_endpoint(advertised_grpc);
-    let (ln_entries, supported_units, unit_keysets) = unit_backend_blocks(config);
-    let body = if supported_units.is_empty() {
-        "# No units are configured yet — add the first unit in the console,\n\
-         # then apply the updated snippet."
-            .to_string()
-    } else {
-        format!(
-            "{ln_entries}\n[grpc_processor]\nsupported_units = [{supported}]\naddr = \"{addr}\"\nport = {port}\n{unit_keysets}",
-            supported = supported_units.join(", "),
-            addr = toml_escape(&addr),
-        )
-    };
-    Some(format!(
-        "# Custom Unit Mint — payment backend for your cdk-mintd.\n\
-         # Merge into your mint.toml, replacing any existing [[ln]] and\n\
-         # [grpc_processor] blocks, then restart cdk-mintd.\n\
-         #\n\
-         # Requirements: cdk-mintd built from the SAME pinned cdk revision as\n\
-         # this processor, with patches/cdk-managed-units.patch applied (the\n\
-         # published custom-unit-mint image is exactly that build). The gRPC\n\
-         # link carries no authentication — keep it on a private network.\n\
-         {body}\n"
-    ))
-}
-
-/// `http://host:port` → (`http://host`, port). Ports default to 50051.
-fn split_grpc_endpoint(endpoint: &str) -> (String, u16) {
-    let trimmed = endpoint.trim_end_matches('/');
-    if let Some((addr, port)) = trimmed.rsplit_once(':') {
-        if let Ok(port) = port.parse::<u16>() {
-            return (addr.to_string(), port);
-        }
-    }
-    (trimmed.to_string(), 50051)
-}
-
-fn render_mint_toml(config: &AppConfig) -> String {
-    // A non-bundled connection renders NO [[ln]] blocks: the bundled
-    // supervisor gates cdk-mintd on `[[ln]]` presence, so the idle mint
-    // container stays in standby forever instead of fighting the operator's
-    // external mint over the same units.
-    let (ln_entries, supported_units, unit_keysets) = if config.mint_connection.is_bundled() {
-        unit_backend_blocks(config)
-    } else {
-        (String::new(), Vec::new(), String::new())
-    };
-
-    format!(
-        r#"# Generated by the Custom Unit Mint setup UI.
-# Do not edit this file directly while the lifecycle UI manages the mint.
-
-[info]
-url = "{public_url}"
-listen_host = "0.0.0.0"
-listen_port = 8089
-mnemonic = "{mnemonic}"
-
-[info.http_cache]
-backend = "memory"
-ttl = 60
-tti = 60
-
-# Seeds a fresh mint database; existing databases are updated over the
-# management RPC at processor boot (QuoteTTL is DB-persisted).
-[info.quote_ttl]
-mint_ttl = {mint_quote_ttl}
-melt_ttl = {melt_quote_ttl}
-
-[mint_info]
-name = "{name}"
-description = "{description}"
-description_long = "{description_long}"
-
-[database]
-engine = "sqlite"
-
-{ln_entries}
-
-[grpc_processor]
-supported_units = [{supported_units}]
-addr = "{processor_grpc_addr}"
-port = {processor_grpc_port}
-{unit_keysets}
-
-[mint_management_rpc]
-enabled = true
-address = "0.0.0.0"
-port = 8091
-
-[limits]
-max_inputs = 1000
-max_outputs = 1000
-"#,
-        public_url = toml_escape(&config.endpoints.public_url),
-        mnemonic = toml_escape(&config.mint.mnemonic),
-        mint_quote_ttl = MINT_QUOTE_TTL_SECS,
-        melt_quote_ttl = MELT_QUOTE_TTL_SECS,
-        name = toml_escape(&config.mint.name),
-        description = toml_escape(&config.mint.description),
-        description_long = toml_escape(&config.mint.description_long),
-        ln_entries = ln_entries,
-        supported_units = supported_units.join(", "),
-        processor_grpc_addr = toml_escape(&config.endpoints.processor_grpc_addr),
-        processor_grpc_port = config.endpoints.processor_grpc_port,
-        unit_keysets = unit_keysets,
-    )
-}
-
-fn toml_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn validate_http_url(label: &str, url: &str) -> Result<()> {
-    let url = url.trim();
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .ok_or_else(|| anyhow!("{label} must start with http:// or https://"))?;
-    if rest.is_empty() || rest.starts_with('/') {
-        bail!("{label} needs a host, e.g. http://10.0.0.5:8089");
-    }
-    if url.contains(char::is_whitespace) {
-        bail!("{label} must not contain whitespace");
-    }
-    Ok(())
-}
-
 fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -803,168 +637,191 @@ pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn test_endpoints() -> BootstrapEndpoints {
-        BootstrapEndpoints {
-            public_url: "http://localhost:8089".into(),
-            mint_http_url: "http://mint:8089".into(),
-            mint_rpc_url: "http://mint:8091".into(),
-            processor_grpc_addr: "processor".into(),
-            processor_grpc_port: 50051,
+    #[test]
+    fn bootstrap_is_valid_and_unattached() {
+        let config = bootstrap_config(42);
+        assert!(config.validate().is_ok());
+        assert_eq!(config.version, 4);
+        assert_eq!(config.method, "branch");
+        assert!(!config.is_attached());
+        assert!(!config.setup_complete());
+        assert!(render_mint_snippet(&config, false).is_none());
+    }
+
+    #[test]
+    fn attachment_setup_and_snippet() {
+        let mut config = bootstrap_config(1);
+        config
+            .set_attachment(Some("ORA"), "https://mint.example.org/", "http://10.0.0.5:50051")
+            .expect("setup");
+        assert_eq!(config.unit, "ora");
+        assert_eq!(config.mint_url, "https://mint.example.org");
+        assert_eq!(config.advertised_grpc, "10.0.0.5:50051");
+        assert!(config.setup_complete());
+
+        let snippet = render_mint_snippet(&config, false).expect("snippet");
+        assert!(snippet.contains("unit = \"ora\""));
+        assert!(snippet.contains("supported_units = [\"ora\"]"));
+        assert!(snippet.contains("address = \"10.0.0.5\""));
+        assert!(snippet.contains("port = 50051"));
+        assert!(snippet.contains("allow_insecure = true"));
+        assert!(snippet.contains(COMPATIBLE_CDK_REV));
+
+        let tls = render_mint_snippet(&config, true).expect("tls snippet");
+        assert!(tls.contains("tls_dir"));
+        assert!(!tls.contains("allow_insecure"));
+    }
+
+    #[test]
+    fn locked_unit_refuses_change_but_urls_stay_editable() {
+        let mut config = bootstrap_config(1);
+        config
+            .set_attachment(Some("ora"), "http://mint:8089", "processor:50051")
+            .expect("setup");
+        config.lock_unit();
+        assert!(config.unit_locked);
+        assert!(config
+            .set_attachment(Some("usd"), "http://mint:8089", "processor:50051")
+            .is_err());
+        // Same unit passed back is a no-op, not a violation.
+        config
+            .set_attachment(Some("ora"), "http://mint-2:8089", "processor:50051")
+            .expect("url change with locked unit");
+        assert_eq!(config.mint_url, "http://mint-2:8089");
+    }
+
+    #[test]
+    fn grpc_endpoint_forms_are_normalized() {
+        let mut config = bootstrap_config(1);
+        for (input, expected) in [
+            ("http://10.0.0.5:50051", "10.0.0.5:50051"),
+            ("processor", "processor"),
+            ("processor:60051/", "processor:60051"),
+        ] {
+            config
+                .set_attachment(None, "http://mint:8089", input)
+                .expect(input);
+            assert_eq!(config.advertised_grpc, expected);
         }
+        assert!(config
+            .set_attachment(None, "http://mint:8089", "host:notaport")
+            .is_err());
+        assert!(config
+            .set_attachment(None, "http://mint:8089", "host/path")
+            .is_err());
+        assert!(config
+            .set_attachment(None, "ftp://mint:8089", "processor")
+            .is_err());
     }
 
-    fn test_config() -> AppConfig {
-        let mut config = bootstrap_config(test_endpoints(), MintConnection::Bundled, 1).expect("valid config");
-        config.mint.name = "Branch mint".into();
-        let rollover = RolloverPolicy {
-            enabled: true,
-            keyset_lifetime_days: 30,
-            rotate_before_expiry_days: 7,
-            input_fee_ppk: 0,
-            amounts: vec![1, 2, 4, 8],
+    const V3_BUNDLED: &str = r#"{
+      "version": 3,
+      "configured_at": 1700000000,
+      "mint": {
+        "name": "Branch mint",
+        "description": "d",
+        "description_long": "dl",
+        "unit": "ora",
+        "method": "branch",
+        "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank yellow"
+      },
+      "auth": { "password_hash": "sha256:120000:salt:digest" },
+      "endpoints": {
+        "public_url": "https://mint.example.org",
+        "mint_http_url": "http://mint:8089",
+        "mint_rpc_url": "http://mint:8091",
+        "processor_grpc_addr": "processor",
+        "processor_grpc_port": 50051
+      },
+      "rollover": {
+        "enabled": true, "keyset_lifetime_days": 90,
+        "rotate_before_expiry_days": 14, "input_fee_ppk": 0, "amounts": [1, 2]
+      },
+      "units": [
+        { "unit": "ora", "lifecycle": "active", "configured_at": 1700000000,
+          "rollover": { "enabled": true, "keyset_lifetime_days": 90,
+            "rotate_before_expiry_days": 14, "input_fee_ppk": 0, "amounts": [1, 2] } },
+        { "unit": "usd", "lifecycle": "retired", "configured_at": 1700000001,
+          "rollover": { "enabled": true, "keyset_lifetime_days": 90,
+            "rotate_before_expiry_days": 14, "input_fee_ppk": 0, "amounts": [1, 2] } }
+      ],
+      "seed_fingerprint": "sha256:0011223344556677",
+      "mint_connection": { "mode": "bundled" }
+    }"#;
+
+    #[test]
+    fn v3_bundled_config_migrates() {
+        let loaded = parse_config(V3_BUNDLED.as_bytes()).expect("parse");
+        let LoadedConfig::Legacy {
+            config,
+            auth_hash,
+            raw,
+        } = loaded
+        else {
+            panic!("expected legacy config");
         };
-        config.add_unit("ora", rollover, 1).expect("add first unit");
-        config
+        assert_eq!(config.version, 4);
+        assert_eq!(config.unit, "ora");
+        assert!(config.unit_locked, "migrated units with ecash must lock");
+        assert!(config.migrated_from_managed);
+        assert_eq!(config.mint_url, "https://mint.example.org");
+        assert_eq!(config.advertised_grpc, "processor:50051");
+        assert_eq!(auth_hash.as_deref(), Some("sha256:120000:salt:digest"));
+        // The raw bytes (with the mnemonic) survive for the backup file.
+        assert!(String::from_utf8_lossy(&raw).contains("legal winner"));
     }
 
     #[test]
-    fn bootstrap_produces_a_valid_unitless_config() {
-        let config = bootstrap_config(test_endpoints(), MintConnection::Bundled, 42).expect("bootstrap");
-        assert!(config.validate_integrity().is_ok());
-        assert!(config.auth.is_none());
-        assert_eq!(config.version, 3);
-        assert_eq!(config.mint.unit, "");
-        assert_eq!(config.mint.method, "branch");
-        assert_eq!(config.mint.mnemonic.split_whitespace().count(), 24);
-        assert!(config.units.is_empty());
-        let rendered = render_mint_toml(&config);
-        assert!(!rendered.contains("[[ln]]"));
-        assert!(!rendered.contains("unit_keysets"));
-        assert!(rendered.contains("supported_units = []"));
-    }
-
-    #[test]
-    fn first_added_unit_claims_the_primary_slot() {
-        let mut config = bootstrap_config(test_endpoints(), MintConnection::Bundled, 42).expect("bootstrap");
-        let policy = RolloverPolicy {
-            enabled: true,
-            keyset_lifetime_days: 30,
-            rotate_before_expiry_days: 7,
-            input_fee_ppk: 3,
-            amounts: vec![1, 2, 4, 8],
-        };
-        config
-            .add_unit("ora", policy.clone(), 43)
-            .expect("add first unit");
-        assert_eq!(config.mint.unit, "ora");
-        assert_eq!(config.rollover.input_fee_ppk, 3);
-        let rendered = render_mint_toml(&config);
-        assert!(rendered.contains("[grpc_processor.unit_keysets.ora]"));
-        assert!(rendered.contains("supported_units = [\"ora\"]"));
-
-        config.add_unit("usd", policy, 44).expect("add second unit");
-        assert_eq!(config.mint.unit, "ora");
-    }
-
-    #[test]
-    fn upgrade_migrates_wizard_units_but_keeps_bootstrap_empty() {
-        let mut wizard_era = test_config();
-        wizard_era.units.clear();
-        wizard_era.version = 2;
-        wizard_era.upgrade();
-        assert_eq!(wizard_era.units.len(), 1);
-        assert_eq!(wizard_era.units[0].unit, "ora");
-
-        let mut fresh = bootstrap_config(test_endpoints(), MintConnection::Bundled, 42).expect("bootstrap");
-        fresh.upgrade();
-        assert!(fresh.units.is_empty());
-    }
-
-    #[test]
-    fn v2_config_with_auth_parses_and_auth_is_omitted_when_none() {
-        let mut config = test_config();
-        config.version = 2;
-        config.auth = Some(AuthConfig {
-            password_hash: hash_password("Old-passw0rd!"),
-        });
-        let raw = serde_json::to_vec_pretty(&config).expect("serialize");
-        assert!(String::from_utf8_lossy(&raw).contains("\"auth\""));
-
-        let mut parsed: AppConfig = serde_json::from_slice(&raw).expect("parse v2");
-        assert!(parsed.auth.is_some());
-        parsed.upgrade();
-        assert_eq!(parsed.version, 3);
-        // Stripping auth is main's job (after seeding users.json); upgrade keeps it.
-        assert!(parsed.auth.is_some());
-
-        parsed.auth = None;
-        let raw = serde_json::to_vec_pretty(&parsed).expect("serialize authless");
-        assert!(!String::from_utf8_lossy(&raw).contains("\"auth\""));
-        let reparsed: AppConfig = serde_json::from_slice(&raw).expect("parse authless");
-        assert!(reparsed.auth.is_none());
-    }
-
-    #[test]
-    fn set_unit_rollover_updates_unit_and_primary_mirror() {
-        let mut config = test_config();
-        let policy = RolloverPolicy {
-            enabled: false,
-            keyset_lifetime_days: 60,
-            rotate_before_expiry_days: 10,
-            input_fee_ppk: 5,
-            amounts: vec![1, 2, 4],
-        };
-        config
-            .set_unit_rollover("ora", policy.clone())
-            .expect("edit policy");
-        assert_eq!(
-            config.managed_unit("ora").unwrap().rollover.amounts,
-            policy.amounts
+    fn v3_external_and_unset_configs_migrate() {
+        let external = V3_BUNDLED.replace(
+            r#""mint_connection": { "mode": "bundled" }"#,
+            r#""mint_connection": { "mode": "external",
+                "http_url": "http://10.0.0.7:8089",
+                "rpc_url": "http://10.0.0.7:8091",
+                "advertised_grpc": "http://10.0.0.5:50051" }"#,
         );
-        assert_eq!(config.rollover.input_fee_ppk, 5);
-        assert!(config.set_unit_rollover("nope", policy.clone()).is_err());
-        let bad = RolloverPolicy {
-            keyset_lifetime_days: 1,
-            ..policy
+        let LoadedConfig::Legacy { config, .. } =
+            parse_config(external.as_bytes()).expect("parse external")
+        else {
+            panic!("expected legacy");
         };
-        assert!(config.set_unit_rollover("ora", bad).is_err());
+        assert_eq!(config.mint_url, "http://10.0.0.7:8089");
+        assert_eq!(config.advertised_grpc, "10.0.0.5:50051");
+
+        let unset = V3_BUNDLED
+            .replace(
+                r#""mint_connection": { "mode": "bundled" }"#,
+                r#""mint_connection": { "mode": "unset" }"#,
+            )
+            .replace(r#""unit": "ora","#, r#""unit": "","#)
+            .replace(
+                r#"{ "unit": "ora", "lifecycle": "active""#,
+                r#"{ "unit": "ora", "lifecycle": "retired""#,
+            );
+        let LoadedConfig::Legacy { config, .. } =
+            parse_config(unset.as_bytes()).expect("parse unset")
+        else {
+            panic!("expected legacy");
+        };
+        assert!(!config.is_attached());
+        // Every listed unit is retired → nothing to adopt, nothing to lock.
+        assert_eq!(config.unit, "");
+        assert!(!config.unit_locked);
     }
 
     #[test]
-    fn renders_each_lifecycle_without_advertising_retired_units() {
-        let mut config = test_config();
+    fn v4_files_round_trip() {
+        let mut config = bootstrap_config(7);
         config
-            .add_unit(
-                "usd",
-                RolloverPolicy {
-                    enabled: true,
-                    keyset_lifetime_days: 14,
-                    rotate_before_expiry_days: 3,
-                    input_fee_ppk: 2,
-                    amounts: vec![1, 5, 10],
-                },
-                2,
-            )
-            .expect("add unit");
-        config
-            .set_unit_lifecycle("ora", UnitLifecycle::RedemptionOnly)
-            .expect("change lifecycle");
-        let rendered = render_mint_toml(&config);
-        assert!(rendered.contains("unit = \"ora\"\nmin_mint = 0\nmax_mint = 0"));
-        assert!(rendered.contains("unit = \"usd\"\nmin_mint = 1\nmax_mint = 500000"));
-        assert!(rendered.contains(&format!(
-            "[info.quote_ttl]\nmint_ttl = {MINT_QUOTE_TTL_SECS}\nmelt_ttl = {MELT_QUOTE_TTL_SECS}"
-        )));
-        assert!(rendered.contains(
-            "[grpc_processor.unit_keysets.usd]\namounts = [1, 5, 10]\ninput_fee_ppk = 2\ninitial_final_expiry = 1209602"
-        ));
-
-        config
-            .set_unit_lifecycle("ora", UnitLifecycle::Retired)
-            .expect("retire");
-        let rendered = render_mint_toml(&config);
-        assert!(!rendered.contains("unit = \"ora\""));
-        assert!(rendered.contains("supported_units = [\"usd\"]"));
+            .set_attachment(Some("ora"), "http://mint:8089", "processor")
+            .expect("setup");
+        let raw = serde_json::to_vec_pretty(&config).expect("serialize");
+        let LoadedConfig::Current(parsed) = parse_config(&raw).expect("parse") else {
+            panic!("expected current config");
+        };
+        assert_eq!(parsed.unit, "ora");
+        assert_eq!(parsed.mint_url, "http://mint:8089");
+        assert!(!parsed.migrated_from_managed);
     }
 
     #[test]
@@ -975,160 +832,41 @@ mod tests {
         assert!(validate_operator_password("password", "different").is_err()); // mismatch
     }
 
-    #[test]
-    fn infra_endpoints_follow_env_and_leave_public_url_alone() {
-        let mut config = test_config();
-        config.endpoints.public_url = "https://mint.example.org".into();
-        let rendered_before = render_mint_toml(&config);
+    #[tokio::test]
+    async fn store_migration_preserves_the_legacy_file() {
+        let dir = std::env::temp_dir().join(format!("cfg-migrate-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let store = ConfigStore::new(dir.clone());
+        tokio::fs::write(dir.join("setup.json"), V3_BUNDLED)
+            .await
+            .unwrap();
 
-        // Identical values → identical render: a no-op upgrade must not
-        // change mint.toml (the supervisor hash-compares and would restart
-        // the mint on any byte difference).
-        config.apply_infra_endpoints(&InfraEndpoints {
-            mint_http_url: "http://mint:8089".into(),
-            mint_rpc_url: "http://mint:8091".into(),
-            processor_grpc_addr: "processor".into(),
-            processor_grpc_port: 50051,
-        });
-        assert_eq!(render_mint_toml(&config), rendered_before);
-
-        // Changed values flow into the rendered toml; public_url survives.
-        config.apply_infra_endpoints(&InfraEndpoints {
-            mint_http_url: "http://mint-2:8089".into(),
-            mint_rpc_url: "http://mint-2:8091".into(),
-            processor_grpc_addr: "http://processor-2".into(),
-            processor_grpc_port: 60051,
-        });
-        assert_eq!(config.endpoints.public_url, "https://mint.example.org");
-        assert_eq!(config.endpoints.mint_http_url, "http://mint-2:8089");
-        let rendered = render_mint_toml(&config);
-        assert!(rendered.contains("addr = \"http://processor-2\""));
-        assert!(rendered.contains("port = 60051"));
-        assert!(rendered.contains("url = \"https://mint.example.org\""));
-    }
-
-    #[test]
-    fn rejects_a_changed_recovery_seed() {
-        let mut config = test_config();
-        config.mint.mnemonic =
-            "legal winner thank year wave sausage worth useful legal winner thank yellow".into();
-        assert!(config.validate_integrity().is_err());
-    }
-
-    fn external_connection() -> MintConnection {
-        MintConnection::External {
-            http_url: "http://10.0.0.7:8089".into(),
-            rpc_url: Some("http://10.0.0.7:8091".into()),
-            advertised_grpc: "http://10.0.0.5:50051".into(),
-        }
-    }
-
-    #[test]
-    fn non_bundled_modes_render_no_payment_backend() {
-        // A configured unit under an external mint must NOT start the bundled
-        // supervisor: no [[ln]] blocks, empty supported_units.
-        let mut config = test_config();
-        config.mint_connection = external_connection();
-        let rendered = render_mint_toml(&config);
-        assert!(!rendered.contains("[[ln]]"));
-        assert!(rendered.contains("supported_units = []"));
-
-        config.mint_connection = MintConnection::Unset;
-        assert!(!render_mint_toml(&config).contains("[[ln]]"));
-
-        config.mint_connection = MintConnection::Bundled;
-        assert!(render_mint_toml(&config).contains("[[ln]]"));
-    }
-
-    #[test]
-    fn external_snippet_carries_units_and_advertised_grpc() {
-        let mut config = test_config();
-        config.mint_connection = external_connection();
-        let snippet = render_external_mint_snippet(&config).expect("snippet in external mode");
-        assert!(snippet.contains("[[ln]]"));
-        assert!(snippet.contains("unit = \"ora\""));
-        assert!(snippet.contains("addr = \"http://10.0.0.5\""));
-        assert!(snippet.contains("port = 50051"));
-        assert!(snippet.contains("[grpc_processor.unit_keysets.ora]"));
-        assert!(render_external_mint_snippet(&test_config()).is_none());
-    }
-
-    #[test]
-    fn mint_connection_switch_is_guarded_by_live_units() {
-        // With a live unit, switching attached mints is refused both ways.
-        let mut config = test_config();
-        assert!(config.set_mint_connection(external_connection()).is_err());
-
-        // Retiring the unit unlocks the switch.
-        config.units[0].lifecycle = UnitLifecycle::Retired;
-        config.set_mint_connection(external_connection()).expect("switch");
-        assert!(!config.mint_connection.is_bundled());
-
-        // Leaving Unset is always allowed — that IS the connect flow.
-        let mut fresh =
-            bootstrap_config(test_endpoints(), MintConnection::Unset, 42).expect("bootstrap");
-        let policy = RolloverPolicy {
-            enabled: true,
-            keyset_lifetime_days: 30,
-            rotate_before_expiry_days: 7,
-            input_fee_ppk: 0,
-            amounts: vec![1, 2],
+        let Some(LoadedConfig::Legacy { config, raw, .. }) = store.load().await.unwrap() else {
+            panic!("expected legacy load");
         };
-        fresh.add_unit("ora", policy, 43).expect("unit in unset mode");
-        fresh
-            .set_mint_connection(MintConnection::Bundled)
-            .expect("unset -> bundled with units is the connect flow");
-    }
+        store.finish_migration(&config, &raw).await.unwrap();
 
-    #[test]
-    fn external_urls_are_validated() {
-        let mut config = bootstrap_config(test_endpoints(), MintConnection::Unset, 1).expect("ok");
-        for bad in [
-            ("ftp://x:1", Some("http://a:1".into()), "http://b:1"),
-            ("http://", Some("http://a:1".into()), "http://b:1"),
-            ("http://x:1", Some("nope".into()), "http://b:1"),
-            ("http://x:1", None, "b:50051"),
-        ] {
-            assert!(config
-                .set_mint_connection(MintConnection::External {
-                    http_url: bad.0.into(),
-                    rpc_url: bad.1.clone(),
-                    advertised_grpc: bad.2.into(),
-                })
-                .is_err());
-        }
-    }
+        let backup = tokio::fs::read_to_string(dir.join(LEGACY_BACKUP_FILENAME))
+            .await
+            .expect("backup exists");
+        assert!(backup.contains("legal winner"), "mnemonic preserved");
 
-    #[test]
-    fn infra_endpoints_respect_the_connection_mode() {
-        let infra = InfraEndpoints {
-            mint_http_url: "http://mint:8089".into(),
-            mint_rpc_url: "http://mint:8091".into(),
-            processor_grpc_addr: "http://processor".into(),
-            processor_grpc_port: 50051,
+        // Reload now yields the migrated v4 config…
+        let Some(LoadedConfig::Current(reloaded)) = store.load().await.unwrap() else {
+            panic!("expected current config after migration");
         };
-        let mut config = bootstrap_config(test_endpoints(), MintConnection::Unset, 1).expect("ok");
-        config.set_mint_connection(external_connection()).expect("connect");
-        config.apply_infra_endpoints(&infra);
-        // Console-owned mint URLs survive; our gRPC endpoint is env-asserted.
-        assert_eq!(config.endpoints.mint_http_url, "http://10.0.0.7:8089");
-        assert_eq!(config.endpoints.mint_rpc_url, "http://10.0.0.7:8091");
-        assert_eq!(config.endpoints.processor_grpc_addr, "http://processor");
+        assert_eq!(reloaded.unit, "ora");
 
-        config.set_mint_connection(MintConnection::Bundled).expect("switch back");
-        config.apply_infra_endpoints(&infra);
-        assert_eq!(config.endpoints.mint_http_url, "http://mint:8089");
-    }
+        // …and re-running the migration never overwrites the backup.
+        store
+            .finish_migration(&reloaded, b"{\"different\": true}")
+            .await
+            .unwrap();
+        let backup_again = tokio::fs::read_to_string(dir.join(LEGACY_BACKUP_FILENAME))
+            .await
+            .unwrap();
+        assert_eq!(backup, backup_again);
 
-    #[test]
-    fn grpc_endpoint_split_handles_ports() {
-        assert_eq!(
-            split_grpc_endpoint("http://10.0.0.5:50051"),
-            ("http://10.0.0.5".to_string(), 50051)
-        );
-        assert_eq!(
-            split_grpc_endpoint("http://processor"),
-            ("http://processor".to_string(), 50051)
-        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

@@ -31,11 +31,6 @@ pub fn status() -> Result<()> {
         Some(running) => ui::say(format!("console: ok (version {running})")),
         None => ui::say(format!("console: not responding on 127.0.0.1:{ui_port}")),
     }
-    let mint_state = stack.compose_capture(&["exec", "-T", "mint", "cat", "/run/mint-state"]);
-    ui::say(format!(
-        "mint supervisor: {}",
-        if mint_state.is_empty() { "unknown" } else { &mint_state }
-    ));
     ui::say(format!(
         "installed version: {}",
         if version.is_empty() { "unknown" } else { &version }
@@ -60,6 +55,18 @@ pub fn logs(services: &[String]) -> Result<()> {
 pub fn update(args: &UpdateArgs) -> Result<()> {
     let stack = Stack::discover()?;
     let mut envf = env(&stack)?;
+    // Pre-0.2 installs bundled a managed cdk-mintd in this compose project
+    // (marker: the MINT_MODE key the old installer wrote). The new compose
+    // file has no mint service, so `up --remove-orphans` would take their
+    // mint container down mid-update. Refuse and point at the migration note.
+    if envf.get("MINT_MODE").is_some() {
+        bail!(
+            "this install was created by a pre-0.2 version that bundled a managed mint. \
+             Since 0.2 the processor attaches to a mint you operate yourself and no longer \
+             provisions one — updating in place would remove the bundled mint container. \
+             See docs/operations.md (\"Migrating from the bundled mint\") before updating."
+        );
+    }
     let current = envf.get("VERSION").unwrap_or_default();
     let target = match &args.version {
         Some(v) => v.clone(),
@@ -130,7 +137,7 @@ pub fn backup(output: Option<PathBuf>) -> Result<()> {
                     "[year][month][day]-[hour][minute][second]"
                 ))
                 .unwrap_or_default();
-            absolutize(PathBuf::from(format!("custom-unit-mint-backup-{stamp}.tar.gz")))?
+            absolutize(PathBuf::from(format!("pecan-backup-{stamp}.tar.gz")))?
         }
     };
     let project = envf
@@ -143,12 +150,11 @@ pub fn backup(output: Option<PathBuf>) -> Result<()> {
         .and_then(|n| n.to_str())
         .context("backup path has no file name")?;
 
-    ui::say("Stopping services for a consistent snapshot (the mint database is sqlite in WAL mode) ...");
+    ui::say("Stopping services for a consistent snapshot ...");
     stack.compose(&["stop"])?;
     let status = std::process::Command::new("docker")
         .args(["run", "--rm"])
         .args(["-v", &format!("{project}_config-data:/backup/config:ro")])
-        .args(["-v", &format!("{project}_mint-data:/backup/mint:ro")])
         .args(["-v", &format!("{project}_processor-data:/backup/processor:ro")])
         .args(["-v", &format!("{}:/backup/install:ro", stack.install_dir.display())])
         .args(["-v", &format!("{}:/out", out_dir.display())])
@@ -160,7 +166,6 @@ pub fn backup(output: Option<PathBuf>) -> Result<()> {
             "-C",
             "/backup",
             "config",
-            "mint",
             "processor",
             "install/.env",
         ])
@@ -172,8 +177,10 @@ pub fn backup(output: Option<PathBuf>) -> Result<()> {
     }
     ui::say("");
     ui::say(format!("Backup written to {}", out.display()));
-    ui::say("IT CONTAINS THE MINT'S RECOVERY SEED AND THE ADMIN PASSWORD.");
-    ui::say("Store it encrypted, off this server.");
+    ui::say("It contains the operator accounts (password hashes), the attachment");
+    ui::say("configuration, and the ticket ledger — store it encrypted, off this");
+    ui::say("server. The mint's own data is NOT included; the mint is backed up");
+    ui::say("by whoever operates it.");
     Ok(())
 }
 
@@ -195,15 +202,16 @@ pub fn restore(archive: PathBuf, yes: bool) -> Result<()> {
         .and_then(|n| n.to_str())
         .context("archive path has no file name")?;
 
-    ui::say("Restoring replaces ALL current state (config, mint database, tickets)");
+    ui::say("Restoring replaces the processor's current state (attachment config,");
     ui::say(format!(
-        "of project '{project}' with the archive contents. (.env is not touched.)"
+        "operator accounts, ticket ledger) of project '{project}' with the archive"
     ));
+    ui::say("contents. (.env is not touched; the mint is unaffected.)");
     if !ui_prompt.confirm("Continue?") {
         bail!("restore cancelled");
     }
     stack.compose(&["down", "--remove-orphans"])?;
-    for vol in ["config-data", "mint-data", "processor-data"] {
+    for vol in ["config-data", "processor-data"] {
         let status = std::process::Command::new("docker")
             .args(["volume", "create", &format!("{project}_{vol}")])
             .stdout(std::process::Stdio::null())
@@ -213,10 +221,11 @@ pub fn restore(archive: PathBuf, yes: bool) -> Result<()> {
             bail!("could not create volume {project}_{vol}");
         }
     }
+    // Extracting only config/processor also accepts pre-0.2 archives, whose
+    // additional mint/ directory is simply skipped.
     let status = std::process::Command::new("docker")
         .args(["run", "--rm"])
         .args(["-v", &format!("{project}_config-data:/restore/config")])
-        .args(["-v", &format!("{project}_mint-data:/restore/mint")])
         .args(["-v", &format!("{project}_processor-data:/restore/processor")])
         .args(["-v", &format!("{}:/in:ro", archive_dir.display())])
         .arg("debian:bookworm-slim")
@@ -224,8 +233,8 @@ pub fn restore(archive: PathBuf, yes: bool) -> Result<()> {
             "sh",
             "-c",
             &format!(
-                "find /restore/config /restore/mint /restore/processor -mindepth 1 -delete \
-                 && tar xzf /in/{archive_name} -C /restore config mint processor"
+                "find /restore/config /restore/processor -mindepth 1 -delete \
+                 && tar xzf /in/{archive_name} -C /restore config processor"
             ),
         ])
         .status()
@@ -256,9 +265,9 @@ pub fn uninstall(purge: bool, yes: bool) -> Result<()> {
         .unwrap_or_else(|| compose::project_name(&stack.install_dir));
 
     if purge {
-        ui::say("PURGE deletes the containers, ALL VOLUMES (including the mint's");
+        ui::say("PURGE deletes the containers, ALL VOLUMES (operator accounts,");
         ui::say(format!(
-            "signing keys and database), and {}. This cannot be undone.",
+            "attachment config, the ticket ledger), and {}. This cannot be undone.",
             stack.install_dir.display()
         ));
         if !ui_prompt.confirm_typed(

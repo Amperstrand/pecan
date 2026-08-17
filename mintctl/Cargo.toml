@@ -2,7 +2,7 @@
 name = "mintctl"
 version = "0.1.0"
 edition = "2021"
-description = "Custom Unit Mint — guided installer and operations CLI"
+description = "Pecan — guided installer and operations CLI"
 license = "MIT"
 
 # Deliberately NOT a workspace member with processor/: the Docker image build

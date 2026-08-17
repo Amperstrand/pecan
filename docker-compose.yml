@@ -1,94 +1,63 @@
-# Custom Unit Mint: stock cdk-mintd + a custom "branch" payment processor.
+# Pecan — branch processor: payment backend + teller console that
+# attaches to ONE cdk-mintd you operate. The mint is not part of this stack:
+# you point your mintd's [grpc_processor] at the processor's gRPC port (the
+# console's Mint tab generates the exact snippet and verifies the link).
 #
-#   processor — implements the "branch" custom payment method over gRPC and
-#               serves the operator web UI on :9090. cdk-mintd routes all
-#               mint/melt for the units added in the console to it.
-#   mint      — pinned cdk-mintd on :8089. Talks to the processor's gRPC and,
-#               for keyset management, exposes its management RPC on :8091.
-#   caddy     — optional TLS termination (profile "tls"): auto-provisions
-#               Let's Encrypt certificates for $DOMAIN (mint API) and
-#               $CONSOLE_DOMAIN (operator UI). Enabled by the installer when
-#               a domain is configured, via COMPOSE_PROFILES=tls in .env.
+#   processor — implements the "branch" custom payment method over gRPC
+#               (:50051, your cdk-mintd connects IN) and serves the operator
+#               web UI on :9090.
+#   caddy     — optional TLS termination for the console (profile "tls"):
+#               auto-provisions Let's Encrypt certificates for $CONSOLE_DOMAIN.
+#               Enabled by the installer via COMPOSE_PROFILES=tls in .env.
 #
-# All services run from one image published at ghcr.io/zeugmaster/custom-unit-mint.
-# Production installs are managed by mintctl (see install.sh); from a source
-# checkout, docker-compose.override.yml adds a local build so
+# Compatibility: your cdk-mintd must be built from the cdk revision shown in
+# the console's Mint tab (PR cashubtc/cdk#2295 — the payment-processor
+# protocol version is checked strictly at connect time). Until an upstream
+# release contains the PR, docker/mintd/Dockerfile builds a compatible mintd.
+#
+# Every ${VAR} below is documented in .env.example. Production installs are
+# managed by mintctl (see install.sh); from a source checkout,
+# docker-compose.override.yml adds a local build so
 # `docker compose up --build` keeps working.
-#
-# Every ${VAR} below is documented in .env.example. restart: unless-stopped is
-# load-bearing, not cosmetic: the processor applies config changes by exiting
-# and relies on Docker to bring it back.
 
 services:
   processor:
-    image: ghcr.io/zeugmaster/custom-unit-mint:${VERSION:-latest}
+    image: ghcr.io/zeugmaster/pecan:${VERSION:-latest}
     command: ["cdk-branch-processor"]
     ports:
       - "${BIND_ADDR:-0.0.0.0}:${UI_PORT:-9090}:9090" # operator web UI
-      # Payment gRPC for an EXTERNAL cdk-mintd (processor-only installs).
-      # Loopback by default; a LAN mint needs GRPC_BIND_ADDR=0.0.0.0 in .env
-      # plus a firewall rule — the link carries no authentication. The host
-      # port defaults to 0 (ephemeral) so installs that predate the key never
-      # collide; the installer writes GRPC_PORT=50051 (or the chosen port).
-      - "${GRPC_BIND_ADDR:-127.0.0.1}:${GRPC_PORT:-0}:50051"
+      # Payment gRPC your cdk-mintd connects to. Loopback by default (mint on
+      # the same host); a mint on another machine needs GRPC_BIND_ADDR=0.0.0.0
+      # plus a firewall rule limiting access to the mint's host — or TLS via
+      # GRPC_TLS_DIR. Plaintext gRPC carries no authentication.
+      - "${GRPC_BIND_ADDR:-127.0.0.1}:${GRPC_PORT:-50051}:50051"
     environment:
       RUST_LOG: "info,h2=warn,hyper=warn,reqwest=warn"
       CDK_BRANCH_PROCESSOR_WORK_DIR: "/var/lib/cdk-branch-processor"
-      CDK_BRANCH_PROCESSOR_CONFIG_DIR: "/var/lib/custom-unit-mint/config"
+      CDK_BRANCH_PROCESSOR_CONFIG_DIR: "/var/lib/pecan/config"
       CDK_BRANCH_PROCESSOR_GRPC_ADDR: "0.0.0.0"
       CDK_BRANCH_PROCESSOR_GRPC_PORT: "50051"
       CDK_BRANCH_PROCESSOR_HTTP_ADDR: "0.0.0.0"
       CDK_BRANCH_PROCESSOR_HTTP_PORT: "9090"
-      CDK_BRANCH_PROCESSOR_MINT_RPC_URL: "http://mint:8091"
-      CDK_BRANCH_PROCESSOR_MINT_HTTP_URL: "http://mint:8089"
-      CDK_BRANCH_PROCESSOR_MINT_GRPC_ADDR: "http://processor"
-      CDK_BRANCH_PROCESSOR_DEFAULT_MINT_PUBLIC_URL: "${MINT_PUBLIC_URL:-http://localhost:8089}"
-      CDK_BRANCH_PROCESSOR_MINT_DB_PATH: "/var/lib/cdk-mintd/cdk-mintd.sqlite"
       # First boot only (before users.json exists): seeds the admin account
       # with this password instead of the demo admin/admin credentials.
       CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:-}"
-      # First bootstrap only: "bundled" wires the compose-internal mint;
-      # "external-pending" (processor-only installs) waits for the operator
-      # to connect a mint in the console. Console-owned afterwards.
-      CDK_BRANCH_PROCESSOR_MINT_MODE: "${MINT_MODE:-bundled}"
+      # Optional mutual TLS for the payment gRPC endpoint: a directory inside
+      # the container with server.pem, server.key, and ca.pem. Requires a
+      # matching bind mount below; see .env.example.
+      CDK_BRANCH_PROCESSOR_TLS_DIR: "${GRPC_TLS_DIR:-}"
     volumes:
       - processor-data:/var/lib/cdk-branch-processor
-      - config-data:/var/lib/custom-unit-mint/config
-      # Supply audit: the processor reads the mint's keyset_amounts table.
-      # The connection is opened read-only, but the mount cannot be :ro —
-      # the database runs in WAL mode and even readers must write the -shm
-      # WAL index file.
-      - mint-data:/var/lib/cdk-mintd
+      - config-data:/var/lib/pecan/config
+      # For GRPC_TLS_DIR, add a read-only bind mount of your certificate
+      # directory, e.g.:
+      # - ./grpc-tls:/etc/processor-tls:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9090/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
-    restart: unless-stopped
-    networks:
-      - custom-unit
-
-  mint:
-    image: ghcr.io/zeugmaster/custom-unit-mint:${VERSION:-latest}
-    command: ["mint-supervisor"]
-    ports:
-      - "${BIND_ADDR:-0.0.0.0}:${MINT_PORT:-8089}:8089" # mint HTTP API (NUT endpoints)
-    environment:
-      RUST_LOG: "info,h2=warn,hyper=warn"
-    volumes:
-      - config-data:/var/lib/custom-unit-mint/config:ro
-      - mint-data:/var/lib/cdk-mintd
-    # Standby (zero units yet) counts as healthy: the supervisor legitimately
-    # idles until the operator adds the first unit from the console.
-    healthcheck:
-      test: ["CMD", "mint-health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    depends_on:
-      - processor
     restart: unless-stopped
     networks:
       - custom-unit
@@ -101,7 +70,6 @@ services:
       - "443:443"
       - "443:443/udp" # HTTP/3
     environment:
-      DOMAIN: "${DOMAIN:-}"
       CONSOLE_DOMAIN: "${CONSOLE_DOMAIN:-}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
@@ -109,7 +77,6 @@ services:
       - caddy-config:/config
     depends_on:
       - processor
-      - mint
     restart: unless-stopped
     networks:
       - custom-unit
@@ -119,7 +86,6 @@ networks:
     driver: bridge
 
 volumes:
-  mint-data:
   processor-data:
   config-data:
   caddy-data:

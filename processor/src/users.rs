@@ -12,7 +12,7 @@
 //!   * unparseable file → preserved as users.json.corrupt-<ts>, then reseeded
 //!     through the same matrix (this is an appliance; refusing to boot would
 //!     brick the whole stack, and anyone who can corrupt the file can already
-//!     read the mnemonic that lives in the same directory)
+//!     rewrite the processor config that lives in the same directory)
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Custom Unit Mint — installer bootstrap.
+# Pecan — installer bootstrap.
 #
-#   curl -fsSL https://raw.githubusercontent.com/zeugmaster/custom-unit-mint/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/zeugmaster/pecan/main/install.sh | bash
 #
 # This script is a thin bootstrap: it downloads the release's `mintctl`
 # binary for this platform, verifies its checksum, and hands over to it.
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-REPO="zeugmaster/custom-unit-mint"
+REPO="zeugmaster/pecan"
 
 say() { printf '%s\n' "$*"; }
 die() {

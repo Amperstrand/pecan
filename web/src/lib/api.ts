@@ -1,12 +1,6 @@
 export type TicketKind = "incoming" | "outgoing"
 export type TicketStatus = "waiting" | "pending" | "paid" | "failed"
 
-export interface HealthItem {
-  ok: boolean
-  label: string
-  detail: string
-}
-
 export interface KeysetEntry {
   id: string
   unit: string
@@ -15,64 +9,64 @@ export interface KeysetEntry {
   final_expiry?: number | null
 }
 
-export type UnitLifecycle = "active" | "redemption_only" | "retired"
+export type CheckStatus = "ok" | "warn" | "fail" | "unknown"
 
-export interface RolloverPolicy {
-  enabled: boolean
-  keyset_lifetime_days: number
-  rotate_before_expiry_days: number
-  input_fee_ppk: number
-  amounts: number[]
+/** One row of the mint-attachment checklist, evaluated server-side. */
+export interface ChecklistItem {
+  id: string
+  status: CheckStatus
+  title: string
+  detail: string
+  /** Plain-language fix, present when the check is not ok. */
+  remedy?: string | null
 }
 
-export interface ManagedUnit {
-  unit: string
-  lifecycle: UnitLifecycle
-  configured_at: number
-  rollover: RolloverPolicy
-  keyset_count: number
-  active_keyset?: KeysetEntry | null
-  can_mint: boolean
-  can_melt: boolean
-}
-
-export interface Capability {
-  unit: string
-  method: string
-  mint: boolean
-  melt: boolean
-  managed: boolean
-}
-
-export interface ConsistencyState {
+export interface SelfTestLeg {
   ok: boolean
-  issues: string[]
+  detail: string
+  remedy?: string | null
 }
 
-export interface UnitSummary {
+/** Result of the end-to-end self-test (one deposit + one payout probe). */
+export interface SelfTestOutcome {
+  ran_at: number
+  ok: boolean
+  latency_ms?: number | null
+  deposit: SelfTestLeg
+  payout: SelfTestLeg
+  mint_quote_ttl_secs?: number | null
+  melt_quote_ttl_secs?: number | null
+  warnings: string[]
+}
+
+/** Read-only identity of the attached mint, from its /v1/info. */
+export interface MintIdentity {
+  name?: string | null
+  description?: string | null
+  icon_url?: string | null
+  version?: string | null
+}
+
+export interface SetupState {
+  /** The single unit this install serves; "" until setup. */
   unit: string
-  mint_count: number
-  melt_count: number
-  minted_amount: number
-  melted_amount: number
-  net_issued: number
+  unit_locked: boolean
+  /** Whether the unit field is editable (not locked, no real tickets yet). */
+  unit_change_allowed: boolean
+  method: string
+  mint_url: string
+  /** host[:port] the mint uses to reach this processor's gRPC endpoint. */
+  advertised_grpc: string
+  /** Where this processor actually listens for the mint. */
+  grpc_bind: string
+  grpc_tls: boolean
+  attached: boolean
+  setup_complete: boolean
 }
 
-/** Audited supply for one unit, read from the mint database per keyset. */
-export interface UnitSupply {
-  unit: string
-  /** Redeemable ecash outstanding under non-expired keysets. */
-  live: number
-  /** Ecash stranded under keysets past their final expiry. */
-  demonetized: number
-  /** Value burned as input fees. */
-  fee_collected: number
-}
-
-export interface SupplySnapshot {
-  available: boolean
-  error?: string | null
-  units: UnitSupply[]
+export interface AttachSignals {
+  last_settings_at?: number | null
+  stream_attached_at?: number | null
 }
 
 export interface Ticket {
@@ -124,50 +118,24 @@ export interface UserEntry {
   created_at: number
 }
 
-export type MintConnectionMode = "bundled" | "unset" | "external"
-
-export interface MintConnectionInfo {
-  mode: MintConnectionMode
-  http_url?: string | null
-  rpc_url?: string | null
-  advertised_grpc?: string | null
-  /** Feature availability in this mode, stated by the server. */
-  supply_audit: boolean
-  management_rpc: boolean
-  /** External mode: the mint.toml fragment for the operator's cdk-mintd. */
-  external_snippet?: string | null
-}
-
 export interface AppSnapshot {
   now: number
   session: { username: string; must_change_password: boolean }
-  mint: {
-    name: string
-    description: string
-    description_long: string
-    unit: string
-    method: string
-  }
-  endpoints: {
-    public_url: string
-    mint_http_url: string
-    mint_rpc_url: string
-    processor_grpc_addr: string
-    processor_grpc_port: number
-  }
-  rollover: RolloverPolicy
-  default_amounts: number[]
-  health: {
-    mint_http: HealthItem
-    management_rpc: HealthItem
-    payment_backend: HealthItem
-  }
-  keysets: {
-    ok: boolean
-    items: KeysetEntry[]
-    error?: string | null
-  }
-  active_keyset?: KeysetEntry | null
+  users: UserEntry[]
+  demo_password_active: boolean
+  password_min_length: number
+  /** Image/build version stamped at build time; "dev" outside CI images. */
+  version: string
+  setup: SetupState
+  attach_signals: AttachSignals
+  checklist: ChecklistItem[]
+  self_test?: SelfTestOutcome | null
+  /** The mint.toml fragment for the operator's cdk-mintd; null until setup. */
+  snippet?: string | null
+  mint_identity?: MintIdentity | null
+  /** The configured unit's keysets at the mint (read-only). */
+  keysets: KeysetEntry[]
+  keysets_error?: string | null
   summary: {
     mint_count: number
     melt_count: number
@@ -175,20 +143,11 @@ export interface AppSnapshot {
     melted_amount: number
     net_issued: number
   }
-  unit_summaries: UnitSummary[]
-  supply: SupplySnapshot
   circulation: CirculationPoint[]
   open_quotes: OpenQuoteSummary[]
   recent_done: Ticket[]
-  units: ManagedUnit[]
-  capabilities: Capability[]
-  consistency: ConsistencyState
-  users: UserEntry[]
-  demo_password_active: boolean
-  password_min_length: number
-  /** Image/build version stamped at build time; "dev" outside CI images. */
-  version: string
-  mint_connection: MintConnectionInfo
+  /** One-time notice: this install previously managed its own mint. */
+  migrated_from_managed: boolean
 }
 
 export class ApiRequestError extends Error {
@@ -282,82 +241,26 @@ export function markFailed(ticketId: string, notes?: string) {
   })
 }
 
-// ---- units & keysets ----
+// ---- attachment setup & self-test ----
 
-export function addUnit(input: {
-  unit: string
-  keyset_lifetime_days: number
-  rotate_before_expiry_days: number
-  input_fee_ppk: number
-  amounts: string
-}) {
-  return post<{ message: string }>("/api/units", input) // restarts the stack
-}
-
-export function setUnitLifecycle(
-  unit: string,
-  lifecycle: UnitLifecycle,
-  options: { forceUnverified?: boolean } = {},
-) {
-  return post<{ message: string }>(`/api/units/${encodeURIComponent(unit)}/lifecycle`, {
-    lifecycle,
-    // External mints only: retire although the mint is unreachable.
-    force_unverified: options.forceUnverified ?? false,
-  }) // restarts the stack
-}
-
-export function updateUnitPolicy(
-  unit: string,
-  policy: {
-    enabled: boolean
-    keyset_lifetime_days: number
-    rotate_before_expiry_days: number
-    input_fee_ppk: number
-    amounts: string
-  },
-) {
-  return post<{ message: string }>(`/api/units/${encodeURIComponent(unit)}/policy`, policy) // restarts
-}
-
-export function rotateKeyset(input: {
-  unit: string
-  amounts: string
-  input_fee_ppk: number
-  final_expiry: string | null
-}) {
-  return post<{ message: string }>("/api/keysets/rotate", input)
-}
-
-// ---- mint identity & recovery ----
-
-export function updateIdentity(input: {
-  name: string
-  public_url: string
-  description: string
-  description_long: string
-}) {
-  return post<{ message: string }>("/api/settings/identity", input) // restarts the stack
-}
-
-export function revealMnemonic(password: string) {
-  return post<{ mnemonic: string }>("/api/settings/mnemonic", { password })
-}
-
-// ---- mint connection ----
-
-export function useBundledMint() {
-  return post<{ message: string }>("/api/settings/mint-connection", { mode: "bundled" }) // restarts
-}
-
-export function connectExternalMint(input: {
-  http_url: string
-  rpc_url: string
+/**
+ * Save the setup/attachment form. Applies live — no restart. The attached
+ * mint picks the values up at its next start.
+ */
+export function saveAttachment(input: {
+  unit?: string
+  mint_url: string
   advertised_grpc: string
 }) {
-  return post<{ message: string }>("/api/settings/mint-connection", {
-    mode: "external",
-    ...input,
-  }) // restarts the stack
+  return post<{ message: string }>("/api/settings/attachment", input)
+}
+
+/**
+ * Run the end-to-end self-test: creates one deposit and one payout quote at
+ * the mint, verifies both arrive at this processor, then voids them.
+ */
+export function runSelfTest() {
+  return post<SelfTestOutcome>("/api/mint/self-test")
 }
 
 // ---- users ----
