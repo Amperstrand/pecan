@@ -13,7 +13,7 @@ All stock citations are to the pinned checkout
 `/Users/dariolass/.cargo/git/checkouts/cdk-57defa95db2b7762/6132607`
 (rev `6132607495ae0741e412a63f2acc34e4ccddfc55` = tag **v0.17.2**, commit dated 2026-06-29,
 verified with `git log -1`). Downstream citations are to
-`/Users/dariolass/Developer/cashu/custom-unit-mint`. Facts are verified against source
+`/Users/dariolass/Developer/cashu/pecan`. Facts are verified against source
 unless explicitly marked *inference* or *judgment*.
 
 ---

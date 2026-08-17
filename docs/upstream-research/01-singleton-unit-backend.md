@@ -7,7 +7,7 @@ Sources and conventions:
 
 - **Pinned checkout** = `/Users/dariolass/.cargo/git/checkouts/cdk-57defa95db2b7762/6132607`, verified pristine (`git status` clean except the untracked `.cargo-ok`; `git diff HEAD` empty), HEAD `6132607495ae0741e412a63f2acc34e4ccddfc55` = tag v0.17.2 ("chore: bump v0.17.2"). The rev is confirmed to exist in upstream `github.com/cashubtc/cdk` (verified via `gh api repos/cashubtc/cdk/commits/6132607...`). All `file:line` cites without a prefix are paths under this checkout.
 - **main** = raw files fetched 2026-07-31 from `raw.githubusercontent.com/cashubtc/cdk/main/...` at main HEAD `77256eb0` (2026-07-30). Cites marked "(main)" use line numbers of that snapshot.
-- **Downstream** = `/Users/dariolass/Developer/cashu/custom-unit-mint` (patch `patches/cdk-managed-units.patch`, processor crate `processor/`).
+- **Downstream** = `/Users/dariolass/Developer/cashu/pecan` (patch `patches/cdk-managed-units.patch`, processor crate `processor/`).
 - Claims are verified facts unless explicitly marked **Inference**.
 
 ---
