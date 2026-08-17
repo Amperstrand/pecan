@@ -52,28 +52,22 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
         working-directory: mintctl
 
-  # The cdk-mintd build depends on patches/cdk-managed-units.patch applying
-  # cleanly to the pinned rev; catch drift without compiling all of cdk.
-  patch-check:
+  # The three places naming the compatible cdk revision must agree — the
+  # payment-processor protocol check between mint and processor is
+  # strict-equality, so a drifted pin ships a broken pairing.
+  pin-check:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Patch applies to the pinned cdk rev
+      - name: cdk rev pins agree
         run: |
-          CDK_REV=$(sed -n 's/^ARG CDK_REV=//p' Dockerfile)
+          CDK_REV=$(sed -n 's/^ARG CDK_REV=//p' docker/mintd/Dockerfile)
           test -n "$CDK_REV"
-          # Dockerfile and processor/Cargo.toml must pin the same rev — the
-          # payment-processor protocol check is strict-equality.
           grep -q "rev = \"$CDK_REV\"" processor/Cargo.toml
-          git init -q cdk-pin-check
-          cd cdk-pin-check
-          git remote add origin https://github.com/cashubtc/cdk
-          git fetch --depth 1 origin "$CDK_REV"
-          git checkout -q FETCH_HEAD
-          git apply --check ../patches/cdk-managed-units.patch
+          grep -q "$CDK_REV" processor/src/config.rs
 
   shellcheck:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck install.sh scripts/*.sh
+      - run: shellcheck install.sh

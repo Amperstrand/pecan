@@ -1,0 +1,74 @@
+# Example cdk-mintd configuration for a mint attached to the branch processor.
+#
+# The mint is yours: its seed, database, backups, and keysets are managed by
+# you with cdk's own tooling. Only the [[ln]] and [grpc_processor] blocks
+# concern the processor — the console's Mint tab generates exactly those for
+# your configured unit; copy them from there rather than editing by hand.
+#
+# Compatibility: cdk-mintd must be built from the cdk revision shown in the
+# console's Mint tab (PR cashubtc/cdk#2295 — payment-processor protocol 4.0.0,
+# checked strictly at connect time). docker/mintd/Dockerfile in this repo
+# builds exactly that until an upstream release contains the PR.
+
+[info]
+url = "http://localhost:8089"
+listen_host = "0.0.0.0"
+listen_port = 8089
+# Embedded signatory seed.
+# !!! DEMO SEED — replace before any non-throwaway use. Anyone with this seed
+# !!! can forge the mint's keys. Back the real one up somewhere safe.
+mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+[info.http_cache]
+backend = "memory"
+ttl = 60
+tti = 60
+
+# Seeds a FRESH mint database only — counter-friendly quote lifetimes. cdk's
+# defaults (3600 s mint, 60 s melt) make payouts fragile: a customer's wallet
+# showing a confirmation screen misses a 60 s melt window. On an existing
+# database, adjust QuoteTTL over the management RPC instead; the processor's
+# self-test warns when it observes short lifetimes.
+[info.quote_ttl]
+mint_ttl = 1800
+melt_ttl = 900
+
+[mint_info]
+name = "Pecan"
+description = "Cashu mint for a custom unit (ora). Wallets create locked quotes; a branch operator settles them by quote id."
+
+[database]
+engine = "sqlite"
+
+# Route the custom unit "ora" to the branch processor instead of a Lightning
+# backend. The unit must match the processor's configured unit byte-for-byte.
+[[ln]]
+ln_backend = "grpcprocessor"
+unit = "ora"
+min_mint = 1
+max_mint = 500000
+min_melt = 1
+max_melt = 500000
+
+[grpc_processor]
+supported_units = ["ora"]
+address = "127.0.0.1"
+port = 50051
+# The gRPC link is plaintext: keep it on the same host or a private network.
+# Alternatively set tls_dir (and GRPC_TLS_DIR on the processor side) for
+# mutual TLS; the console's snippet adjusts automatically.
+allow_insecure = true
+
+# Optional, off by default. Heads-up: while the management RPC is enabled,
+# cdk pins the mint's advertised capabilities to the database at first boot —
+# later [[ln]] config edits will not appear in /v1/info until you update them
+# over the RPC (cdk-mint-cli update-nut04 / update-nut05) or restart with the
+# RPC disabled. The console's checklist detects and explains this situation.
+#[mint_management_rpc]
+#enabled = true
+#address = "127.0.0.1"
+#port = 8091
+
+[limits]
+max_inputs = 1000
+max_outputs = 1000

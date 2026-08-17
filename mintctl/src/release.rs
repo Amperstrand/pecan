@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 
-pub const REPO: &str = "zeugmaster/custom-unit-mint";
+pub const REPO: &str = "zeugmaster/pecan";
 
 /// Release tag stamped by CI (`MINTCTL_VERSION=vX.Y.Z`); "dev" from a checkout.
 pub fn own_version() -> &'static str {

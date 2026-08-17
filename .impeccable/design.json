@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-06-13T23:53:32+02:00",
-  "title": "Design System: Custom Unit Mint",
+  "title": "Design System: Pecan",
   "extensions": {
     "colorMeta": {
       "bg": {
@@ -167,7 +167,7 @@
   ],
   "narrative": {
     "northStar": "The Operations Console",
-    "overview": "Custom Unit Mint is calm, exact, operational infrastructure software. It favors dense but readable panels, explicit state, and familiar controls so branch operators and mint administrators can provision and run a custom unit mint without editing config files or knowing CDK internals.",
+    "overview": "Pecan is calm, exact, operational infrastructure software. It favors dense but readable panels, explicit state, and familiar controls so branch operators and mint administrators can provision and run a custom unit mint without editing config files or knowing CDK internals.",
     "keyCharacteristics": [
       "Restrained, high-contrast product UI.",
       "Dense operational layouts with clear grouping and stable dimensions.",

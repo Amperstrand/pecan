@@ -1,13 +1,11 @@
 # Auto-loaded by Docker Compose from a source checkout only — the installer
 # ships docker-compose.yml alone, so production never sees this file. Adds the
 # local build path so the README's `docker compose up --build` keeps working,
-# tagged custom-unit-mint:dev so it never shadows the published
-# ghcr.io/zeugmaster/custom-unit-mint tags. To exercise the exact production
+# tagged pecan:dev so it never shadows the published
+# ghcr.io/zeugmaster/pecan tags. To exercise the exact production
 # shape from a checkout, run `docker compose -f docker-compose.yml up`.
 services:
   processor:
-    image: custom-unit-mint:dev
+    image: pecan:dev
     build:
       context: .
-  mint:
-    image: custom-unit-mint:dev

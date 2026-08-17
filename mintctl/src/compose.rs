@@ -9,7 +9,7 @@ use anyhow::{bail, Context as _, Result};
 use crate::ui::{self, Ui};
 
 pub const BIN_LINK: &str = "/usr/local/bin/mintctl";
-pub const DEFAULT_LINUX_DIR: &str = "/opt/custom-unit-mint";
+pub const DEFAULT_LINUX_DIR: &str = "/opt/pecan";
 
 /// An existing installation (subcommand context): the directory holding
 /// docker-compose.yml, .env, and the mintctl binary itself.
@@ -84,18 +84,6 @@ impl Stack {
         );
     }
 
-    /// Same, but capture stdout; failures return an empty string (callers use
-    /// this for best-effort probes like reading /run/mint-state).
-    pub fn compose_capture(&self, args: &[&str]) -> String {
-        self.compose_command(args)
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-            .unwrap_or_default()
-    }
-
     fn compose_command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new("docker");
         cmd.arg("compose")
@@ -113,7 +101,7 @@ pub fn project_name(install_dir: &Path) -> String {
     let base = install_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_else(|| "custom-unit-mint".into());
+        .unwrap_or_else(|| "pecan".into());
     base.chars()
         .map(|c| {
             if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
@@ -263,7 +251,7 @@ mod tests {
 
     #[test]
     fn project_name_sanitizes_like_bash() {
-        assert_eq!(project_name(Path::new("/opt/custom-unit-mint")), "custom-unit-mint");
+        assert_eq!(project_name(Path::new("/opt/pecan")), "pecan");
         assert_eq!(project_name(Path::new("/srv/My Mint!")), "my-mint-");
         assert_eq!(project_name(Path::new("/x/under_score.dot")), "under_score-dot");
     }

@@ -1,11 +1,17 @@
 //! Operator web API for the branch payment backend.
 //!
 //! Auth: username + password against the users.json store. POST /api/login →
-//! cookie session id, persisted in sessions.json so config-change restarts do
-//! not sign operators out. All other /api routes require a valid session whose
+//! cookie session id, persisted in sessions.json so processor restarts do not
+//! sign operators out. All other /api routes require a valid session whose
 //! user still exists.
+//!
+//! The mint is external and operator-run: this API only reads its public
+//! surfaces (checklist, identity, keysets, per-quote cross-checks) and writes
+//! nothing but the processor's own attachment config — which applies live,
+//! without a restart.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,36 +24,36 @@ use axum::Router;
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use tokio::time::{sleep, Duration};
+use tokio::sync::RwLock;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::backend::BranchBackend;
-use crate::clients::{MintHttpClient, MintRpcClient};
-use crate::config::{
-    parse_amounts, AppConfig, ConfigStore, RolloverPolicy, UnitLifecycle, PASSWORD_MIN_LENGTH,
-};
+use crate::checks::{self, Check, MintIdentity, SelfTestOutcome};
+use crate::clients::{KeysetEntry, MintHttpClient};
+use crate::config::{render_mint_snippet, AppConfig, ConfigStore, PASSWORD_MIN_LENGTH};
 use crate::sessions::SessionStore;
 use crate::state::{
     normalize_match_input, BranchState, MatchResult, Ticket, TicketKind, TicketStatus,
 };
-use crate::supply::{per_unit_supply, SupplyReader};
 use crate::users::{PublicUser, UserError, UserStore};
 
 #[derive(Clone)]
 pub struct WebState {
     pub branch: BranchState,
     pub backend: Arc<BranchBackend>,
-    pub mint_rpc: MintRpcClient,
-    pub mint_http: MintHttpClient,
-    pub supply: SupplyReader,
-    pub config: Arc<AppConfig>,
+    pub config: Arc<RwLock<AppConfig>>,
+    pub config_store: ConfigStore,
     pub users: UserStore,
     pub sessions: SessionStore,
-    pub method: Arc<String>,
-    pub default_amounts: Arc<Vec<u64>>,
-    pub config_store: ConfigStore,
     /// Image/build version (CDK_BRANCH_PROCESSOR_VERSION), "dev" outside CI.
     pub version: Arc<String>,
+    /// Where this process actually listens for the mint ("0.0.0.0:50051").
+    pub grpc_bind: Arc<String>,
+    /// Whether the gRPC endpoint serves TLS (CDK_BRANCH_PROCESSOR_TLS_DIR);
+    /// decides which transport stanza the config snippet emits.
+    pub grpc_tls: bool,
+    pub self_test: Arc<RwLock<Option<SelfTestOutcome>>>,
+    pub self_test_running: Arc<AtomicBool>,
 }
 
 impl WebState {
@@ -55,30 +61,28 @@ impl WebState {
     pub fn new(
         branch: BranchState,
         backend: Arc<BranchBackend>,
-        mint_rpc: MintRpcClient,
-        mint_http: MintHttpClient,
-        supply: SupplyReader,
-        config: AppConfig,
+        config: Arc<RwLock<AppConfig>>,
         config_store: ConfigStore,
         users: UserStore,
         sessions: SessionStore,
         version: String,
+        grpc_bind: String,
+        grpc_tls: bool,
+        self_test: Arc<RwLock<Option<SelfTestOutcome>>>,
+        self_test_running: Arc<AtomicBool>,
     ) -> Self {
-        let method = config.mint.method.clone();
-        let default_amounts = config.rollover.amounts.clone();
         Self {
             branch,
             backend,
-            mint_rpc,
-            mint_http,
-            supply,
-            config: Arc::new(config),
+            config,
+            config_store,
             users,
             sessions,
-            method: Arc::new(method),
-            default_amounts: Arc::new(default_amounts),
-            config_store,
             version: Arc::new(version),
+            grpc_bind: Arc::new(grpc_bind),
+            grpc_tls,
+            self_test,
+            self_test_running,
         }
     }
 }
@@ -97,13 +101,8 @@ pub fn router(state: WebState) -> Router {
         .route("/api/quotes/match", post(api_match_quote))
         .route("/api/tickets/{id}/mark-paid", post(api_mark_paid))
         .route("/api/tickets/{id}/mark-failed", post(api_mark_failed))
-        .route("/api/keysets/rotate", post(api_rotate_keyset))
-        .route("/api/units", post(api_add_unit))
-        .route("/api/units/{unit}/lifecycle", post(api_set_unit_lifecycle))
-        .route("/api/units/{unit}/policy", post(api_set_unit_policy))
-        .route("/api/settings/identity", post(api_update_identity))
-        .route("/api/settings/mint-connection", post(api_set_mint_connection))
-        .route("/api/settings/mnemonic", post(api_reveal_mnemonic))
+        .route("/api/settings/attachment", post(api_set_attachment))
+        .route("/api/mint/self-test", post(api_self_test))
         .route("/api/users", post(api_users_create))
         .route("/api/users/{username}", delete(api_users_delete))
         .route(
@@ -128,11 +127,11 @@ struct HealthzBody {
     version: String,
 }
 
-/// Liveness only, deliberately: mint "Standby" (zero units yet) is a normal
+/// Liveness only, deliberately: an unattached processor is a normal
 /// long-lived state and must not fail container health, and this is polled
 /// every few seconds — no store reads, no mint probes, no auth. Subsystem
-/// truth lives in the authenticated /api/app health tiles. The version lets
-/// the installer confirm which build is answering after an update.
+/// truth lives in the authenticated /api/app checklist. The version lets the
+/// installer confirm which build is answering after an update.
 async fn healthz(State(state): State<WebState>) -> Response {
     let mut resp = Json(HealthzBody {
         status: "ok",
@@ -243,7 +242,7 @@ fn web_dist_candidates() -> Vec<PathBuf> {
     }
     candidates.push(PathBuf::from("web/dist"));
     candidates.push(PathBuf::from("../web/dist"));
-    candidates.push(PathBuf::from("/usr/local/share/custom-unit-mint/web"));
+    candidates.push(PathBuf::from("/usr/local/share/pecan/web"));
     candidates
 }
 
@@ -334,41 +333,28 @@ async fn require_api_auth(state: &WebState, headers: &HeaderMap) -> Result<Authe
 struct ApiAppSnapshot {
     now: u64,
     session: ApiSessionInfo,
-    mint: ApiMintConfig,
-    endpoints: ApiEndpoints,
-    rollover: ApiRollover,
-    default_amounts: Vec<u64>,
-    health: ApiHealth,
-    keysets: ApiKeysetsSnapshot,
-    active_keyset: Option<crate::clients::KeysetEntry>,
-    summary: MintSummary,
-    unit_summaries: Vec<ApiUnitSummary>,
-    supply: ApiSupply,
-    circulation: Vec<CirculationPoint>,
-    open_quotes: Vec<ApiOpenQuote>,
-    recent_done: Vec<ApiTicket>,
-    units: Vec<ApiManagedUnit>,
-    capabilities: Vec<ApiCapability>,
-    consistency: ApiConsistency,
     users: Vec<PublicUser>,
     demo_password_active: bool,
     password_min_length: usize,
     version: String,
-    mint_connection: ApiMintConnection,
-}
-
-#[derive(Serialize)]
-struct ApiMintConnection {
-    /// "bundled" | "unset" | "external"
-    mode: &'static str,
-    http_url: Option<String>,
-    rpc_url: Option<String>,
-    advertised_grpc: Option<String>,
-    /// Feature availability in this mode, stated instead of implied.
-    supply_audit: bool,
-    management_rpc: bool,
-    /// External mode: the mint.toml fragment for the operator's cdk-mintd.
-    external_snippet: Option<String>,
+    setup: ApiSetup,
+    attach_signals: ApiAttachSignals,
+    checklist: Vec<Check>,
+    self_test: Option<SelfTestOutcome>,
+    /// The mint.toml fragment for the operator's cdk-mintd; None until the
+    /// unit and advertised gRPC endpoint are configured.
+    snippet: Option<String>,
+    /// Read-only identity of the attached mint, from its /v1/info.
+    mint_identity: Option<MintIdentity>,
+    /// The configured unit's keysets at the mint (read-only).
+    keysets: Vec<KeysetEntry>,
+    keysets_error: Option<String>,
+    summary: MintSummary,
+    circulation: Vec<CirculationPoint>,
+    open_quotes: Vec<ApiOpenQuote>,
+    recent_done: Vec<ApiTicket>,
+    /// One-time migration notice: this install previously managed its mint.
+    migrated_from_managed: bool,
 }
 
 #[derive(Serialize)]
@@ -380,109 +366,26 @@ struct ApiSessionInfo {
 }
 
 #[derive(Serialize)]
-struct ApiMintConfig {
-    name: String,
-    description: String,
-    description_long: String,
+struct ApiSetup {
     unit: String,
+    unit_locked: bool,
+    /// Whether the unit field is editable right now (not locked, and no real
+    /// tickets reference it yet).
+    unit_change_allowed: bool,
     method: String,
+    mint_url: String,
+    advertised_grpc: String,
+    /// Where this process actually listens for the mint.
+    grpc_bind: String,
+    grpc_tls: bool,
+    attached: bool,
+    setup_complete: bool,
 }
 
 #[derive(Serialize)]
-struct ApiEndpoints {
-    public_url: String,
-    mint_http_url: String,
-    mint_rpc_url: String,
-    processor_grpc_addr: String,
-    processor_grpc_port: u16,
-}
-
-#[derive(Serialize)]
-struct ApiRollover {
-    enabled: bool,
-    keyset_lifetime_days: u64,
-    rotate_before_expiry_days: u64,
-    input_fee_ppk: u64,
-    amounts: Vec<u64>,
-}
-
-#[derive(Serialize)]
-struct ApiManagedUnit {
-    unit: String,
-    lifecycle: UnitLifecycle,
-    configured_at: u64,
-    rollover: ApiRollover,
-    keyset_count: usize,
-    active_keyset: Option<crate::clients::KeysetEntry>,
-    can_mint: bool,
-    can_melt: bool,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-struct ApiCapability {
-    unit: String,
-    method: String,
-    mint: bool,
-    melt: bool,
-    managed: bool,
-}
-
-#[derive(Serialize)]
-struct ApiConsistency {
-    ok: bool,
-    issues: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct ApiUnitSummary {
-    unit: String,
-    mint_count: usize,
-    melt_count: usize,
-    minted_amount: u64,
-    melted_amount: u64,
-    net_issued: i128,
-}
-
-/// Audited supply straight from the mint database (per-keyset issued minus
-/// redeemed, split by keyset expiry). `available: false` with no error means
-/// auditing is disabled or the mint has not created its database yet.
-#[derive(Serialize)]
-struct ApiSupply {
-    available: bool,
-    error: Option<String>,
-    units: Vec<ApiUnitSupply>,
-}
-
-#[derive(Serialize)]
-struct ApiUnitSupply {
-    unit: String,
-    /// Redeemable ecash outstanding under non-expired keysets.
-    live: u64,
-    /// Ecash stranded under keysets past their final expiry.
-    demonetized: u64,
-    /// Value burned as input fees.
-    fee_collected: u64,
-}
-
-#[derive(Serialize)]
-struct ApiHealth {
-    mint_http: ApiHealthItem,
-    management_rpc: ApiHealthItem,
-    payment_backend: ApiHealthItem,
-}
-
-#[derive(Serialize)]
-struct ApiHealthItem {
-    ok: bool,
-    label: String,
-    detail: String,
-}
-
-#[derive(Serialize)]
-struct ApiKeysetsSnapshot {
-    ok: bool,
-    items: Vec<crate::clients::KeysetEntry>,
-    error: Option<String>,
+struct ApiAttachSignals {
+    last_settings_at: Option<u64>,
+    stream_attached_at: Option<u64>,
 }
 
 /// Full ticket view. Ships to the browser only for settled tickets and as the
@@ -554,6 +457,14 @@ struct CirculationPoint {
     circulation: i128,
 }
 
+fn mint_client_for(config: &AppConfig) -> Option<MintHttpClient> {
+    if config.mint_url.is_empty() {
+        None
+    } else {
+        Some(MintHttpClient::new(config.mint_url.clone()))
+    }
+}
+
 async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response {
     // Session-only: the forced-password-change screen renders from this
     // snapshot, so it must stay readable while the change is pending.
@@ -561,49 +472,21 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         Ok(authed) => authed,
         Err(r) => return r,
     };
-
-    // With no non-retired unit the generated mint.toml has no payment backend
-    // and cdk-mintd cannot start (the supervisor waits) — the mint services
-    // being down is the expected state, not an outage.
-    let standby = !state
-        .config
-        .units
-        .iter()
-        .any(|unit| unit.lifecycle != UnitLifecycle::Retired);
-
-    let mut tickets = state.branch.list_all().await;
-    tickets.sort_by_key(|ticket| std::cmp::Reverse(ticket.created_at));
-    let primary_tickets = tickets
-        .iter()
-        .filter(|ticket| ticket.unit == state.config.mint.unit)
-        .cloned()
-        .collect::<Vec<_>>();
-    let summary = MintSummary::from_tickets(&primary_tickets);
+    let config = state.config.read().await.clone();
     let now = unix_now();
 
-    let info_health = state.mint_http.get_info().await;
-    let rpc_health = state.mint_rpc.health().await;
-    let keysets_result = state.mint_http.list_keysets().await;
-    let keyset_items = keysets_result.as_ref().cloned().unwrap_or_default();
-    let active_keyset = keysets_result.as_ref().ok().and_then(|keysets| {
-        keysets
-            .iter()
-            .find(|ks| ks.unit == state.config.mint.unit.as_str() && ks.active)
-            .cloned()
-    });
-    let keysets = match keysets_result {
-        Ok(items) => ApiKeysetsSnapshot {
-            ok: true,
-            items,
-            error: None,
-        },
-        Err(e) => ApiKeysetsSnapshot {
-            ok: false,
-            items: Vec::new(),
-            error: Some(e.to_string()),
-        },
-    };
-
+    // Self-test probes are voided instantly and filtered from every
+    // operator-facing list — they are plumbing, not activity.
+    let mut tickets = state.branch.list_all().await;
+    tickets.retain(|ticket| !checks::is_self_test_ticket(ticket));
+    tickets.sort_by_key(|ticket| std::cmp::Reverse(ticket.created_at));
+    let has_real_tickets = !tickets.is_empty();
+    let unit_tickets: Vec<Ticket> = tickets
+        .iter()
+        .filter(|ticket| ticket.unit == config.unit)
+        .cloned()
+        .collect();
+    let summary = MintSummary::from_tickets(&unit_tickets);
     let open_quotes = tickets
         .iter()
         .filter(|t| t.status.is_active())
@@ -613,151 +496,46 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         .iter()
         .filter(|t| !t.status.is_active())
         .take(50)
-        .map(|ticket| ApiTicket::from_ticket(ticket, &state))
+        .map(ApiTicket::from_ticket)
         .collect();
 
-    let observed_capabilities = info_health
-        .as_ref()
-        .map(capabilities_from_info)
-        .unwrap_or_default();
-    let mut capabilities = observed_capabilities.clone();
-    for managed in &state.config.units {
-        if managed.lifecycle == UnitLifecycle::Retired {
-            continue;
-        }
-        let expected_mint = managed.lifecycle.can_mint();
-        let expected_melt = managed.lifecycle.can_melt();
-        if let Some(existing) = capabilities
-            .iter_mut()
-            .find(|pair| pair.unit == managed.unit && pair.method == state.config.mint.method)
-        {
-            existing.managed = true;
-        } else {
-            capabilities.push(ApiCapability {
-                unit: managed.unit.clone(),
-                method: state.config.mint.method.clone(),
-                mint: expected_mint,
-                melt: expected_melt,
-                managed: true,
-            });
-        }
-    }
-    capabilities.sort();
-
-    let units = state
-        .config
-        .units
-        .iter()
-        .map(|managed| {
-            let unit_keysets: Vec<_> = keyset_items
-                .iter()
-                .filter(|keyset| keyset.unit == managed.unit)
-                .cloned()
-                .collect();
-            ApiManagedUnit {
-                unit: managed.unit.clone(),
-                lifecycle: managed.lifecycle,
-                configured_at: managed.configured_at,
-                rollover: api_rollover(&managed.rollover),
-                keyset_count: unit_keysets.len(),
-                active_keyset: unit_keysets.into_iter().find(|keyset| keyset.active),
-                can_mint: managed.lifecycle.can_mint(),
-                can_melt: managed.lifecycle.can_melt(),
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let mut consistency_issues = Vec::new();
-    if info_health.is_ok() {
-        for managed in &state.config.units {
-            let observed = observed_capabilities
-                .iter()
-                .find(|pair| pair.unit == managed.unit && pair.method == state.config.mint.method);
-            let observed_mint = observed.is_some_and(|pair| pair.mint);
-            let observed_melt = observed.is_some_and(|pair| pair.melt);
-            if observed_mint != managed.lifecycle.can_mint()
-                || observed_melt != managed.lifecycle.can_melt()
-            {
-                consistency_issues.push(format!(
-                    "{} · {} is configured for mint={} melt={} but advertises mint={} melt={}",
-                    managed.unit,
-                    state.config.mint.method,
-                    managed.lifecycle.can_mint(),
-                    managed.lifecycle.can_melt(),
-                    observed_mint,
-                    observed_melt
-                ));
-            }
-            if managed.lifecycle != UnitLifecycle::Retired
-                && !keyset_items
-                    .iter()
-                    .any(|keyset| keyset.unit == managed.unit && keyset.active)
-            {
-                consistency_issues.push(format!(
-                    "{} has no active keyset; teller operations are unavailable",
-                    managed.unit
-                ));
-            }
-        }
-    }
-    // Audited supply: requires the keyset listing (unit + expiry per keyset)
-    // to classify the audit rows — without it the numbers would be wrong, so
-    // report unavailable instead.
-    let supply = if keysets.ok {
-        match state.supply.read().await {
-            Ok(Some(rows)) => ApiSupply {
-                available: true,
-                error: None,
-                units: per_unit_supply(&rows, &keyset_items, now)
-                    .into_iter()
-                    .map(|unit| ApiUnitSupply {
-                        unit: unit.unit,
-                        live: unit.live,
-                        demonetized: unit.demonetized,
-                        fee_collected: unit.fee_collected,
-                    })
-                    .collect(),
-            },
-            Ok(None) => ApiSupply {
-                available: false,
-                error: None,
-                units: Vec::new(),
-            },
-            Err(e) => ApiSupply {
-                available: false,
-                error: Some(e.to_string()),
-                units: Vec::new(),
-            },
-        }
-    } else {
-        ApiSupply {
-            available: false,
-            error: Some("keyset listing unavailable".to_string()),
-            units: Vec::new(),
-        }
+    // Probe the attached mint's public surfaces (short timeouts; see clients.rs).
+    let mint = mint_client_for(&config);
+    let info_result = match &mint {
+        Some(client) => Some(client.get_info().await),
+        None => None,
+    };
+    let keysets_result = match &mint {
+        Some(client) => Some(client.list_keysets().await),
+        None => None,
     };
 
-    let unit_summaries = state
-        .config
-        .units
-        .iter()
-        .map(|managed| {
-            let matching = tickets
-                .iter()
-                .filter(|ticket| ticket.unit == managed.unit)
-                .cloned()
-                .collect::<Vec<_>>();
-            let summary = MintSummary::from_tickets(&matching);
-            ApiUnitSummary {
-                unit: managed.unit.clone(),
-                mint_count: summary.mint_count,
-                melt_count: summary.melt_count,
-                minted_amount: summary.minted_amount,
-                melted_amount: summary.melted_amount,
-                net_issued: summary.net_issued,
-            }
-        })
-        .collect();
+    let self_test = state.self_test.read().await.clone();
+    let checklist = checks::evaluate(&checks::ChecklistInputs {
+        unit: &config.unit,
+        method: &config.method,
+        mint_url: &config.mint_url,
+        info: info_result.as_ref(),
+        keysets: keysets_result.as_ref(),
+        last_settings_at: state.backend.last_settings_at(),
+        stream_attached_at: state.backend.stream_attached_at(),
+        self_test: self_test.as_ref(),
+    });
+    let mint_identity = match &info_result {
+        Some(Ok(info)) => Some(checks::mint_identity(info)),
+        _ => None,
+    };
+    let (keysets, keysets_error) = match keysets_result {
+        Some(Ok(items)) => (
+            items
+                .into_iter()
+                .filter(|keyset| keyset.unit == config.unit)
+                .collect(),
+            None,
+        ),
+        Some(Err(e)) => (Vec::new(), Some(format!("{e:#}"))),
+        None => (Vec::new(), None),
+    };
 
     Json(ApiAppSnapshot {
         now,
@@ -769,230 +547,39 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
         demo_password_active: state.users.demo_password_active().await,
         password_min_length: PASSWORD_MIN_LENGTH,
         version: state.version.as_ref().clone(),
-        mint: ApiMintConfig {
-            name: state.config.mint.name.clone(),
-            description: state.config.mint.description.clone(),
-            description_long: state.config.mint.description_long.clone(),
-            unit: state.config.mint.unit.clone(),
-            method: state.config.mint.method.clone(),
+        setup: ApiSetup {
+            unit: config.unit.clone(),
+            unit_locked: config.unit_locked,
+            unit_change_allowed: !config.unit_locked && !has_real_tickets,
+            method: config.method.clone(),
+            mint_url: config.mint_url.clone(),
+            advertised_grpc: config.advertised_grpc.clone(),
+            grpc_bind: state.grpc_bind.as_ref().clone(),
+            grpc_tls: state.grpc_tls,
+            attached: config.is_attached(),
+            setup_complete: config.setup_complete(),
         },
-        endpoints: ApiEndpoints {
-            public_url: state.config.endpoints.public_url.clone(),
-            mint_http_url: state.config.endpoints.mint_http_url.clone(),
-            mint_rpc_url: state.config.endpoints.mint_rpc_url.clone(),
-            processor_grpc_addr: state.config.endpoints.processor_grpc_addr.clone(),
-            processor_grpc_port: state.config.endpoints.processor_grpc_port,
+        attach_signals: ApiAttachSignals {
+            last_settings_at: state.backend.last_settings_at(),
+            stream_attached_at: state.backend.stream_attached_at(),
         },
-        rollover: api_rollover(&state.config.rollover),
-        default_amounts: (*state.default_amounts).clone(),
-        health: ApiHealth {
-            mint_http: standby_aware(
-                health_item(info_health.as_ref().map(|_| ())),
-                standby,
-                &state.config.mint_connection,
-            ),
-            management_rpc: management_rpc_health(
-                &state,
-                health_item(rpc_health.as_ref().map(|_| ())),
-                standby,
-            ),
-            payment_backend: payment_backend_health(&state, standby),
-        },
+        checklist,
+        self_test,
+        snippet: render_mint_snippet(&config, state.grpc_tls),
+        mint_identity,
         keysets,
-        active_keyset,
+        keysets_error,
         summary,
-        unit_summaries,
-        supply,
-        circulation: circulation_points(&primary_tickets),
+        circulation: circulation_points(&unit_tickets),
         open_quotes,
         recent_done,
-        units,
-        capabilities,
-        consistency: ApiConsistency {
-            ok: consistency_issues.is_empty(),
-            issues: consistency_issues,
-        },
-        mint_connection: api_mint_connection(&state),
+        migrated_from_managed: config.migrated_from_managed,
     })
     .into_response()
 }
 
-fn api_mint_connection(state: &WebState) -> ApiMintConnection {
-    use crate::config::MintConnection;
-    match &state.config.mint_connection {
-        MintConnection::Bundled => ApiMintConnection {
-            mode: "bundled",
-            http_url: None,
-            rpc_url: None,
-            advertised_grpc: None,
-            supply_audit: true,
-            management_rpc: true,
-            external_snippet: None,
-        },
-        MintConnection::Unset => ApiMintConnection {
-            mode: "unset",
-            http_url: None,
-            rpc_url: None,
-            advertised_grpc: None,
-            supply_audit: false,
-            management_rpc: false,
-            external_snippet: None,
-        },
-        MintConnection::External {
-            http_url,
-            rpc_url,
-            advertised_grpc,
-        } => ApiMintConnection {
-            mode: "external",
-            http_url: Some(http_url.clone()),
-            rpc_url: rpc_url.clone(),
-            advertised_grpc: Some(advertised_grpc.clone()),
-            supply_audit: false,
-            management_rpc: rpc_url.is_some(),
-            external_snippet: crate::config::render_external_mint_snippet(&state.config),
-        },
-    }
-}
-
-fn api_rollover(policy: &RolloverPolicy) -> ApiRollover {
-    ApiRollover {
-        enabled: policy.enabled,
-        keyset_lifetime_days: policy.keyset_lifetime_days,
-        rotate_before_expiry_days: policy.rotate_before_expiry_days,
-        input_fee_ppk: policy.input_fee_ppk,
-        amounts: policy.amounts.clone(),
-    }
-}
-
-fn capabilities_from_info(info: &serde_json::Value) -> Vec<ApiCapability> {
-    let mut pairs = std::collections::BTreeMap::<(String, String), (bool, bool)>::new();
-    for (nut, mint_direction) in [("4", true), ("5", false)] {
-        let methods = info
-            .get("nuts")
-            .and_then(|nuts| nuts.get(nut))
-            .and_then(|settings| settings.get("methods"))
-            .and_then(serde_json::Value::as_array);
-        for method in methods.into_iter().flatten() {
-            let Some(unit) = method.get("unit").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let Some(method_name) = method.get("method").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let entry = pairs
-                .entry((unit.to_string(), method_name.to_string()))
-                .or_insert((false, false));
-            if mint_direction {
-                entry.0 = true;
-            } else {
-                entry.1 = true;
-            }
-        }
-    }
-    pairs
-        .into_iter()
-        .map(|((unit, method), (mint, melt))| ApiCapability {
-            unit,
-            method,
-            mint,
-            melt,
-            managed: false,
-        })
-        .collect()
-}
-
-fn health_item<T>(result: Result<T, &anyhow::Error>) -> ApiHealthItem {
-    let ok = result.is_ok();
-    ApiHealthItem {
-        ok,
-        label: health_label(ok).to_string(),
-        detail: match result {
-            Ok(_) => "Responding normally".to_string(),
-            Err(e) => e.to_string(),
-        },
-    }
-}
-
-/// Honest payment-backend tile: report whether cdk-mintd has actually
-/// attached to the gRPC payment stream since this processor started, instead
-/// of the unconditional "Listening" it used to claim. The flag never clears
-/// on a later mint outage — the mint_http/management_rpc tiles are the live
-/// probes for that.
-fn payment_backend_health(state: &WebState, standby: bool) -> ApiHealthItem {
-    let grpc_endpoint = format!(
-        "{}:{}",
-        state.config.endpoints.processor_grpc_addr, state.config.endpoints.processor_grpc_port
-    );
-    if state.backend.payment_stream_attached() {
-        ApiHealthItem {
-            ok: true,
-            label: "Connected".to_string(),
-            detail: format!("cdk-mintd is attached to the payment stream ({grpc_endpoint})"),
-        }
-    } else {
-        standby_aware(
-            ApiHealthItem {
-                ok: false,
-                label: "Waiting".to_string(),
-                detail: format!(
-                    "the mint has not attached to {grpc_endpoint} since the processor started"
-                ),
-            },
-            standby,
-            &state.config.mint_connection,
-        )
-    }
-}
-
-/// The management-RPC tile: in external mode without an RPC URL the probe
-/// is not failing, the feature is off — say that instead of alarming.
-fn management_rpc_health(state: &WebState, item: ApiHealthItem, standby: bool) -> ApiHealthItem {
-    use crate::config::MintConnection;
-    if let MintConnection::External { rpc_url: None, .. } = &state.config.mint_connection {
-        return ApiHealthItem {
-            ok: true,
-            label: "Not configured".to_string(),
-            detail: "No management RPC for the external mint — keyset rotation and \
-                     quote-TTL sync are disabled"
-                .to_string(),
-        };
-    }
-    standby_aware(item, standby, &state.config.mint_connection)
-}
-
-/// Reframe an expected outage as standby instead of an error: zero units on
-/// an attached mint, or a processor-only install with nothing connected yet.
-fn standby_aware(
-    item: ApiHealthItem,
-    standby: bool,
-    connection: &crate::config::MintConnection,
-) -> ApiHealthItem {
-    use crate::config::MintConnection;
-    if item.ok {
-        return item;
-    }
-    match connection {
-        MintConnection::Unset => ApiHealthItem {
-            ok: false,
-            label: "Not connected".to_string(),
-            detail: "No mint is connected yet — choose one in the Mint tab".to_string(),
-        },
-        MintConnection::External { .. } if standby => ApiHealthItem {
-            ok: false,
-            label: "Standby".to_string(),
-            detail: "Add the first unit, then apply the config snippet to your mint".to_string(),
-        },
-        MintConnection::Bundled if standby => ApiHealthItem {
-            ok: false,
-            label: "Standby".to_string(),
-            detail: "The mint starts once the first unit is added".to_string(),
-        },
-        _ => item,
-    }
-}
-
 impl ApiTicket {
-    fn from_ticket(ticket: &Ticket, _state: &WebState) -> Self {
+    fn from_ticket(ticket: &Ticket) -> Self {
         Self {
             id: ticket.id.clone(),
             short_id: short_id(&ticket.id),
@@ -1133,17 +720,17 @@ async fn api_match_quote(
             if let Err(r) = verify_with_mint(&state, &ticket).await {
                 return r;
             }
-            Json(ApiTicket::from_ticket(&ticket, &state)).into_response()
+            Json(ApiTicket::from_ticket(&ticket)).into_response()
         }
     }
 }
 
 /// Cross-check a matched ticket against the mint's own record before the
 /// operator sees a confirm card. Catches orphaned tickets (the mint died
-/// before committing the quote), quotes already settled at the mint, and —
-/// loudly, at the counter — a mint running without cdk-managed-units.patch.
-/// Refuses when the mint is unreachable: confirming cash movements on stale
-/// knowledge is worse than asking the customer to wait a moment.
+/// before committing the quote), quotes already settled at the mint, and a
+/// quote that is not NUT-20-locked. Refuses when the mint is unreachable:
+/// confirming cash movements on stale knowledge is worse than asking the
+/// customer to wait a moment.
 async fn verify_with_mint(state: &WebState, ticket: &Ticket) -> Result<(), Response> {
     let Some(quote_id) = ticket.quote_id.as_deref() else {
         return Err(api_error(
@@ -1151,9 +738,16 @@ async fn verify_with_mint(state: &WebState, ticket: &Ticket) -> Result<(), Respo
             "this ticket has no mint quote id and cannot be settled",
         ));
     };
-    let method = state.method.as_str();
+    let config = state.config.read().await.clone();
+    let Some(mint) = mint_client_for(&config) else {
+        return Err(api_error(
+            StatusCode::BAD_GATEWAY,
+            "no mint is attached — set the mint URL in the Mint tab before settling",
+        ));
+    };
+    let method = config.method.as_str();
     match ticket.kind {
-        TicketKind::Incoming => match state.mint_http.get_mint_quote(method, quote_id).await {
+        TicketKind::Incoming => match mint.get_mint_quote(method, quote_id).await {
             Err(e) => Err(api_error(
                 StatusCode::BAD_GATEWAY,
                 format!("cannot verify the quote with the mint right now: {e}"),
@@ -1177,8 +771,9 @@ async fn verify_with_mint(state: &WebState, ticket: &Ticket) -> Result<(), Respo
                         "the mint's record disagrees with this quote; do not settle it",
                     ))
                 } else if quote.pubkey.as_deref().unwrap_or("").is_empty() {
-                    // Cannot happen through a patched mint (creation refuses
-                    // unlocked quotes) — seeing it means the mint build is wrong.
+                    // Cannot happen for quotes created through this backend
+                    // (creation refuses unlocked quotes) — seeing it means the
+                    // quote was created against a different processor.
                     Err(api_error(
                         StatusCode::CONFLICT,
                         "this quote is not locked to a wallet key (NUT-20); do not accept cash for it",
@@ -1188,7 +783,7 @@ async fn verify_with_mint(state: &WebState, ticket: &Ticket) -> Result<(), Respo
                 }
             }
         },
-        TicketKind::Outgoing => match state.mint_http.get_melt_quote(method, quote_id).await {
+        TicketKind::Outgoing => match mint.get_melt_quote(method, quote_id).await {
             Err(e) => Err(api_error(
                 StatusCode::BAD_GATEWAY,
                 format!("cannot verify the quote with the mint right now: {e}"),
@@ -1228,7 +823,7 @@ async fn api_mark_paid(
         return r;
     }
     match mark_paid_inner(&state, &id, form.notes).await {
-        Ok(ticket) => Json(ApiTicket::from_ticket(&ticket, &state)).into_response(),
+        Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -1243,394 +838,153 @@ async fn api_mark_failed(
         return r;
     }
     match mark_failed_inner(&state, &id, form.notes).await {
-        Ok(ticket) => Json(ApiTicket::from_ticket(&ticket, &state)).into_response(),
+        Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
 }
 
-async fn api_rotate_keyset(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-    Json(form): Json<RotateForm>,
-) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
-        return r;
-    }
-    match rotate_keyset_inner(&state, form).await {
-        Ok(()) => Json(ApiMessage { message: "rotated" }).into_response(),
-        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
-    }
-}
+// ---------------- attachment setup ----------------
 
 #[derive(Deserialize)]
-struct AddUnitForm {
-    unit: String,
-    keyset_lifetime_days: u64,
-    rotate_before_expiry_days: u64,
+struct AttachmentForm {
+    /// Omitted or empty = keep the current unit.
     #[serde(default)]
-    input_fee_ppk: u64,
-    amounts: String,
-}
-
-#[derive(Deserialize)]
-struct UnitLifecycleForm {
-    lifecycle: UnitLifecycle,
-    /// External mints only: retire even though the mint is unreachable and
-    /// the keyset-expiry guard cannot run. The console asks for this
-    /// explicitly so an operator is never locked into a dead external mint.
+    unit: Option<String>,
     #[serde(default)]
-    force_unverified: bool,
-}
-
-#[derive(Deserialize)]
-struct IdentityForm {
-    name: String,
-    description: String,
-    #[serde(default)]
-    description_long: String,
-    public_url: String,
-}
-
-async fn api_add_unit(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-    Json(form): Json<AddUnitForm>,
-) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
-        return r;
-    }
-    let amounts = match parse_amounts(&form.amounts) {
-        Ok(amounts) => amounts,
-        Err(e) => return api_error(StatusCode::BAD_REQUEST, format!("amounts: {e}")),
-    };
-    let mut config = (*state.config).clone();
-    let policy = RolloverPolicy {
-        enabled: true,
-        keyset_lifetime_days: form.keyset_lifetime_days,
-        rotate_before_expiry_days: form.rotate_before_expiry_days,
-        input_fee_ppk: form.input_fee_ppk,
-        amounts,
-    };
-    if let Err(e) = config.add_unit(&form.unit, policy, unix_now()) {
-        return api_error(StatusCode::BAD_REQUEST, e.to_string());
-    }
-    match persist_config_and_restart(&state, &config).await {
-        Ok(()) => Json(ApiMessage {
-            message: "restarting",
-        })
-        .into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
-async fn api_set_unit_lifecycle(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-    AxumPath(unit): AxumPath<String>,
-    Json(form): Json<UnitLifecycleForm>,
-) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
-        return r;
-    }
-    // Funded withdrawals hold locked customer proofs — those must be settled
-    // or voided by hand. Open unfunded wallet quotes must NOT block console
-    // actions (anyone can create them); they are voided here instead.
-    let active = state.branch.active_tickets().await;
-    let funded_melts = active
-        .iter()
-        .filter(|ticket| {
-            ticket.unit == unit
-                && ticket.kind == TicketKind::Outgoing
-                && ticket.status == TicketStatus::Pending
-        })
-        .count();
-    if funded_melts > 0 {
-        return api_error(
-            StatusCode::CONFLICT,
-            format!(
-                "{funded_melts} funded withdrawal(s) for {unit} await payout; settle or void them first"
-            ),
-        );
-    }
-    for ticket in active.iter().filter(|ticket| ticket.unit == unit) {
-        if let Err(e) = state
-            .branch
-            .mark_failed(&ticket.id, Some("voided: unit lifecycle changed".into()))
-            .await
-        {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("void open {unit} quotes: {e}"),
-            );
-        }
-    }
-    if form.lifecycle == UnitLifecycle::Retired {
-        let external = !state.config.mint_connection.is_bundled();
-        let keysets = match state.mint_http.list_keysets().await {
-            Ok(keysets) => keysets,
-            // An unreachable EXTERNAL mint must not hold the config hostage:
-            // with the explicit acknowledgement the expiry guard is skipped
-            // (the funded-withdrawal guard above already ran). The bundled
-            // mint is ours to reach — no override there.
-            Err(_) if external && form.force_unverified => {
-                tracing::warn!(
-                    "retiring {unit} without the keyset-expiry check: the external \
-                     mint is unreachable and the operator acknowledged it"
-                );
-                Vec::new()
-            }
-            Err(e) if external => {
-                return api_error(
-                    StatusCode::BAD_GATEWAY,
-                    format!(
-                        "mint unreachable: could not verify {unit} keyset expiry ({e}); \
-                         bring your mint back up, or retire anyway if it is gone for good"
-                    ),
-                )
-            }
-            Err(e) => {
-                return api_error(
-                    StatusCode::BAD_GATEWAY,
-                    format!("could not verify {unit} keyset expiry: {e}"),
-                )
-            }
-        };
-        let now = unix_now();
-        let blocking = keysets.iter().filter(|keyset| {
-            keyset.unit == unit && keyset.final_expiry.is_none_or(|expiry| expiry > now)
-        });
-        let count = blocking.count();
-        if count > 0 {
-            return api_error(
-                StatusCode::CONFLICT,
-                format!(
-                    "{unit} cannot be retired: {count} keyset(s) have not reached a final expiry; keep the unit redemption-only"
-                ),
-            );
-        }
-    }
-    let mut config = (*state.config).clone();
-    if let Err(e) = config.set_unit_lifecycle(&unit, form.lifecycle) {
-        return api_error(StatusCode::BAD_REQUEST, e.to_string());
-    }
-    match persist_config_and_restart(&state, &config).await {
-        Ok(()) => Json(ApiMessage {
-            message: "restarting",
-        })
-        .into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
-async fn api_update_identity(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-    Json(form): Json<IdentityForm>,
-) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
-        return r;
-    }
-    if form.name.trim().is_empty() || form.description.trim().is_empty() {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "mint name and short description are required",
-        );
-    }
-    let public_url = form.public_url.trim().trim_end_matches('/');
-    if !(public_url.starts_with("http://") || public_url.starts_with("https://")) {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "wallet-facing URL must start with http:// or https://",
-        );
-    }
-    let mut config = (*state.config).clone();
-    config.mint.name = form.name.trim().to_string();
-    config.mint.description = form.description.trim().to_string();
-    config.mint.description_long = if form.description_long.trim().is_empty() {
-        config.mint.description.clone()
-    } else {
-        form.description_long.trim().to_string()
-    };
-    config.endpoints.public_url = public_url.to_string();
-    match persist_config_and_restart(&state, &config).await {
-        Ok(()) => Json(ApiMessage {
-            message: "restarting",
-        })
-        .into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
-#[derive(Deserialize)]
-struct MintConnectionForm {
-    /// "bundled" or "external" — Unset is an install-time state, never a target.
-    mode: String,
-    #[serde(default)]
-    http_url: String,
-    #[serde(default)]
-    rpc_url: String,
+    mint_url: String,
     #[serde(default)]
     advertised_grpc: String,
 }
 
-async fn api_set_mint_connection(
+/// Apply the console's setup/attachment form. Everything applies live — the
+/// gRPC backend picks the unit up immediately, no restart. The attached mint
+/// reads our settings at ITS next start, which the checklist reminds the
+/// operator about.
+async fn api_set_attachment(
     State(state): State<WebState>,
     headers: HeaderMap,
-    Json(form): Json<MintConnectionForm>,
+    Json(form): Json<AttachmentForm>,
 ) -> Response {
-    use crate::config::MintConnection;
     if let Err(r) = require_api_auth(&state, &headers).await {
         return r;
     }
-    let next = match form.mode.as_str() {
-        "bundled" => MintConnection::Bundled,
-        "external" => {
-            let rpc = form.rpc_url.trim().trim_end_matches('/');
-            MintConnection::External {
-                http_url: form.http_url.trim().trim_end_matches('/').to_string(),
-                rpc_url: (!rpc.is_empty()).then(|| rpc.to_string()),
-                advertised_grpc: form.advertised_grpc.trim().trim_end_matches('/').to_string(),
+    let mut config = state.config.read().await.clone();
+    let before_unit = config.unit.clone();
+    let before_url = config.mint_url.clone();
+
+    let requested_unit = form
+        .unit
+        .as_deref()
+        .map(str::trim)
+        .filter(|unit| !unit.is_empty());
+    if let Some(unit) = requested_unit {
+        let normalized = unit.to_ascii_lowercase();
+        if normalized != config.unit {
+            if config.unit_locked {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "the unit is locked: ecash and quotes reference {} — see the \
+                         operations guide before changing it",
+                        config.unit
+                    ),
+                );
+            }
+            let has_real_tickets = state
+                .branch
+                .list_all()
+                .await
+                .iter()
+                .any(|ticket| !checks::is_self_test_ticket(ticket));
+            if has_real_tickets {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    "tickets already reference the current unit; the unit can only be \
+                     changed on an unused install",
+                );
             }
         }
-        other => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                format!("mode must be \"bundled\" or \"external\", not {other:?}"),
-            )
+    }
+    if let Err(e) = config.set_attachment(requested_unit, &form.mint_url, &form.advertised_grpc) {
+        return api_error(StatusCode::BAD_REQUEST, e.to_string());
+    }
+    if let Err(e) = state.config_store.save(&config).await {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("save configuration: {e:#}"),
+        );
+    }
+
+    // Live-apply the unit to the gRPC backend.
+    let unit = if config.unit.is_empty() {
+        None
+    } else {
+        match config.unit.parse() {
+            Ok(unit) => Some(unit),
+            Err(e) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("unit {}: {e}", config.unit),
+                )
+            }
         }
     };
-    let mut config = (*state.config).clone();
-    if config.mint_connection == next {
-        return Json(ApiMessage {
-            message: "unchanged",
-        })
-        .into_response();
+    state.backend.set_unit(unit);
+
+    // A different unit or mint invalidates the previous end-to-end result.
+    if config.unit != before_unit || config.mint_url != before_url {
+        *state.self_test.write().await = None;
     }
-    if let Err(e) = config.set_mint_connection(next) {
-        return api_error(StatusCode::CONFLICT, e.to_string());
-    }
-    // Keep setup.json's endpoint record coherent immediately; the restarted
-    // process re-derives them anyway (env for bundled, config for external).
-    if let MintConnection::External { http_url, rpc_url, .. } = &config.mint_connection {
-        config.endpoints.mint_http_url = http_url.clone();
-        config.endpoints.mint_rpc_url = rpc_url.clone().unwrap_or_default();
-    }
-    match persist_config_and_restart(&state, &config).await {
-        Ok(()) => Json(ApiMessage {
-            message: "restarting",
-        })
-        .into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
+    *state.config.write().await = config;
+    state.branch.notify_ui_change();
+    Json(ApiMessage { message: "saved" }).into_response()
 }
 
-async fn persist_config_and_restart(state: &WebState, config: &AppConfig) -> Result<(), String> {
-    state
-        .config_store
-        .save(config)
-        .await
-        .map_err(|e| format!("save lifecycle config: {e}"))?;
-    state
-        .config_store
-        .write_mint_config(config)
-        .await
-        .map_err(|e| format!("write mint config: {e}"))?;
-    tokio::spawn(async {
-        sleep(Duration::from_millis(900)).await;
-        std::process::exit(0);
-    });
-    Ok(())
-}
+// ---------------- self-test ----------------
 
-// ---------------- unit policy ----------------
-
-#[derive(Deserialize)]
-struct UnitPolicyForm {
-    #[serde(default = "default_true")]
-    enabled: bool,
-    keyset_lifetime_days: u64,
-    rotate_before_expiry_days: u64,
-    #[serde(default)]
-    input_fee_ppk: u64,
-    amounts: String,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-async fn api_set_unit_policy(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-    AxumPath(unit): AxumPath<String>,
-    Json(form): Json<UnitPolicyForm>,
-) -> Response {
+async fn api_self_test(State(state): State<WebState>, headers: HeaderMap) -> Response {
     if let Err(r) = require_api_auth(&state, &headers).await {
         return r;
     }
-    if state.config.managed_unit(&unit).is_none() {
-        return api_error(StatusCode::NOT_FOUND, format!("unit {unit} is not managed"));
+    let config = state.config.read().await.clone();
+    if !config.setup_complete() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "complete setup first — the self-test needs a unit and a mint URL",
+        );
     }
-    let amounts = match parse_amounts(&form.amounts) {
-        Ok(amounts) => amounts,
-        Err(e) => return api_error(StatusCode::BAD_REQUEST, format!("amounts: {e}")),
-    };
-    let policy = RolloverPolicy {
-        enabled: form.enabled,
-        keyset_lifetime_days: form.keyset_lifetime_days,
-        rotate_before_expiry_days: form.rotate_before_expiry_days,
-        input_fee_ppk: form.input_fee_ppk,
-        amounts,
-    };
-    let mut config = (*state.config).clone();
-    if let Err(e) = config.set_unit_rollover(&unit, policy) {
-        return api_error(StatusCode::BAD_REQUEST, e.to_string());
+    if state.self_test_running.swap(true, Ordering::SeqCst) {
+        return api_error(StatusCode::CONFLICT, "a self-test is already running");
     }
-    // After the restart both the manual-rotate guard and the rollover worker
-    // read the new policy. The regenerated mint.toml's initial_final_expiry
-    // only matters for a unit's first keyset.
-    match persist_config_and_restart(&state, &config).await {
-        Ok(()) => Json(ApiMessage {
-            message: "restarting",
-        })
-        .into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    let outcome = checks::run_self_test(
+        &MintHttpClient::new(config.mint_url.clone()),
+        &state.branch,
+        &config.method,
+        &config.unit,
+    )
+    .await;
+    state.self_test_running.store(false, Ordering::SeqCst);
+
+    if outcome.ok {
+        // The unit has now demonstrably been exercised against this mint.
+        let updated = {
+            let mut config = state.config.write().await;
+            if !config.unit_locked {
+                config.lock_unit();
+                Some(config.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(updated) = updated {
+            if let Err(e) = state.config_store.save(&updated).await {
+                tracing::warn!("could not persist unit lock: {e:#}");
+            }
+        }
     }
-}
-
-// ---------------- recovery ----------------
-
-#[derive(Deserialize)]
-struct MnemonicRevealForm {
-    password: String,
-}
-
-#[derive(Serialize)]
-struct MnemonicReveal {
-    mnemonic: String,
-}
-
-async fn api_reveal_mnemonic(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-    Json(form): Json<MnemonicRevealForm>,
-) -> Response {
-    let authed = match require_api_auth(&state, &headers).await {
-        Ok(authed) => authed,
-        Err(r) => return r,
-    };
-    // Re-entering the caller's own password gates the reveal. 403, not 401 —
-    // the SPA treats 401 as session-expired and would bounce to /login.
-    if !state.users.verify(&authed.username, &form.password).await {
-        return api_error(StatusCode::FORBIDDEN, "password confirmation failed");
-    }
-    let mut resp = Json(MnemonicReveal {
-        mnemonic: state.config.mint.mnemonic.clone(),
-    })
-    .into_response();
-    resp.headers_mut()
-        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    resp
+    *state.self_test.write().await = Some(outcome.clone());
+    state.branch.notify_ui_change();
+    Json(outcome).into_response()
 }
 
 // ---------------- users ----------------
@@ -1918,89 +1272,7 @@ async fn mark_failed_inner(state: &WebState, id: &str, notes: String) -> Result<
         .map_err(|e| format!("mark_failed: {e}"))
 }
 
-#[derive(Deserialize)]
-struct RotateForm {
-    unit: String,
-    amounts: String,
-    #[serde(default)]
-    input_fee_ppk: Option<u64>,
-    #[serde(default, deserialize_with = "empty_string_as_none")]
-    final_expiry: Option<u64>,
-}
-
-fn empty_string_as_none<'de, D>(d: D) -> Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let opt: Option<String> = Option::deserialize(d)?;
-    match opt.as_deref().map(str::trim) {
-        Some("") | None => Ok(None),
-        Some(s) => s.parse::<u64>().map(Some).map_err(serde::de::Error::custom),
-    }
-}
-
-async fn rotate_keyset_inner(state: &WebState, form: RotateForm) -> Result<(), String> {
-    let managed = state
-        .config
-        .managed_unit(form.unit.trim())
-        .ok_or_else(|| format!("unit {} is not managed by this stack", form.unit.trim()))?;
-    if managed.lifecycle != UnitLifecycle::Active {
-        return Err(format!(
-            "{} is not active; keyset rotation is disabled while redemption-only or retired",
-            managed.unit
-        ));
-    }
-    let amounts: Result<Vec<u64>, _> = form
-        .amounts
-        .split(',')
-        .map(|s| s.trim().parse::<u64>())
-        .collect();
-    let amounts = amounts.map_err(|e| format!("amounts: {e}"))?;
-    if amounts.is_empty() || amounts.contains(&0) {
-        return Err("amounts must contain positive denominations".to_string());
-    }
-    if amounts != managed.rollover.amounts {
-        return Err(format!(
-            "amounts must match the persisted {} unit policy",
-            managed.unit
-        ));
-    }
-    let input_fee_ppk = form.input_fee_ppk.unwrap_or(managed.rollover.input_fee_ppk);
-    if input_fee_ppk != managed.rollover.input_fee_ppk {
-        return Err(format!(
-            "input fee must match the persisted {} unit policy",
-            managed.unit
-        ));
-    }
-    let now = unix_now();
-    let final_expiry = form.final_expiry.unwrap_or_else(|| {
-        now.saturating_add(managed.rollover.keyset_lifetime_days.saturating_mul(86_400))
-    });
-    if final_expiry <= now {
-        return Err("final expiry must be in the future".to_string());
-    }
-    state
-        .mint_rpc
-        .rotate_next_keyset(
-            managed.unit.clone(),
-            amounts,
-            Some(input_fee_ppk),
-            Some(final_expiry),
-        )
-        .await
-        .map_err(|e| format!("rotate: {e}"))?;
-    Ok(())
-}
-
 // ---------------- helpers ----------------
-
-fn health_label(ok: bool) -> &'static str {
-    if ok {
-        "Healthy"
-    } else {
-        "Offline"
-    }
-}
 
 fn short_id(id: &str) -> String {
     // "MINT-5a6c5a9e-..." → "MINT-5a6c5a9e"

@@ -1,19 +1,18 @@
-# TLS termination for the Custom Unit Mint (compose profile "tls").
+# TLS termination for the operator console (compose profile "tls").
 #
-# DOMAIN and CONSOLE_DOMAIN come from .env via the caddy service environment;
+# CONSOLE_DOMAIN comes from .env via the caddy service environment;
 # certificates are provisioned and renewed automatically (Let's Encrypt /
 # ZeroSSL) and persist in the caddy-data volume. HTTP→HTTPS redirects and the
 # ACME HTTP-01 challenge on :80 are automatic — no extra config needed.
+#
+# The mint is not part of this stack — its operator terminates TLS for the
+# wallet-facing mint URL however they run the mint.
 #
 # To receive ACME account notices, add a global block at the top (mintctl
 # does this when ACME_EMAIL is set in .env):
 # {
 #     email you@example.org
 # }
-
-{$DOMAIN} {
-	reverse_proxy mint:8089
-}
 
 {$CONSOLE_DOMAIN} {
 	# The console live-updates over SSE (GET /events, text/event-stream).

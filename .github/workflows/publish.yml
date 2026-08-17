@@ -1,16 +1,16 @@
 # Builds and publishes the multi-arch image to GHCR.
 #
-#   push to main → ghcr.io/zeugmaster/custom-unit-mint:edge
+#   push to main → ghcr.io/zeugmaster/pecan:edge
 #   tag vX.Y.Z   → :vX.Y.Z + :latest, then a GitHub Release
 #
-# Each architecture builds natively (QEMU would take hours for the full cdk
-# compile); the merge job stitches the per-arch digests into one manifest.
+# Each architecture builds natively (QEMU emulation is painfully slow for
+# Rust); the merge job stitches the per-arch digests into one manifest.
 # The GitHub Release — which install.sh resolves — is created only after the
 # manifest exists and the smoke test passed, so the installer can never pick
 # up a version whose image is missing or broken.
 #
 # One-time manual step after the first successful run: set the GHCR package
-# to Public (github.com → profile → Packages → custom-unit-mint → settings),
+# to Public (github.com → profile → Packages → pecan → settings),
 # otherwise anonymous `docker pull` and the installer fail.
 
 name: Publish
@@ -21,7 +21,7 @@ on:
     tags: ["v*"]
 
 env:
-  IMAGE: ghcr.io/zeugmaster/custom-unit-mint
+  IMAGE: ghcr.io/zeugmaster/pecan
 
 jobs:
   build:
@@ -163,10 +163,12 @@ jobs:
           done
 
   # Installs the just-published manifest through the REAL installer (the
-  # mintctl binary built in this run) and walks the full first-run path:
-  # install → forced password change gates the console → new password → first
-  # unit → mint leaves Standby and serves /v1/info. A second, processor-only
-  # install asserts the connect-a-mint-later mode idles honestly.
+  # mintctl binary built in this run) and walks the first-run path: install →
+  # forced password change gates the console → new password → attachment
+  # setup produces the checklist + snippet → the self-test fails gracefully
+  # against an unreachable mint. (Full mint↔processor integration needs a
+  # cdk-mintd built from the pinned rev — that lives in the e2e rig, not in
+  # the publish pipeline.)
   smoke:
     needs: [merge, mintctl]
     runs-on: ubuntu-24.04
@@ -187,11 +189,11 @@ jobs:
         run: |
           chmod +x mintctl-linux-amd64
           ./mintctl-linux-amd64 install --yes --plain-http \
-            --dir "$RUNNER_TEMP/mint-a" \
+            --dir "$RUNNER_TEMP/branch-a" \
             --version "${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}" \
             --artifacts-dir . | tee install.log
           # The generated readable passphrase is the first-boot credential.
-          PW=$(sed -n 's/^INITIAL_ADMIN_PASSWORD=//p' "$RUNNER_TEMP/mint-a/.env")
+          PW=$(sed -n 's/^INITIAL_ADMIN_PASSWORD=//p' "$RUNNER_TEMP/branch-a/.env")
           test -n "$PW"
           echo "::add-mask::$PW"
           echo "SMOKE_PW=$PW" >> "$GITHUB_ENV"
@@ -204,53 +206,34 @@ jobs:
             | jq -e '.must_change_password == true'
           # Mutations are locked until a real password is set.
           code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/smoke-cookies \
-            -X POST http://127.0.0.1:9090/api/units \
+            -X POST http://127.0.0.1:9090/api/settings/attachment \
             -H 'content-type: application/json' \
-            -d '{"unit":"nope","keyset_lifetime_days":90,"rotate_before_expiry_days":14,"input_fee_ppk":0,"amounts":"1"}')
+            -d '{"unit":"nope","mint_url":"http://127.0.0.1:9","advertised_grpc":"127.0.0.1:50051"}')
           test "$code" = "403"
           curl -fsS -b /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/me/password \
             -H 'content-type: application/json' \
             -d "{\"current_password\":\"$SMOKE_PW\",\"password\":\"smoke-chosen-pw-1\",\"password_confirm\":\"smoke-chosen-pw-1\"}"
-      - name: First unit starts the mint
+      - name: Attachment setup produces the checklist and snippet
         run: |
-          curl -fsS -b /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/units \
+          curl -fsS -b /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/settings/attachment \
             -H 'content-type: application/json' \
-            -d '{"unit":"smoke","keyset_lifetime_days":90,"rotate_before_expiry_days":14,"input_fee_ppk":0,"amounts":"1,2,4,8,16,32,64"}'
-          # The processor exits to apply the change; Docker restarts it and
-          # the supervisor starts cdk-mintd.
-          for _ in $(seq 1 90); do
-            if curl -fsS http://127.0.0.1:8089/v1/info >/dev/null 2>&1; then
-              echo "mint is up"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "mint never came up" >&2
-          exit 1
-      - name: Processor-only install idles honestly
+            -d '{"unit":"smoke","mint_url":"http://127.0.0.1:9","advertised_grpc":"127.0.0.1:50051"}'
+          curl -fsS -b /tmp/smoke-cookies http://127.0.0.1:9090/api/app > /tmp/smoke-app.json
+          jq -e '.setup.setup_complete == true
+                 and .setup.unit == "smoke"
+                 and (.snippet | type == "string" and contains("[[ln]]") and contains("unit = \"smoke\""))
+                 and (.checklist | length == 5)' /tmp/smoke-app.json
+          # Port 9 is closed: the reachability check must fail loudly, with a remedy.
+          jq -e '.checklist[] | select(.id == "reachable") | .status == "fail" and (.remedy | type == "string")' /tmp/smoke-app.json
+      - name: Self-test fails gracefully against an unreachable mint
         run: |
-          ./mintctl-linux-amd64 install --yes --plain-http --processor-only \
-            --dir "$RUNNER_TEMP/mint-b" --ui-port 9190 --mint-port 8189 --grpc-port 51051 \
-            --version "${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}" \
-            --artifacts-dir .
-          PW_B=$(sed -n 's/^INITIAL_ADMIN_PASSWORD=//p' "$RUNNER_TEMP/mint-b/.env")
-          echo "::add-mask::$PW_B"
-          curl -fsS -c /tmp/smoke-b -X POST http://127.0.0.1:9190/api/login \
-            -H 'content-type: application/json' \
-            -d "{\"username\":\"admin\",\"password\":\"$PW_B\"}" >/dev/null
-          curl -fsS -b /tmp/smoke-b -X POST http://127.0.0.1:9190/api/me/password \
-            -H 'content-type: application/json' \
-            -d "{\"current_password\":\"$PW_B\",\"password\":\"smoke-chosen-pw-2\",\"password_confirm\":\"smoke-chosen-pw-2\"}"
-          # The snapshot reports the not-yet-connected mode; nothing serves 8189.
-          curl -fsS -b /tmp/smoke-b http://127.0.0.1:9190/api/app \
-            | jq -e '.mint_connection.mode == "unset" and .mint_connection.supply_audit == false'
-          ! curl -fsS --max-time 3 http://127.0.0.1:8189/v1/info >/dev/null 2>&1
+          curl -fsS -b /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/mint/self-test \
+            | jq -e '.ok == false and .deposit.ok == false'
       - name: Logs on failure
         if: failure()
         run: |
           cat install.log 2>/dev/null || true
-          docker compose -f "$RUNNER_TEMP/mint-a/docker-compose.yml" --project-directory "$RUNNER_TEMP/mint-a" logs || true
-          docker compose -f "$RUNNER_TEMP/mint-b/docker-compose.yml" --project-directory "$RUNNER_TEMP/mint-b" logs || true
+          docker compose -f "$RUNNER_TEMP/branch-a/docker-compose.yml" --project-directory "$RUNNER_TEMP/branch-a" logs || true
 
   release:
     needs: [merge, smoke, mintctl]

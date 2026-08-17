@@ -3,6 +3,10 @@
 //! Runs whenever install has a terminal and no `--yes`; every question has a
 //! flag twin so automation never lands here. Cancelling any prompt (ESC or
 //! Ctrl-C) aborts cleanly without touching the system.
+//!
+//! The wizard sets up the processor only: console reachability, the payment
+//! gRPC bind for the operator's own cdk-mintd, and the first admin password.
+//! Attaching the mint happens afterwards, in the console's Mint tab.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,7 +17,7 @@ use cliclack::{confirm, input, intro, log, note, outro, outro_cancel, select, sp
 use crate::compose::{self, Stack};
 use crate::dns;
 use crate::envfile::EnvFile;
-use crate::install::{self, AccessMode, InstallPlan, MintMode};
+use crate::install::{self, AccessMode, InstallPlan};
 use crate::preflight::{self, PortStatus};
 use crate::release;
 use crate::{caddy, passphrase};
@@ -38,7 +42,7 @@ macro_rules! step {
 }
 
 pub fn run(args: &InstallArgs) -> Result<()> {
-    intro(console::style(" Custom Unit Mint ").on_cyan().black())?;
+    intro(console::style(" Pecan — branch processor ").on_cyan().black())?;
 
     // --- resolve version early: everything else is pinned to it -----------
     install::preflight_platform()?;
@@ -93,7 +97,7 @@ pub fn run(args: &InstallArgs) -> Result<()> {
             }
             Existing::OtherDir => {
                 let dir: String = step!(input("Install directory")
-                    .placeholder("/opt/custom-unit-mint-2")
+                    .placeholder("/opt/pecan-2")
                     .validate(|value: &String| {
                         if value.trim().is_empty() {
                             Err("enter a directory path")
@@ -116,8 +120,8 @@ pub fn run(args: &InstallArgs) -> Result<()> {
     }
 
     let mut ui_port = args.ui_port;
-    let mut mint_port = args.mint_port;
-    for (label, port) in [("console", &mut ui_port), ("mint API", &mut mint_port)] {
+    let mut grpc_port = args.grpc_port;
+    for (label, port) in [("console", &mut ui_port), ("payment gRPC", &mut grpc_port)] {
         if preflight::port_status(*port) == PortStatus::Busy {
             log::warning(format!("Port {port} (for the {label}) is already in use."))?;
             let answer: String = step!(input(format!("Alternative {label} port"))
@@ -131,74 +135,56 @@ pub fn run(args: &InstallArgs) -> Result<()> {
         }
     }
 
-    // --- what to set up ----------------------------------------------------
-    let mint_mode = if args.processor_only {
-        MintMode::ProcessorOnly
-    } else {
-        step!(select("What do you want to set up?")
-            .item(
-                MintMode::Bundled,
-                "Mint + processor (recommended)",
-                "a complete mint, pre-wired; it starts when the first unit is added"
-            )
-            .item(
-                MintMode::ProcessorOnly,
-                "Processor only",
-                "connect an existing cdk-mintd later in the console"
-            )
-            .interact())
-    };
+    // --- where the mint runs ------------------------------------------------
     let mut grpc_bind_addr = args.grpc_bind.clone().unwrap_or_default();
-    if mint_mode == MintMode::ProcessorOnly && grpc_bind_addr.is_empty() {
+    if grpc_bind_addr.is_empty() {
         #[derive(Clone, PartialEq, Eq)]
         enum MintLocation {
             SameHost,
-            Lan,
+            OtherMachine,
         }
-        let location = step!(select("Where does your existing cdk-mintd run?")
+        let location = step!(select("Where does (or will) your cdk-mintd run?")
             .item(
                 MintLocation::SameHost,
                 "On this server",
                 "the payment gRPC stays on localhost"
             )
             .item(
-                MintLocation::Lan,
+                MintLocation::OtherMachine,
                 "On another machine in the private network",
-                "publishes the gRPC on all interfaces — firewall it; the link has no auth"
+                "publishes the gRPC on all interfaces — firewall it or enable TLS"
             )
             .interact());
         grpc_bind_addr = match location {
             MintLocation::SameHost => "127.0.0.1".into(),
-            MintLocation::Lan => {
-                log::warning(
-                    "The payment gRPC (port 50051) carries no authentication.\n\
-                     Restrict it to your private network with a firewall rule.",
-                )?;
+            MintLocation::OtherMachine => {
+                log::warning(format!(
+                    "The payment gRPC (port {grpc_port}) carries no authentication.\n\
+                     Restrict it to your private network with a firewall rule, or\n\
+                     enable mutual TLS (GRPC_TLS_DIR in .env.example)."
+                ))?;
                 "0.0.0.0".into()
             }
         };
     }
-    if grpc_bind_addr.is_empty() {
-        grpc_bind_addr = "127.0.0.1".into();
-    }
 
-    // --- public access -----------------------------------------------------
+    // --- console access -----------------------------------------------------
     let ports_busy = preflight::ports_80_443_busy();
     let access = if args.behind_proxy {
         AccessMode::BehindProxy
     } else if args.plain_http {
         AccessMode::PlainHttp
-    } else if args.domain.is_some() && !ports_busy {
+    } else if args.console_domain.is_some() && !ports_busy {
         AccessMode::DomainTls
     } else {
         if ports_busy {
             log::info(
                 "Something on this server already listens on port 80/443 —\n\
-                 an existing reverse proxy, most likely. The stack can run\n\
+                 an existing reverse proxy, most likely. The console can run\n\
                  behind it instead of bringing its own.",
             )?;
         }
-        let mut sel = select("How should people reach the mint?")
+        let mut sel = select("How should operators reach the console?")
             .item(
                 AccessMode::DomainTls,
                 if ports_busy {
@@ -206,7 +192,7 @@ pub fn run(args: &InstallArgs) -> Result<()> {
                 } else {
                     "Domain with automatic HTTPS (recommended)"
                 },
-                "bundled Caddy obtains certificates; wallets refuse plain HTTP"
+                "bundled Caddy obtains certificates for the console hostname"
             )
             .item(
                 AccessMode::BehindProxy,
@@ -220,7 +206,7 @@ pub fn run(args: &InstallArgs) -> Result<()> {
             .item(
                 AccessMode::PlainHttp,
                 "Plain HTTP",
-                "LAN or testing only — wallets refuse plain-HTTP mints"
+                "LAN or testing only"
             );
         sel = sel.initial_value(if ports_busy {
             AccessMode::BehindProxy
@@ -230,12 +216,11 @@ pub fn run(args: &InstallArgs) -> Result<()> {
         step!(sel.interact())
     };
 
-    let mut domain = args.domain.clone().unwrap_or_default();
     let mut console_domain = args.console_domain.clone().unwrap_or_default();
     let mut acme_email = args.email.clone().unwrap_or_default();
     let mut access = access;
     if access != AccessMode::PlainHttp {
-        (domain, console_domain) = collect_domains(&domain, &console_domain)?;
+        console_domain = collect_console_domain(&console_domain)?;
     }
     match access {
         AccessMode::DomainTls => {
@@ -270,7 +255,7 @@ pub fn run(args: &InstallArgs) -> Result<()> {
                 .interact());
             acme_email = acme_email.trim().to_string();
         }
-        confirm_dns(&domain, &console_domain, public_ip.as_deref(), &mut access)?;
+        confirm_dns(&console_domain, public_ip.as_deref(), &mut access)?;
     }
 
     // --- summary + confirm --------------------------------------------------
@@ -286,8 +271,6 @@ pub fn run(args: &InstallArgs) -> Result<()> {
         version,
         no_pull: args.no_pull,
         access,
-        mint_mode,
-        domain: if access == AccessMode::PlainHttp { String::new() } else { domain },
         console_domain: if access == AccessMode::PlainHttp {
             String::new()
         } else {
@@ -295,31 +278,27 @@ pub fn run(args: &InstallArgs) -> Result<()> {
         },
         acme_email,
         ui_port,
-        mint_port,
         grpc_bind_addr,
-        grpc_port: args.grpc_port,
+        grpc_port,
         public_ip,
         admin_password: passphrase::generate(),
     };
 
-    let setup_line = match plan.mint_mode {
-        MintMode::Bundled => "Mint + processor",
-        MintMode::ProcessorOnly => "Processor only (connect a mint in the console)",
-    };
     let access_line = match plan.access {
-        AccessMode::DomainTls => format!("{} — automatic HTTPS", plan.mint_public_url()),
-        AccessMode::BehindProxy => format!("{} — via your own reverse proxy", plan.mint_public_url()),
-        AccessMode::PlainHttp => format!("{} — plain HTTP (LAN/testing)", plan.mint_public_url()),
+        AccessMode::DomainTls => format!("{} — automatic HTTPS", plan.console_url()),
+        AccessMode::BehindProxy => format!("{} — via your own reverse proxy", plan.console_url()),
+        AccessMode::PlainHttp => format!("{} — plain HTTP (LAN/testing)", plan.console_url()),
     };
     note(
         "Ready to install",
         format!(
-            "Setup       {setup_line}\n\
-             Mint URL    {access_line}\n\
-             Console     {console}\n\
-             Directory   {dir}\n\
-             Version     {version}",
-            console = plan.console_url(),
+            "Console        {access_line}\n\
+             Payment gRPC   {grpc} (your cdk-mintd connects here)\n\
+             Directory      {dir}\n\
+             Version        {version}\n\
+             \n\
+             The mint itself is attached afterwards, in the console's Mint tab.",
+            grpc = plan.grpc_endpoint(),
             dir = plan.install_dir.display(),
             version = plan.version,
         ),
@@ -334,86 +313,50 @@ pub fn run(args: &InstallArgs) -> Result<()> {
     Ok(())
 }
 
-fn collect_domains(preset: &str, preset_console: &str) -> Result<(String, String)> {
-    let domain: String = if preset.is_empty() {
-        step!(input("Domain for the mint")
-            .placeholder("mint.example.org")
-            .validate(|value: &String| {
-                if dns::valid_hostname(value.trim()) {
-                    Ok(())
-                } else {
-                    Err("enter a bare hostname like mint.example.org (no https://, lowercase)")
-                }
-            })
-            .interact())
-    } else {
-        preset.to_string()
-    };
-    let domain = domain.trim().to_string();
-    let default_console = format!("console.{domain}");
-    let console_domain = if preset_console.is_empty() {
-        let customize = step!(confirm(format!(
-            "The operator console gets its own hostname: {default_console} — keep it?"
-        ))
-        .initial_value(true)
+fn collect_console_domain(preset: &str) -> Result<String> {
+    if !preset.is_empty() {
+        return Ok(preset.to_string());
+    }
+    let entered: String = step!(input("Hostname for the operator console")
+        .placeholder("console.example.org")
+        .validate(|value: &String| {
+            if dns::valid_hostname(value.trim()) {
+                Ok(())
+            } else {
+                Err("enter a bare hostname like console.example.org (no https://, lowercase)")
+            }
+        })
         .interact());
-        if customize {
-            default_console
-        } else {
-            let entered: String = step!(input("Console hostname")
-                .placeholder(&default_console)
-                .validate(|value: &String| {
-                    if dns::valid_hostname(value.trim()) {
-                        Ok(())
-                    } else {
-                        Err("enter a bare hostname (no https://, lowercase)")
-                    }
-                })
-                .interact());
-            entered.trim().to_string()
-        }
-    } else {
-        preset_console.to_string()
-    };
-    Ok((domain, console_domain))
+    Ok(entered.trim().to_string())
 }
 
-/// Show the required records, then live-poll public DNS until both resolve to
+/// Show the required record, then live-poll public DNS until it resolves to
 /// this server (or the operator decides otherwise).
 fn confirm_dns(
-    domain: &str,
     console_domain: &str,
     public_ip: Option<&str>,
     access: &mut AccessMode,
 ) -> Result<()> {
     let ip_hint = public_ip.unwrap_or("<this server's IP>");
     note(
-        "DNS records required (both pointing at this server)",
+        "DNS record required (pointing at this server)",
         format!(
-            "A/AAAA  {domain:<width$}  →  {ip_hint}\n\
-             A/AAAA  {console_domain:<width$}  →  {ip_hint}\n\
-             Ports 80 and 443 must be reachable from the internet.",
-            width = domain.len().max(console_domain.len()),
+            "A/AAAA  {console_domain}  →  {ip_hint}\n\
+             Ports 80 and 443 must be reachable from the internet."
         ),
     )?;
 
     loop {
         let sp = spinner();
         sp.start("Checking DNS via public resolvers (1.1.1.1, 8.8.8.8) ...");
-        let checks: Vec<dns::DnsCheck> = [domain, console_domain]
-            .iter()
-            .filter_map(|name| dns::check(name, public_ip).ok())
-            .collect();
-        let all_good = checks.len() == 2 && checks.iter().all(|c| c.matches);
-        if all_good {
-            sp.stop("DNS looks right — both records point at this server.");
+        let check = dns::check(console_domain, public_ip).ok();
+        if check.as_ref().is_some_and(|c| c.matches) {
+            sp.stop("DNS looks right — the record points at this server.");
             return Ok(());
         }
         sp.stop("DNS is not confirmed yet:");
-        for check in &checks {
-            let status = if check.matches {
-                "ok".to_string()
-            } else if check.resolved.is_empty() {
+        if let Some(check) = &check {
+            let status = if check.resolved.is_empty() {
                 "no record found".to_string()
             } else {
                 let ips: Vec<String> = check.resolved.iter().map(|ip| ip.to_string()).collect();
@@ -438,7 +381,7 @@ fn confirm_dns(
             Abort,
         }
         match step!(select("How do you want to proceed?")
-            .item(Next::Recheck, "Check again", "after creating or fixing the records")
+            .item(Next::Recheck, "Check again", "after creating or fixing the record")
             .item(
                 Next::Continue,
                 "Continue anyway",
@@ -600,13 +543,13 @@ fn execute_with_progress(plan: &InstallPlan, args: &InstallArgs) -> Result<()> {
 fn finish(plan: &InstallPlan) -> Result<()> {
     let mut body = format!(
         "Operator console   {console}\n\
-         Mint API           {mint}\n\n\
+         Payment gRPC       {grpc}  (your cdk-mintd connects here)\n\n\
          Sign in as         admin\n\
          Password           {password}\n\
          (also stored in {dir}/.env — you will choose\n\
          your own password at first sign-in)\n\nNext steps:",
         console = plan.console_url(),
-        mint = plan.mint_public_url(),
+        grpc = plan.grpc_endpoint(),
         password = plan.admin_password,
         dir = plan.install_dir.display(),
     );
@@ -621,7 +564,7 @@ fn finish(plan: &InstallPlan) -> Result<()> {
         ));
     }
     note(
-        format!("Custom Unit Mint {} is running", plan.version),
+        format!("Branch processor {} is running", plan.version),
         body,
     )?;
     outro("Manage with: mintctl status | logs | update | backup | restore | start | stop | uninstall")?;
@@ -629,7 +572,7 @@ fn finish(plan: &InstallPlan) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// mintctl domain — re-run the access step on an existing install
+// mintctl domain — re-run the console-access step on an existing install
 // ---------------------------------------------------------------------------
 
 pub fn domain_command(args: &DomainArgs) -> Result<()> {
@@ -637,19 +580,18 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
     let mut envf = EnvFile::load(&stack.env_path())?;
     let interactive = !args.yes && crate::ui::have_tty();
 
-    let current_domain = envf.get("DOMAIN").unwrap_or_default();
+    let current_domain = envf.get("CONSOLE_DOMAIN").unwrap_or_default();
     let ui_port: u16 = envf.get("UI_PORT").and_then(|p| p.parse().ok()).unwrap_or(9090);
-    let mint_port: u16 = envf.get("MINT_PORT").and_then(|p| p.parse().ok()).unwrap_or(8089);
 
-    let (access, domain, console_domain, acme_email) = if interactive {
-        intro(console::style(" Domain & TLS ").on_cyan().black())?;
+    let (access, console_domain, acme_email) = if interactive {
+        intro(console::style(" Console domain & TLS ").on_cyan().black())?;
         if current_domain.is_empty() {
             log::info("Currently: plain HTTP (no domain).")?;
         } else {
             log::info(format!("Currently: https://{current_domain}"))?;
         }
         let ports_busy = preflight::ports_80_443_busy();
-        let access = step!(select("How should people reach the mint?")
+        let access = step!(select("How should operators reach the console?")
             .item(
                 AccessMode::DomainTls,
                 "Domain with automatic HTTPS",
@@ -670,11 +612,10 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
             })
             .interact());
         let mut access = access;
-        let (mut domain, mut console_domain, mut email) = (String::new(), String::new(), String::new());
+        let (mut console_domain, mut email) = (String::new(), String::new());
         if access != AccessMode::PlainHttp {
-            let preset = args.domain.clone().unwrap_or_default();
-            let preset_console = args.console_domain.clone().unwrap_or_default();
-            (domain, console_domain) = collect_domains(&preset, &preset_console)?;
+            let preset = args.console_domain.clone().unwrap_or_default();
+            console_domain = collect_console_domain(&preset)?;
         }
         if access == AccessMode::DomainTls {
             email = args
@@ -682,61 +623,47 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| envf.get("ACME_EMAIL").unwrap_or_default());
             let public_ip = compose::detect_public_ip();
-            confirm_dns(&domain, &console_domain, public_ip.as_deref(), &mut access)?;
+            confirm_dns(&console_domain, public_ip.as_deref(), &mut access)?;
         }
-        (access, domain, console_domain, email)
+        (access, console_domain, email)
     } else {
-        let domain = args.domain.clone().unwrap_or_default();
+        let console_domain = args.console_domain.clone().unwrap_or_default();
         let access = if args.behind_proxy {
+            if console_domain.is_empty() {
+                bail!("--behind-proxy needs --console-domain");
+            }
             AccessMode::BehindProxy
-        } else if args.plain_http || domain.is_empty() {
-            if !args.plain_http && domain.is_empty() {
-                bail!("pass --domain <d>, --plain-http, or --behind-proxy (with --domain)");
+        } else if args.plain_http || console_domain.is_empty() {
+            if !args.plain_http && console_domain.is_empty() {
+                bail!("pass --console-domain <d>, --plain-http, or --behind-proxy (with --console-domain)");
             }
             AccessMode::PlainHttp
         } else {
             AccessMode::DomainTls
         };
-        if access != AccessMode::PlainHttp && !dns::valid_hostname(&domain) {
-            bail!("--domain {domain} is not a valid hostname");
+        if access != AccessMode::PlainHttp && !dns::valid_hostname(&console_domain) {
+            bail!("--console-domain {console_domain} is not a valid hostname");
         }
-        let console_domain = match &args.console_domain {
-            Some(c) => c.clone(),
-            None if access == AccessMode::PlainHttp => String::new(),
-            None => format!("console.{domain}"),
-        };
         let email = args
             .email
             .clone()
             .unwrap_or_else(|| envf.get("ACME_EMAIL").unwrap_or_default());
-        (access, domain, console_domain, email)
+        (access, console_domain, email)
     };
 
-    // Apply to .env; MINT_PUBLIC_URL only seeds first boots — the console owns
-    // the wallet-facing URL afterwards, hence the reminder below.
-    let public_ip = compose::detect_public_ip();
-    let (profiles, bind, mint_public_url) = match access {
-        AccessMode::DomainTls => ("tls", "127.0.0.1", format!("https://{domain}")),
-        AccessMode::BehindProxy => ("", "127.0.0.1", format!("https://{domain}")),
-        AccessMode::PlainHttp => (
-            "",
-            "0.0.0.0",
-            format!(
-                "http://{}:{mint_port}",
-                public_ip.as_deref().unwrap_or("localhost")
-            ),
-        ),
+    let (profiles, bind) = match access {
+        AccessMode::DomainTls => ("tls", "127.0.0.1"),
+        AccessMode::BehindProxy => ("", "127.0.0.1"),
+        AccessMode::PlainHttp => ("", "0.0.0.0"),
     };
     envf.set("COMPOSE_PROFILES", profiles);
     envf.set("BIND_ADDR", bind);
-    envf.set("DOMAIN", &domain);
     envf.set("CONSOLE_DOMAIN", &console_domain);
-    envf.set("MINT_PUBLIC_URL", &mint_public_url);
     envf.set("ACME_EMAIL", &acme_email);
     envf.save()?;
     caddy::apply_acme_email(&stack.install_dir, &acme_email)?;
     if access == AccessMode::BehindProxy {
-        let snippet_plan = snippet_plan(&stack, &domain, &console_domain, ui_port, mint_port);
+        let snippet_plan = snippet_plan(&stack, &console_domain, ui_port);
         caddy::write_proxy_snippets(&snippet_plan)?;
     }
 
@@ -770,10 +697,6 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
                 sp.stop("Certificates are still pending — Caddy keeps retrying in the background.");
             }
         }
-        log::warning(
-            "The wallet-facing URL shown to wallets is managed in the console:\n\
-             Mint tab → Identity → wallet-facing URL. Update it to match.",
-        )?;
         outro("Done.")?;
     } else {
         apply(false)?;
@@ -781,32 +704,20 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
             bail!("the console did not come back — check 'mintctl logs processor'");
         }
         crate::ui::say("Access configuration applied.");
-        crate::ui::warn(
-            "update the wallet-facing URL in the console (Mint tab → Identity) to match",
-        );
     }
     Ok(())
 }
 
 /// A minimal InstallPlan for snippet rendering on an existing install.
-fn snippet_plan(
-    stack: &Stack,
-    domain: &str,
-    console_domain: &str,
-    ui_port: u16,
-    mint_port: u16,
-) -> InstallPlan {
+fn snippet_plan(stack: &Stack, console_domain: &str, ui_port: u16) -> InstallPlan {
     InstallPlan {
         install_dir: stack.install_dir.clone(),
         version: String::new(),
         no_pull: true,
         access: AccessMode::BehindProxy,
-        mint_mode: MintMode::Bundled,
-        domain: domain.to_string(),
         console_domain: console_domain.to_string(),
         acme_email: String::new(),
         ui_port,
-        mint_port,
         bind_addr: "127.0.0.1".into(),
         grpc_bind_addr: "127.0.0.1".into(),
         grpc_port: 50051,
@@ -814,4 +725,3 @@ fn snippet_plan(
         admin_password: String::new(),
     }
 }
-

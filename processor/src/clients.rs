@@ -1,104 +1,22 @@
-//! Thin clients used by the operator web UI and the boot sequence:
-//!   * `MintRpcClient` — tonic gRPC client for cdk-mintd's management RPC
-//!     (`RotateNextKeyset`, `UpdateQuoteTtl`).
-//!   * `MintHttpClient` — reqwest client for the mint's public HTTP API:
-//!     keysets and info for the dashboard, plus per-quote lookups used to
-//!     cross-check a teller match against the mint's own records.
+//! HTTP client for the attached mint's public (wallet-facing) API.
+//!
+//! This is the processor's only outbound channel to the mint: `/v1/info` and
+//! `/v1/keysets` for the attachment checklist and read-only console cards,
+//! per-quote lookups to cross-check a teller match against the mint's own
+//! records, and quote creation for the end-to-end self-test. There is no
+//! management RPC and no database access — the mint is configured and
+//! operated by its own operator.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use cdk_common::grpc::{VersionInterceptor, VERSION_HEADER};
-use cdk_mint_rpc::cdk_mint_client::CdkMintClient;
-use cdk_mint_rpc::{RotateNextKeysetRequest, UpdateQuoteTtlRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tonic::transport::Channel;
-use tonic::Request;
 
-#[derive(Clone, Debug)]
-pub struct MintRpcClient {
-    addr: Arc<String>,
-}
-
-impl MintRpcClient {
-    pub fn new(addr: impl Into<String>) -> Self {
-        Self {
-            addr: Arc::new(addr.into()),
-        }
-    }
-
-    async fn connect(
-        &self,
-    ) -> Result<CdkMintClient<tonic::codegen::InterceptedService<Channel, VersionInterceptor>>>
-    {
-        let channel = Channel::from_shared(self.addr.as_str().to_string())
-            .with_context(|| format!("bad mint-rpc address {}", self.addr))?
-            .connect()
-            .await
-            .with_context(|| format!("connect to mint-rpc at {}", self.addr))?;
-        let interceptor =
-            VersionInterceptor::new(VERSION_HEADER, cdk_common::MINT_RPC_PROTOCOL_VERSION);
-        Ok(CdkMintClient::with_interceptor(channel, interceptor))
-    }
-
-    pub async fn rotate_next_keyset(
-        &self,
-        unit: String,
-        amounts: Vec<u64>,
-        input_fee_ppk: Option<u64>,
-        final_expiry: Option<u64>,
-    ) -> Result<RotateResult> {
-        let mut client = self.connect().await?;
-        let response = client
-            .rotate_next_keyset(Request::new(RotateNextKeysetRequest {
-                unit,
-                amounts,
-                input_fee_ppk,
-                use_keyset_v2: None,
-                final_expiry,
-            }))
-            .await
-            .map_err(|e| anyhow!("rotate_next_keyset: {e}"))?
-            .into_inner();
-        Ok(RotateResult {
-            id: response.id,
-            unit: response.unit,
-            amounts: response.amounts,
-            input_fee_ppk: response.input_fee_ppk,
-        })
-    }
-
-    /// Persist the mint's quote TTLs. QuoteTTL lives in the mint's database
-    /// (the toml value only seeds a fresh install), so this is asserted on
-    /// every processor boot to keep existing deployments in sync with the
-    /// ticket-expiry constants.
-    pub async fn set_quote_ttl(&self, mint_ttl: u64, melt_ttl: u64) -> Result<()> {
-        let mut client = self.connect().await?;
-        client
-            .update_quote_ttl(Request::new(UpdateQuoteTtlRequest {
-                mint_ttl: Some(mint_ttl),
-                melt_ttl: Some(melt_ttl),
-            }))
-            .await
-            .map_err(|e| anyhow!("update_quote_ttl: {e}"))?;
-        Ok(())
-    }
-
-    pub async fn health(&self) -> Result<()> {
-        let _ = self.connect().await?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct RotateResult {
-    pub id: String,
-    pub unit: String,
-    pub amounts: Vec<u64>,
-    pub input_fee_ppk: u64,
-}
+/// Probing the same URL wallets use keeps the checklist honest, but it must
+/// never hang the console snapshot — keep the timeout short.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub struct MintHttpClient {
@@ -113,9 +31,8 @@ pub struct KeysetEntry {
     pub unit: String,
     pub active: bool,
     pub input_fee_ppk: u64,
-    /// Unix seconds. Present on keysets that were rotated with a `final_expiry`.
-    /// Mint enforces this natively (returns `Error::ExpiredKeyset` (12003)
-    /// once the value is in the past) — see cdk commit bbe7be09.
+    /// Unix seconds. Present on keysets rotated with a `final_expiry`; the
+    /// mint stops honoring the keyset once the value is in the past.
     #[serde(default)]
     pub final_expiry: Option<u64>,
 }
@@ -125,16 +42,61 @@ struct KeysetsResponse {
     keysets: Vec<KeysetEntry>,
 }
 
+/// A mint HTTP response that came back non-2xx: kept separate from transport
+/// errors so the self-test can tell "mint said no" from "mint unreachable".
+#[derive(Debug, Clone)]
+pub struct MintHttpError {
+    pub status: u16,
+    pub body: String,
+}
+
+impl std::fmt::Display for MintHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}: {}", self.status, self.body)
+    }
+}
+
+/// Response to creating a custom-method mint quote (the self-test's deposit
+/// leg). Extra fields the mint includes are ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MintQuoteProbe {
+    /// The mint-generated quote id.
+    pub quote: String,
+    /// The processor-issued payment request (the ticket id) echoed back.
+    #[serde(default)]
+    pub request: String,
+    #[serde(default)]
+    pub expiry: Option<u64>,
+    #[serde(default)]
+    pub pubkey: Option<String>,
+}
+
+/// Response to creating a custom-method melt quote (the self-test's payout leg).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeltQuoteProbe {
+    pub quote: String,
+    #[serde(default)]
+    pub expiry: Option<u64>,
+}
+
 impl MintHttpClient {
     pub fn new(base: impl Into<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .unwrap_or_default();
         Self {
             base: Arc::new(base.into()),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
+    fn base(&self) -> &str {
+        self.base.trim_end_matches('/')
+    }
+
     pub async fn list_keysets(&self) -> Result<Vec<KeysetEntry>> {
-        let base = self.base.trim_end_matches('/');
+        let base = self.base();
         let r = self
             .http
             .get(format!("{base}/v1/keysets"))
@@ -149,7 +111,7 @@ impl MintHttpClient {
     }
 
     pub async fn get_info(&self) -> Result<Value> {
-        let base = self.base.trim_end_matches('/');
+        let base = self.base();
         let r = self
             .http
             .get(format!("{base}/v1/info"))
@@ -170,7 +132,7 @@ impl MintHttpClient {
         method: &str,
         quote_id: &str,
     ) -> Result<Option<MintQuoteSnapshot>> {
-        let base = self.base.trim_end_matches('/');
+        let base = self.base();
         let url = format!("{base}/v1/mint/quote/{method}/{quote_id}");
         let r = self
             .http
@@ -193,7 +155,7 @@ impl MintHttpClient {
         method: &str,
         quote_id: &str,
     ) -> Result<Option<MeltQuoteSnapshot>> {
-        let base = self.base.trim_end_matches('/');
+        let base = self.base();
         let url = format!("{base}/v1/melt/quote/{method}/{quote_id}");
         let r = self
             .http
@@ -208,6 +170,81 @@ impl MintHttpClient {
             return Err(anyhow!("get_melt_quote: HTTP {}", r.status()));
         }
         Ok(Some(r.json().await?))
+    }
+
+    /// Create a custom-method mint quote, acting as a wallet — the self-test's
+    /// deposit leg. `Ok(Err(_))` is a mint-side rejection (status + body);
+    /// `Err(_)` is transport (unreachable, timeout, TLS).
+    pub async fn create_probe_mint_quote(
+        &self,
+        method: &str,
+        unit: &str,
+        amount: u64,
+        pubkey: &str,
+        description: &str,
+    ) -> Result<std::result::Result<MintQuoteProbe, MintHttpError>> {
+        let base = self.base();
+        let url = format!("{base}/v1/mint/quote/{method}");
+        let body = serde_json::json!({
+            "amount": amount,
+            "unit": unit,
+            "description": description,
+            "pubkey": pubkey,
+        });
+        let r = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        if !r.status().is_success() {
+            let status = r.status().as_u16();
+            let body = truncate_body(r.text().await.unwrap_or_default());
+            return Ok(Err(MintHttpError { status, body }));
+        }
+        Ok(Ok(r.json().await.context("parse mint quote response")?))
+    }
+
+    /// Create a custom-method melt quote — the self-test's payout leg.
+    pub async fn create_probe_melt_quote(
+        &self,
+        method: &str,
+        unit: &str,
+        amount: u64,
+        request: &str,
+    ) -> Result<std::result::Result<MeltQuoteProbe, MintHttpError>> {
+        let base = self.base();
+        let url = format!("{base}/v1/melt/quote/{method}");
+        let body = serde_json::json!({
+            "method": method,
+            "request": request,
+            "unit": unit,
+            "amount": amount,
+        });
+        let r = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        if !r.status().is_success() {
+            let status = r.status().as_u16();
+            let body = truncate_body(r.text().await.unwrap_or_default());
+            return Ok(Err(MintHttpError { status, body }));
+        }
+        Ok(Ok(r.json().await.context("parse melt quote response")?))
+    }
+}
+
+fn truncate_body(body: String) -> String {
+    const MAX: usize = 300;
+    if body.chars().count() <= MAX {
+        body
+    } else {
+        let truncated: String = body.chars().take(MAX).collect();
+        format!("{truncated}…")
     }
 }
 
