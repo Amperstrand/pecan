@@ -1,6 +1,6 @@
 ---
-name: Custom Unit Mint
-description: Browser-managed Cashu custom unit mint — monochrome operator console and teller for settlement, health, keyset, and access operations.
+name: Pecan
+description: Monochrome operator console and teller for the branch payment processor — settlement, mint-attachment verification, and access operations.
 colors:
   background: "oklch(0.985 0 0)"
   card: "oklch(1 0 0)"
@@ -59,13 +59,13 @@ spacing:
   xl: "24px"
 ---
 
-# Design System: Custom Unit Mint
+# Design System: Pecan
 
 ## 1. Overview
 
 **Creative North Star: "The Monochrome Till"**
 
-Custom Unit Mint is trustworthy infrastructure software rendered in strict
+Pecan is trustworthy infrastructure software rendered in strict
 grayscale. It is a stock shadcn (new-york, neutral base) interface with every
 color removed: no blue accent, no red danger, no green success. State and
 intent are carried by fill, outline, weight, and icons — never by hue.
@@ -75,9 +75,10 @@ match-first: the operator resolves the customer's wallet-created quote by its
 id (typed tail or scan), then settles it — oversized controls, at most two big
 buttons per step, and an open-quote list whose ids stay truncated so nothing
 can be settled without the customer's code. The **Operator Console** is a
-tabbed workspace (Overview, Units, Access, Mint) for everything an
-administrator does. There is no setup wizard; the stack bootstraps itself and
-everything is edited on the running instance.
+tabbed workspace (Overview, Mint, Access) for everything an administrator
+does; the Mint tab carries the attachment checklist that verifies the
+operator's own cdk-mintd. There is no setup wizard; the stack bootstraps
+itself and everything is edited on the running instance.
 
 **Key Characteristics:**
 - Strict grayscale: every color token is chroma-0 oklch, light and dark.
@@ -175,18 +176,27 @@ icons mark failure states.
 ### Alerts
 `default` (bordered card tone) and `emphasis` (foreground-weighted border,
 bold title) — emphasis is for operational warnings: do-not-pay-out, demo
-credentials active, consistency issues. Icons: `TriangleAlert`, `Loader2`.
+credentials active, not-attached-yet. Icons: `TriangleAlert`, `Loader2`.
 
 ### Dialogs
-`Dialog` for parameterized actions (rotate keyset, edit policy, add unit/user,
-reveal recovery phrase). `AlertDialog` for destructive confirmation with the
-solid-cancel/outline-confirm convention. Every config-changing dialog states
-that the mint restarts briefly.
+`Dialog` for parameterized actions (add user, reset password). `AlertDialog`
+for destructive confirmation with the solid-cancel/outline-confirm
+convention.
+
+### The Checklist (Mint tab)
+The attachment checklist is the console's signature surface: five rows, each
+an icon + title + status badge + plain-language detail, with the remedy — when
+one exists — in a muted bordered block underneath. Statuses follow the
+Variant Carries Meaning Rule (solid OK, outline Warning/Failing with an X,
+muted Waiting); icons are `CircleCheck`, `TriangleAlert`, `CircleAlert`,
+`CircleDashed`. Remedies are complete sentences an operator can act on
+without reading cdk source.
 
 ### Tabs
-The console's four sections (Overview | Units | Access | Mint) in a `muted`
-rail; the active trigger lifts to `background`. Tabs sync to the URL hash so
-`/#units` deep-links survive refresh.
+The console's three sections (Overview | Mint | Access) in a `muted` rail;
+the active trigger lifts to `background`. Tabs sync to the URL hash so
+`/#mint` deep-links survive refresh. A trigger may carry a small dot for
+needs-attention states (failing checklist, demo password).
 
 ### Tables
 Shadcn tables inside cards (`px-0` content, first/last cells padded `24px`).
@@ -204,10 +214,11 @@ Sonner, monochrome (`popover` surface). Action feedback ("Deposit settled —
 500 ORA", "Configuration applied") is a toast; persistent conditions use
 inline alerts instead.
 
-### Restart-aware mutations
-Config changes (units, policy, identity) restart the stack. The UI shows a
-loading toast, polls until the API returns, refreshes in place, and keeps the
-operator signed in (sessions persist server-side). Never blind-reload.
+### Live mutations
+Every config change applies live — nothing restarts. A toast confirms the
+save; the SSE stream refreshes open consoles in place. When a change only
+takes effect after the operator's own mintd restarts (it reads the
+processor's settings at boot), the UI says so in words instead of pretending.
 
 ## 6. Do's and Don'ts
 

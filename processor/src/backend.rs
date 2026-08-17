@@ -1,20 +1,25 @@
 //! `MintPayment` implementation for the "branch" custom payment method.
 //!
-//! Wallets create mint and melt quotes directly at the mint; every quote is
-//! mirrored here as a ticket keyed by the mint's quote id. The operator later
-//! matches a ticket in the teller UI by the quote id read off the customer's
-//! wallet (last characters typed, or the full id scanned) and confirms the
-//! cash movement, which settles the quote at the mint.
+//! Wallets create mint and melt quotes directly at the attached mint; every
+//! quote is mirrored here as a ticket keyed by the mint's quote id. The
+//! operator later matches a ticket in the teller UI by the quote id read off
+//! the customer's wallet (last characters typed, or the full id scanned) and
+//! confirms the cash movement, which settles the quote at the mint.
 //!
-//! Mint quotes must be NUT-20 locked: the patched cdk-mintd forwards the
-//! mint-generated quote id and the wallet's pubkey inside `extra_json`
-//! (see patches/cdk-managed-units.patch), and quote creation is refused when
-//! either is missing. Melt quotes carry the quote id natively; the wallet
-//! declares the payout amount as a flattened `amount` field.
+//! Mint quotes must be NUT-20 locked: cdk (since PR #2295) passes the
+//! mint-generated `quote_id` and the wallet's `pubkey` as first-class fields
+//! on `CustomIncomingPaymentOptions`, and quote creation is refused when the
+//! pubkey is missing. Melt quotes carry the quote id natively; the wallet
+//! declares the payout amount in the melt quote request's `amount` field.
+//!
+//! The backend serves exactly one unit — the stock cdk-mintd boot handshake
+//! compares its `[[ln]] unit` against the single unit reported by
+//! `get_settings`. The unit is set (and can change, until locked) from the
+//! console without a restart.
 
-use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 use cdk_common::nuts::{CurrencyUnit, MeltQuoteState};
@@ -25,154 +30,96 @@ use cdk_common::payment::{
 };
 use cdk_common::Amount;
 use futures::Stream;
-use serde_json::Value;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
-use crate::config::{UnitLifecycle, MELT_QUOTE_TTL_SECS};
+use crate::config::MELT_TICKET_TTL_SECS;
 use crate::state::{BranchState, Ticket};
 
-/// Field of the gRPC `extra_json` carrying the mint-generated quote id.
-/// Injected by the patched cdk-mintd for mint quotes (melt quotes carry the
-/// quote id natively); overwrites any wallet-supplied field of the same name.
-pub const QUOTE_ID_FIELD: &str = "quote_id";
-
-/// Field of the gRPC `extra_json` carrying the wallet's NUT-20 pubkey,
-/// injected by the patched cdk-mintd. Presence is what we enforce; the mint
-/// itself verifies the signature at mint time.
-pub const PUBKEY_FIELD: &str = "pubkey";
-
-/// Flattened field of the wallet's NUT-05 melt quote request declaring the
-/// payout amount (the spec's custom melt request has no amount field). The
-/// mint requires the wallet to lock proofs covering this amount, so the
-/// wallet cannot profit by misdeclaring it.
-pub const MELT_AMOUNT_FIELD: &str = "amount";
-
-/// Single-method, multi-unit payment backend. Unit lifecycle gates mint and
-/// melt independently so a unit can remain redeemable while new issuance is
-/// disabled.
+/// Single-method, single-unit payment backend for one attached mint.
 pub struct BranchBackend {
     state: BranchState,
-    units: HashMap<CurrencyUnit, UnitLifecycle>,
-    /// None until the operator adds the first unit on a fresh install.
-    primary_unit: Option<CurrencyUnit>,
+    /// The one unit this install serves. `None` until the operator completes
+    /// setup in the console; updated live (no restart) when setup changes.
+    unit: RwLock<Option<CurrencyUnit>>,
     method: String,
     stream_active: AtomicBool,
+    /// Unix seconds of the first `wait_payment_event` attach since this
+    /// process started; 0 = never. Never cleared on client disconnect — it
+    /// means "the mint found this backend", not "the mint is up right now".
+    stream_attached_at: AtomicU64,
+    /// Unix seconds of the most recent `get_settings` call (cdk-mintd calls
+    /// it while booting its `[[ln]]` entry); 0 = never.
+    last_settings_at: AtomicU64,
 }
 
 impl std::fmt::Debug for BranchBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BranchBackend")
-            .field("units", &self.units)
+            .field("unit", &self.unit())
             .field("method", &self.method)
             .finish()
     }
 }
 
 impl BranchBackend {
-    pub fn new(
-        state: BranchState,
-        units: HashMap<CurrencyUnit, UnitLifecycle>,
-        primary_unit: Option<CurrencyUnit>,
-        method: String,
-    ) -> Self {
+    pub fn new(state: BranchState, unit: Option<CurrencyUnit>, method: String) -> Self {
         Self {
             state,
-            units,
-            primary_unit,
+            unit: RwLock::new(unit),
             method,
             stream_active: AtomicBool::new(false),
+            stream_attached_at: AtomicU64::new(0),
+            last_settings_at: AtomicU64::new(0),
         }
     }
 
-    /// Whether cdk-mintd has attached to the payment event stream since this
-    /// processor started. Set in `wait_payment_event`, never cleared on a
-    /// client disconnect — it means "the mint found this backend", not "the
-    /// mint is up right now"; the web layer's live HTTP/RPC probes cover the
-    /// latter.
-    pub fn payment_stream_attached(&self) -> bool {
-        self.stream_active.load(Ordering::SeqCst)
+    pub fn unit(&self) -> Option<CurrencyUnit> {
+        self.unit.read().expect("unit lock").clone()
     }
 
-    fn lifecycle(&self, unit: &CurrencyUnit) -> Result<UnitLifecycle, Error> {
-        let Some(lifecycle) = self.units.get(unit).copied() else {
+    /// Live-apply a setup change from the console. The attached mint picks
+    /// the new value up on its next start (it reads `get_settings` at boot).
+    pub fn set_unit(&self, unit: Option<CurrencyUnit>) {
+        *self.unit.write().expect("unit lock") = unit;
+    }
+
+    /// Unix seconds of the first payment-stream attach since process start.
+    pub fn stream_attached_at(&self) -> Option<u64> {
+        match self.stream_attached_at.load(Ordering::SeqCst) {
+            0 => None,
+            ts => Some(ts),
+        }
+    }
+
+    /// Unix seconds of the most recent `get_settings` call.
+    pub fn last_settings_at(&self) -> Option<u64> {
+        match self.last_settings_at.load(Ordering::SeqCst) {
+            0 => None,
+            ts => Some(ts),
+        }
+    }
+
+    fn configured_unit(&self) -> Result<CurrencyUnit, Error> {
+        self.unit().ok_or_else(|| {
+            Error::Custom(
+                "branch processor is not set up yet — open its console and complete setup \
+                 before pointing a mint at it"
+                    .into(),
+            )
+        })
+    }
+
+    fn check_unit(&self, unit: &CurrencyUnit) -> Result<(), Error> {
+        let configured = self.configured_unit()?;
+        if *unit != configured {
             tracing::warn!(
-                "rejecting request for unmanaged unit {unit:?}; managed units are {:?}",
-                self.units.keys().collect::<Vec<_>>()
+                "rejecting request for unit {unit:?}; this processor serves {configured:?}"
             );
             return Err(Error::UnsupportedUnit);
-        };
-        Ok(lifecycle)
-    }
-
-    fn check_mint_unit(&self, unit: &CurrencyUnit) -> Result<(), Error> {
-        if !self.lifecycle(unit)?.can_mint() {
-            return Err(Error::UnsupportedPaymentOption);
         }
         Ok(())
     }
-
-    fn check_melt_unit(&self, unit: &CurrencyUnit) -> Result<(), Error> {
-        if !self.lifecycle(unit)?.can_melt() {
-            return Err(Error::UnsupportedPaymentOption);
-        }
-        Ok(())
-    }
-}
-
-/// Parse the flattened extra fields of a quote request into a JSON object.
-/// Absent or null extras become an empty object.
-fn extra_object(extra_json: Option<&str>) -> Result<serde_json::Map<String, Value>, Error> {
-    let Some(raw) = extra_json else {
-        return Ok(serde_json::Map::new());
-    };
-    let value: Value = serde_json::from_str(raw)
-        .map_err(|e| Error::Custom(format!("quote request metadata is invalid JSON: {e}")))?;
-    match value {
-        Value::Object(map) => Ok(map),
-        Value::Null => Ok(serde_json::Map::new()),
-        _ => Err(Error::Custom(
-            "quote request metadata must be a JSON object".into(),
-        )),
-    }
-}
-
-/// Extract the mint-injected quote id and NUT-20 pubkey for a mint quote.
-///
-/// A missing quote id means cdk-mintd was built without
-/// cdk-managed-units.patch (or a wallet is talking to us through an unpatched
-/// mint) — refuse loudly rather than register an unmatchable ticket.
-fn incoming_meta(extra: &serde_json::Map<String, Value>) -> Result<(String, String), Error> {
-    let quote_id = extra
-        .get(QUOTE_ID_FIELD)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            Error::Custom(
-                "branch quote request carries no mint quote id; the mint build is missing \
-                 cdk-managed-units.patch"
-                    .into(),
-            )
-        })?;
-    if uuid::Uuid::parse_str(quote_id).is_err() {
-        return Err(Error::Custom(format!(
-            "unexpected mint quote id format: {quote_id}"
-        )));
-    }
-    let pubkey = extra
-        .get(PUBKEY_FIELD)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            Error::Custom(
-                "branch mint quotes must be locked to a wallet key (NUT-20): create the \
-                 quote with a pubkey"
-                    .into(),
-            )
-        })?;
-    Ok((quote_id.to_string(), pubkey.to_string()))
 }
 
 #[async_trait]
@@ -180,21 +127,25 @@ impl MintPayment for BranchBackend {
     type Err = Error;
 
     async fn get_settings(&self) -> Result<SettingsResponse, Self::Err> {
+        let first = self
+            .last_settings_at
+            .swap(unix_now(), Ordering::SeqCst)
+            == 0;
+        if first {
+            // Settle open consoles' checklist without a manual refresh.
+            self.state.notify_ui_change();
+        }
+        // Erroring here (instead of reporting an empty unit) makes a mint
+        // pointed at an unconfigured processor fail its boot with a message
+        // that says what to do, rather than a unit-mismatch riddle.
+        let unit = self.configured_unit()?;
         let mut custom = std::collections::HashMap::new();
         custom.insert(self.method.clone(), "{}".to_string());
         Ok(SettingsResponse {
-            // The pinned CDK gRPC settings message has a legacy singleton unit.
-            // cdk-mintd is patched at build time to register this backend for
-            // every configured [[ln]] unit while requests remain unit-checked.
-            // With zero units configured the mint has no [[ln]] entries and
-            // never calls this; the empty string is just wire filler.
-            unit: self
-                .primary_unit
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            // Mint requires either bolt11 or bolt12 settings in some code paths;
-            // advertising None for both is intentional — bolt is not a valid rail here.
+            // The stock boot handshake compares this against the mint's
+            // `[[ln]] unit` (strict, modulo sat/msat) — one unit per install.
+            unit: unit.to_string(),
+            // bolt is not a valid rail here; advertising None for both is intentional.
             bolt11: None::<Bolt11Settings>,
             bolt12: None::<Bolt12Settings>,
             onchain: None,
@@ -208,20 +159,33 @@ impl MintPayment for BranchBackend {
     ) -> Result<CreateIncomingPaymentResponse, Self::Err> {
         match options {
             IncomingPaymentOptions::Custom(opts) => {
-                // The gRPC proto for CustomIncomingPaymentOptions does not carry the method
-                // name (server-side sets it to ""), so we can't verify it here. Whatever
-                // method the mint advertises to wallets that points at us IS our method
-                // — see `get_settings` above where we declare it.
-                self.check_mint_unit(opts.amount.unit())?;
-                if opts.amount.value() == 0 {
+                // The proto still omits the method name (server-side sets "").
+                // Whatever method the mint advertises that points at us IS our
+                // method — see `get_settings` where we declare it.
+                let amount = opts
+                    .amount
+                    .as_ref()
+                    .ok_or_else(|| Error::Custom("an amount is required".into()))?;
+                self.check_unit(amount.unit())?;
+                if amount.value() == 0 {
                     return Err(Error::Custom("amount must be greater than zero".into()));
                 }
-                let extra = extra_object(opts.extra_json.as_deref())?;
-                let (quote_id, _pubkey) = incoming_meta(&extra)?;
-                let unit = opts.amount.unit().to_string();
+                // NUT-20 lock policy: cash over the counter is only safe when
+                // the customer's wallet alone can mint the paid quote. The
+                // mint verifies signatures at mint time; we require the lock
+                // to exist at creation time.
+                if opts.pubkey.is_none() {
+                    return Err(Error::Custom(
+                        "branch mint quotes must be locked to a wallet key (NUT-20): create \
+                         the quote with a pubkey"
+                            .into(),
+                    ));
+                }
+                let quote_id = opts.quote_id.to_string();
+                let unit = amount.unit().to_string();
                 let ticket = Ticket::new_incoming(
                     quote_id,
-                    opts.amount.value(),
+                    amount.value(),
                     unit,
                     opts.description.clone(),
                     opts.unix_expiry,
@@ -251,21 +215,20 @@ impl MintPayment for BranchBackend {
         unit: &CurrencyUnit,
         options: OutgoingPaymentOptions,
     ) -> Result<PaymentQuoteResponse, Self::Err> {
-        self.check_melt_unit(unit)?;
+        self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
-                // See note in create_incoming_payment_request — method not on the wire.
-                // The wallet declares the payout amount as a flattened extra field;
-                // the mint will require proofs covering exactly what we echo back.
-                let extra = extra_object(opts.extra_json.as_deref())?;
-                let amount = extra
-                    .get(MELT_AMOUNT_FIELD)
-                    .and_then(Value::as_u64)
-                    .filter(|amount| *amount > 0)
+                // The wallet declares the payout amount in the melt quote
+                // request's `amount` field; the mint requires proofs covering
+                // exactly what we echo back, so misdeclaring cannot profit.
+                let amount = opts
+                    .amount
+                    .as_ref()
+                    .map(|amount| amount.value())
+                    .filter(|value| *value > 0)
                     .ok_or_else(|| {
                         Error::Custom(
-                            "branch melt quotes must declare a positive integer `amount` field"
-                                .into(),
+                            "branch melt quotes must declare a positive `amount`".into(),
                         )
                     })?;
                 let memo = match opts.request.trim() {
@@ -277,7 +240,7 @@ impl MintPayment for BranchBackend {
                     amount,
                     unit.to_string(),
                     memo,
-                    Some(unix_now() + MELT_QUOTE_TTL_SECS),
+                    Some(unix_now() + MELT_TICKET_TTL_SECS),
                 );
                 let ticket = self
                     .state
@@ -305,7 +268,7 @@ impl MintPayment for BranchBackend {
         unit: &CurrencyUnit,
         options: OutgoingPaymentOptions,
     ) -> Result<MakePaymentResponse, Self::Err> {
-        self.check_melt_unit(unit)?;
+        self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
                 // The wallet has locked its proofs at the mint; flip the ticket
@@ -352,6 +315,15 @@ impl MintPayment for BranchBackend {
     ) -> Result<Pin<Box<dyn Stream<Item = Event> + Send>>, Self::Err> {
         let rx = self.state.subscribe_events();
         self.stream_active.store(true, Ordering::SeqCst);
+        let first = self
+            .stream_attached_at
+            .compare_exchange(0, unix_now(), Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if first {
+            // The "mint is linked" checklist row just turned green — settle
+            // open consoles without a manual refresh.
+            self.state.notify_ui_change();
+        }
         // Drop Lagged errors silently; mint will catch up via check_incoming_payment_status if needed.
         Ok(Box::pin(BroadcastStream::new(rx).filter_map(|r| r.ok())))
     }

@@ -27,10 +27,11 @@ pub fn apply_acme_email(install_dir: &Path, email: &str) -> Result<()> {
     Ok(())
 }
 
-/// Ready-to-paste server blocks for an operator-owned reverse proxy
-/// (behind-proxy mode): the app binds loopback; their proxy terminates TLS.
-/// The X-Forwarded-Proto header is what makes session cookies `Secure`;
-/// SSE (/events) must stream unbuffered.
+/// A ready-to-paste server block for an operator-owned reverse proxy
+/// (behind-proxy mode): the console binds loopback; their proxy terminates
+/// TLS. The X-Forwarded-Proto header is what makes session cookies `Secure`;
+/// SSE (/events) must stream unbuffered. The payment gRPC is NOT proxied —
+/// the mint connects to it directly.
 pub fn write_proxy_snippets(plan: &crate::install::InstallPlan) -> Result<()> {
     let dir = plan.install_dir.join("proxy-snippets");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -41,40 +42,25 @@ pub fn write_proxy_snippets(plan: &crate::install::InstallPlan) -> Result<()> {
 
 pub fn caddy_snippet(plan: &crate::install::InstallPlan) -> String {
     format!(
-        "# Custom Unit Mint behind your Caddy — paste into your Caddyfile.\n\
+        "# Branch processor console behind your Caddy — paste into your Caddyfile.\n\
          # Caddy forwards X-Forwarded-Proto and streams SSE by itself;\n\
          # flush_interval -1 makes the SSE behavior explicit.\n\
-         {domain} {{\n\
-         \treverse_proxy 127.0.0.1:{mint_port}\n\
-         }}\n\
-         \n\
+         # (The payment gRPC is not proxied; the mint connects to it directly.)\n\
          {console} {{\n\
          \treverse_proxy 127.0.0.1:{ui_port} {{\n\
          \t\tflush_interval -1\n\
          \t}}\n\
          }}\n",
-        domain = plan.domain,
         console = plan.console_domain,
-        mint_port = plan.mint_port,
         ui_port = plan.ui_port,
     )
 }
 
 pub fn nginx_snippet(plan: &crate::install::InstallPlan) -> String {
     format!(
-        "# Custom Unit Mint behind nginx — one server block per hostname.\n\
+        "# Branch processor console behind nginx.\n\
          # Certificates are your proxy's responsibility (certbot etc.).\n\
-         server {{\n\
-         \tlisten 443 ssl;\n\
-         \tserver_name {domain};\n\
-         \t# ssl_certificate / ssl_certificate_key ...\n\
-         \tlocation / {{\n\
-         \t\tproxy_pass http://127.0.0.1:{mint_port};\n\
-         \t\tproxy_set_header Host $host;\n\
-         \t\tproxy_set_header X-Forwarded-Proto $scheme;\n\
-         \t}}\n\
-         }}\n\
-         \n\
+         # (The payment gRPC is not proxied; the mint connects to it directly.)\n\
          server {{\n\
          \tlisten 443 ssl;\n\
          \tserver_name {console};\n\
@@ -90,9 +76,7 @@ pub fn nginx_snippet(plan: &crate::install::InstallPlan) -> String {
          \t\tproxy_read_timeout 1h;\n\
          \t}}\n\
          }}\n",
-        domain = plan.domain,
         console = plan.console_domain,
-        mint_port = plan.mint_port,
         ui_port = plan.ui_port,
     )
 }

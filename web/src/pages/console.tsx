@@ -5,22 +5,39 @@ import { PageHeader } from "@/components/layout/page-header"
 import { AccessTab } from "@/components/console/access-tab"
 import { MintTab } from "@/components/console/mint-tab"
 import { OverviewTab } from "@/components/console/overview-tab"
-import { UnitsTab } from "@/components/console/units-tab"
 
-const TAB_NAMES = ["overview", "units", "access", "mint"]
+const TAB_NAMES = ["overview", "mint", "access"]
 
 export function ConsolePage() {
   const { snapshot } = useSnapshot()
   const [rawTab, setTab] = useHashTab("overview")
   const tab = TAB_NAMES.includes(rawTab) ? rawTab : "overview"
 
+  const mintNeedsAttention = snapshot.checklist.some(
+    (check) => check.status === "fail" || check.status === "warn",
+  )
+
   return (
     <>
-      <PageHeader title={snapshot.mint.name} description={snapshot.mint.description} />
+      <PageHeader
+        title={snapshot.mint_identity?.name || "Operator console"}
+        description={
+          snapshot.setup.mint_url ||
+          "No mint attached yet — start with the checklist in the Mint tab."
+        }
+      />
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="w-full max-w-md">
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="units">Units</TabsTrigger>
+          <TabsTrigger value="mint" className="relative">
+            Mint
+            {mintNeedsAttention && (
+              <span
+                className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-foreground"
+                aria-label="Mint attachment needs attention"
+              />
+            )}
+          </TabsTrigger>
           <TabsTrigger value="access" className="relative">
             Access
             {snapshot.demo_password_active && (
@@ -30,19 +47,15 @@ export function ConsolePage() {
               />
             )}
           </TabsTrigger>
-          <TabsTrigger value="mint">Mint</TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
           <OverviewTab snapshot={snapshot} />
         </TabsContent>
-        <TabsContent value="units">
-          <UnitsTab snapshot={snapshot} />
+        <TabsContent value="mint">
+          <MintTab snapshot={snapshot} />
         </TabsContent>
         <TabsContent value="access">
           <AccessTab snapshot={snapshot} />
-        </TabsContent>
-        <TabsContent value="mint">
-          <MintTab snapshot={snapshot} />
         </TabsContent>
       </Tabs>
     </>
