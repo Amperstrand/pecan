@@ -73,9 +73,10 @@ pub struct Ticket {
     pub description: Option<String>,
     /// Free-form notes added by the operator.
     pub notes: Option<String>,
-    /// Unix timestamp after which an unsettled ticket is dead. Mirrors the
-    /// mint's quote expiry (mint quotes report it over gRPC; melt tickets use
-    /// the melt TTL this processor configures on the mint).
+    /// Unix timestamp after which an unsettled ticket is dead. Mint tickets
+    /// mirror the mint's quote expiry (reported over gRPC); melt tickets use
+    /// a local bookkeeping window (the mint's own melt-quote TTL governs the
+    /// wallet).
     #[serde(default)]
     pub expires_at: Option<u64>,
 }
@@ -135,7 +136,7 @@ impl Ticket {
     pub fn unit_typed(&self) -> CurrencyUnit {
         self.unit
             .parse()
-            .unwrap_or(CurrencyUnit::Custom(self.unit.clone()))
+            .unwrap_or_else(|_| CurrencyUnit::Custom(self.unit.as_str().into()))
     }
 }
 
@@ -296,6 +297,15 @@ impl BranchState {
         self.inner.tickets.read().await.values().cloned().collect()
     }
 
+    /// Look up one ticket by its id (e.g. `MINT-<quote_id>`). Used by the
+    /// self-test to confirm a probe quote landed on THIS processor.
+    pub async fn get_ticket(&self, id: &str) -> Option<Ticket> {
+        self.inner.tickets.read().await.get(id).cloned()
+    }
+
+    /// All unsettled tickets. Currently exercised by tests; kept as the
+    /// natural query for future console features.
+    #[allow(dead_code)]
     pub async fn active_tickets(&self) -> Vec<Ticket> {
         self.inner
             .tickets

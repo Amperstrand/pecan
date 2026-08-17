@@ -3,6 +3,9 @@
 //! Two front ends produce the same `InstallPlan`: the guided wizard (a TTY
 //! and no `--yes`) and the pure-flag path (automation, `curl | bash --yes`,
 //! CI). Execution is shared; the wizard wraps it in progress UI.
+//!
+//! The installer provisions the processor only. The mint is never installed
+//! here — the operator attaches their own cdk-mintd from the console.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,21 +24,13 @@ use crate::InstallArgs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessMode {
-    /// Bundled Caddy terminates TLS for domain + console.domain.
+    /// Bundled Caddy terminates TLS for the console domain.
     DomainTls,
-    /// No proxy; app ports exposed directly (LAN / testing).
+    /// No proxy; the console port is exposed directly (LAN / testing).
     PlainHttp,
     /// The operator's own reverse proxy terminates TLS; we bind loopback
-    /// and hand them ready-made proxy snippets.
+    /// and hand them a ready-made proxy snippet.
     BehindProxy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MintMode {
-    /// Mint + processor, pre-wired (the default).
-    Bundled,
-    /// Processor only; an existing cdk-mintd is connected later in the console.
-    ProcessorOnly,
 }
 
 pub struct InstallPlan {
@@ -43,15 +38,13 @@ pub struct InstallPlan {
     pub version: String,
     pub no_pull: bool,
     pub access: AccessMode,
-    pub mint_mode: MintMode,
-    pub domain: String,
     pub console_domain: String,
     pub acme_email: String,
     pub ui_port: u16,
-    pub mint_port: u16,
     pub bind_addr: String,
-    /// Where the payment gRPC is published for an external mint: loopback for
-    /// a same-host mintd, 0.0.0.0 (plus operator firewalling) for a LAN one.
+    /// Where the payment gRPC is published for the operator's mintd: loopback
+    /// for a same-host mintd, 0.0.0.0 (plus operator firewalling or TLS) for
+    /// one on another machine.
     pub grpc_bind_addr: String,
     pub grpc_port: u16,
     pub public_ip: Option<String>,
@@ -79,22 +72,9 @@ impl InstallPlan {
         }
     }
 
-    pub fn mint_public_url(&self) -> String {
-        match self.access {
-            AccessMode::DomainTls | AccessMode::BehindProxy => format!("https://{}", self.domain),
-            AccessMode::PlainHttp => format!(
-                "http://{}:{}",
-                self.public_ip.as_deref().unwrap_or("localhost"),
-                self.mint_port
-            ),
-        }
-    }
-
-    pub fn mint_mode_key(&self) -> &'static str {
-        match self.mint_mode {
-            MintMode::Bundled => "bundled",
-            MintMode::ProcessorOnly => "external-pending",
-        }
+    /// The endpoint the operator's mintd connects to, as bound on this host.
+    pub fn grpc_endpoint(&self) -> String {
+        format!("{}:{}", self.grpc_bind_addr, self.grpc_port)
     }
 }
 
@@ -123,7 +103,7 @@ fn run_noninteractive(args: &InstallArgs) -> Result<()> {
     let source = artifact_source(args.artifacts_dir.clone(), args.artifact_ref.clone(), &version);
 
     ui::say(format!(
-        "Installing Custom Unit Mint {version} into {}",
+        "Installing the branch processor {version} into {}",
         install_dir.display()
     ));
     fetch_deploy_artifacts(&source, &install_dir)?;
@@ -160,33 +140,25 @@ fn run_noninteractive(args: &InstallArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the access + mint mode from flags alone (no prompts).
+/// Resolve the access mode from flags alone (no prompts).
 fn plan_from_flags(args: &InstallArgs, install_dir: PathBuf, version: String) -> Result<InstallPlan> {
-    let domain = args.domain.clone().unwrap_or_default();
-    if !domain.is_empty() && !dns::valid_hostname(&domain) {
-        bail!("--domain {domain} is not a valid hostname (lowercase labels, dots, no scheme)");
+    let console_domain = args.console_domain.clone().unwrap_or_default();
+    if !console_domain.is_empty() && !dns::valid_hostname(&console_domain) {
+        bail!(
+            "--console-domain {console_domain} is not a valid hostname \
+             (lowercase labels, dots, no scheme)"
+        );
     }
     let access = if args.behind_proxy {
-        if domain.is_empty() {
-            bail!("--behind-proxy needs --domain: your proxy's public hostname for the mint");
+        if console_domain.is_empty() {
+            bail!("--behind-proxy needs --console-domain: your proxy's public hostname for the console");
         }
         AccessMode::BehindProxy
-    } else if args.plain_http || domain.is_empty() {
-        if args.plain_http && !domain.is_empty() {
-            bail!("--plain-http and --domain are mutually exclusive");
-        }
+    } else if args.plain_http || console_domain.is_empty() {
         AccessMode::PlainHttp
     } else {
         AccessMode::DomainTls
     };
-    let console_domain = match (&args.console_domain, access) {
-        (Some(c), _) => c.clone(),
-        (None, AccessMode::PlainHttp) => String::new(),
-        (None, _) => format!("console.{domain}"),
-    };
-    if !console_domain.is_empty() && !dns::valid_hostname(&console_domain) {
-        bail!("--console-domain {console_domain} is not a valid hostname");
-    }
     Ok(InstallPlan {
         bind_addr: args.bind.clone().unwrap_or_else(|| {
             match access {
@@ -195,11 +167,6 @@ fn plan_from_flags(args: &InstallArgs, install_dir: PathBuf, version: String) ->
             }
             .to_string()
         }),
-        mint_mode: if args.processor_only {
-            MintMode::ProcessorOnly
-        } else {
-            MintMode::Bundled
-        },
         grpc_bind_addr: args
             .grpc_bind
             .clone()
@@ -209,11 +176,13 @@ fn plan_from_flags(args: &InstallArgs, install_dir: PathBuf, version: String) ->
         version,
         no_pull: args.no_pull,
         access,
-        domain,
-        console_domain,
+        console_domain: if access == AccessMode::PlainHttp {
+            String::new()
+        } else {
+            console_domain
+        },
         acme_email: args.email.clone().unwrap_or_default(),
         ui_port: args.ui_port,
-        mint_port: args.mint_port,
         public_ip: compose::detect_public_ip(),
         admin_password: passphrase::generate(),
     })
@@ -242,7 +211,7 @@ pub fn resolve_install_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
     if cfg!(target_os = "macos") {
         let home = std::env::var("HOME").context("HOME is not set")?;
-        Ok(PathBuf::from(home).join("custom-unit-mint"))
+        Ok(PathBuf::from(home).join("pecan"))
     } else {
         Ok(PathBuf::from(DEFAULT_LINUX_DIR))
     }
@@ -369,18 +338,14 @@ fn write_env(plan: &InstallPlan) -> Result<()> {
         .format(&Rfc3339)
         .unwrap_or_default();
     let body = format!(
-        "# Generated by the Custom Unit Mint installer {now}.\n\
+        "# Generated by the Pecan installer {now}.\n\
          # Every key is documented in .env.example.\n\
          VERSION={version}\n\
          COMPOSE_PROJECT_NAME={project}\n\
          UI_PORT={ui_port}\n\
-         MINT_PORT={mint_port}\n\
          BIND_ADDR={bind}\n\
          COMPOSE_PROFILES={compose_profiles}\n\
-         DOMAIN={domain}\n\
          CONSOLE_DOMAIN={console_domain}\n\
-         MINT_PUBLIC_URL={mint_public_url}\n\
-         MINT_MODE={mint_mode}\n\
          GRPC_BIND_ADDR={grpc_bind}\n\
          GRPC_PORT={grpc_port}\n\
          # First boot only; inert once users.json exists. Kept as a recovery path in\n\
@@ -390,13 +355,9 @@ fn write_env(plan: &InstallPlan) -> Result<()> {
         version = plan.version,
         project = compose::project_name(&plan.install_dir),
         ui_port = plan.ui_port,
-        mint_port = plan.mint_port,
         bind = plan.bind_addr,
         compose_profiles = plan.compose_profiles(),
-        domain = plan.domain,
         console_domain = plan.console_domain,
-        mint_public_url = plan.mint_public_url(),
-        mint_mode = plan.mint_mode_key(),
         grpc_bind = plan.grpc_bind_addr,
         grpc_port = plan.grpc_port,
         admin_password = plan.admin_password,
@@ -409,31 +370,34 @@ fn write_env(plan: &InstallPlan) -> Result<()> {
 }
 
 pub fn next_steps(plan: &InstallPlan) -> Vec<String> {
-    let mut steps = vec![];
-    match plan.mint_mode {
-        MintMode::Bundled => {
-            steps.push("1. Units tab  — add the first unit; this starts the mint.".into());
-            steps.push("2. Mint tab   — reveal and back up the 24-word recovery phrase.".into());
-            steps.push("3. Access tab — add teller accounts as needed.".into());
-        }
-        MintMode::ProcessorOnly => {
-            steps.push("1. Mint tab   — connect your existing cdk-mintd.".into());
-            steps.push("2. Units tab  — add the first unit once the mint is attached.".into());
-            steps.push("3. Access tab — add teller accounts as needed.".into());
-        }
-    }
-    steps
+    vec![
+        "1. Mint tab   — set your unit and your mint's URL; copy the config snippet.".into(),
+        format!(
+            "2. Your mintd — merge the snippet into its mint.toml and restart it.\n     \
+             (It must be built from the compatible cdk revision — the Mint tab\n     \
+             shows which one and why; its gRPC target is {}.)",
+            plan.grpc_endpoint()
+        ),
+        "3. Mint tab   — the checklist and self-test confirm the link end to end.".into(),
+        "4. Access tab — add teller accounts as needed.".into(),
+    ]
 }
 
 fn print_summary(plan: &InstallPlan) {
     use ui::say;
     say("");
     say("============================================================");
-    say(format!(" Custom Unit Mint {} is running", plan.version));
+    say(format!(
+        " Pecan branch processor {} is running",
+        plan.version
+    ));
     say("============================================================");
     say("");
     say(format!("  Operator console:  {}", plan.console_url()));
-    say(format!("  Mint API:          {}", plan.mint_public_url()));
+    say(format!(
+        "  Payment gRPC:      {}  (your cdk-mintd connects here)",
+        plan.grpc_endpoint()
+    ));
     say("");
     say(format!("  Sign in:           admin / {}", plan.admin_password));
     say(format!(
@@ -443,7 +407,7 @@ fn print_summary(plan: &InstallPlan) {
     say("                     You will be asked to choose your own password");
     say("                     at first sign-in.");
     say("");
-    say("  First steps in the console:");
+    say("  First steps:");
     for step in next_steps(plan) {
         say(format!("    {step}"));
     }
@@ -455,22 +419,28 @@ fn print_summary(plan: &InstallPlan) {
         }
         AccessMode::PlainHttp => {
             say("  Plain-HTTP mode: fine on a trusted LAN, not for the public");
-            say(format!(
-                "  internet. Firewall: allow {} and {}.",
-                plan.ui_port, plan.mint_port
-            ));
+            say(format!("  internet. Firewall: allow {}.", plan.ui_port));
         }
         AccessMode::BehindProxy => {
-            say("  Your reverse proxy terminates TLS. Ready-made server blocks:");
+            say("  Your reverse proxy terminates TLS. A ready-made server block:");
             say(format!(
                 "    {}/proxy-snippets/  (Caddy and nginx)",
                 plan.install_dir.display()
             ));
             say(format!(
-                "  Proxy {} and {} to 127.0.0.1:{} / 127.0.0.1:{}.",
-                plan.domain, plan.console_domain, plan.mint_port, plan.ui_port
+                "  Proxy {} to 127.0.0.1:{}.",
+                plan.console_domain, plan.ui_port
             ));
         }
+    }
+    if plan.grpc_bind_addr == "0.0.0.0" {
+        say("");
+        say(format!(
+            "  The payment gRPC ({}) is published on all interfaces and",
+            plan.grpc_endpoint()
+        ));
+        say("  carries no authentication — firewall it to the mint's host,");
+        say("  or enable TLS (GRPC_TLS_DIR in .env.example).");
     }
     say("");
     say("  Manage with: mintctl status | logs | update | backup | restore |");

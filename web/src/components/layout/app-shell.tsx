@@ -39,7 +39,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             <span className="grid size-7 shrink-0 place-items-center rounded-md bg-primary text-sm font-bold text-primary-foreground">
               ◐
             </span>
-            <span className="truncate text-sm font-semibold">{snapshot.mint.name}</span>
+            <span className="truncate text-sm font-semibold">
+              {snapshot.mint_identity?.name || "Pecan console"}
+            </span>
           </a>
 
           <nav className="flex items-center gap-1">

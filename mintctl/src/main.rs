@@ -1,9 +1,13 @@
-//! Custom Unit Mint — one-command installer and operations CLI.
+//! Pecan branch processor — one-command installer and operations CLI.
 //!
 //! `mintctl` with no arguments (or with install flags) runs the installer;
 //! afterwards the same binary, installed into the stack directory, manages
 //! the deployment: status / logs / update / backup / restore / start / stop /
 //! uninstall / version.
+//!
+//! The installer sets up the processor (payment backend + operator console)
+//! only. The mint is not provisioned here: the operator attaches their own
+//! cdk-mintd from the console's Mint tab after installation.
 
 use std::path::PathBuf;
 
@@ -24,7 +28,7 @@ mod wizard;
 #[derive(Parser)]
 #[command(
     name = "mintctl",
-    about = "Custom Unit Mint — one-command installer and operations CLI",
+    about = "Pecan branch processor — one-command installer and operations CLI",
     long_about = None,
     // --version pins a RELEASE for install (bash parity); the stack's version
     // is reported by the `version` subcommand.
@@ -34,7 +38,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Bare `mintctl --domain x --yes` installs, exactly like the bash script.
+    /// Bare `mintctl --console-domain x --yes` installs, exactly like the bash script.
     #[command(flatten)]
     install: InstallArgs,
 }
@@ -44,16 +48,13 @@ pub struct InstallArgs {
     /// Answer every prompt with its default (non-interactive)
     #[arg(long, short = 'y')]
     pub yes: bool,
-    /// Serve the mint at https://<domain> via the bundled Caddy
-    #[arg(long)]
-    pub domain: Option<String>,
-    /// Console hostname (default console.<domain>)
+    /// Serve the operator console at https://<hostname> via the bundled Caddy
     #[arg(long)]
     pub console_domain: Option<String>,
     /// ACME account email for certificate notices
     #[arg(long)]
     pub email: Option<String>,
-    /// Install directory (default /opt/custom-unit-mint)
+    /// Install directory (default /opt/pecan)
     #[arg(long)]
     pub dir: Option<PathBuf>,
     /// Pin a release instead of resolving the latest
@@ -62,23 +63,17 @@ pub struct InstallArgs {
     /// Host port for the operator console
     #[arg(long, default_value_t = 9090)]
     pub ui_port: u16,
-    /// Host port for the mint API
-    #[arg(long, default_value_t = 8089)]
-    pub mint_port: u16,
-    /// Host bind address override
+    /// Host bind address override for the console port
     #[arg(long)]
     pub bind: Option<String>,
-    /// Plain HTTP on the app ports (LAN/testing) — no domain, no TLS
-    #[arg(long, conflicts_with = "domain")]
+    /// Plain HTTP on the console port (LAN/testing) — no domain, no TLS
+    #[arg(long, conflicts_with = "console_domain")]
     pub plain_http: bool,
-    /// Run behind your own reverse proxy: loopback binds + ready-made snippets
+    /// Run behind your own reverse proxy: loopback bind + ready-made snippets
     #[arg(long, conflicts_with = "plain_http")]
     pub behind_proxy: bool,
-    /// Install the processor only; connect an existing cdk-mintd in the console
-    #[arg(long)]
-    pub processor_only: bool,
-    /// Bind address for the payment gRPC published to an external mint
-    /// (default 127.0.0.1; use 0.0.0.0 for a mint on the private network)
+    /// Bind address for the payment gRPC your cdk-mintd connects to
+    /// (default 127.0.0.1; use 0.0.0.0 for a mint on another machine)
     #[arg(long)]
     pub grpc_bind: Option<String>,
     /// Host port for the payment gRPC (second instances need distinct ports)
@@ -116,19 +111,16 @@ pub struct UpdateArgs {
 
 #[derive(Args)]
 pub struct DomainArgs {
-    /// The mint's public hostname
-    #[arg(long)]
-    pub domain: Option<String>,
-    /// Console hostname (default console.<domain>)
+    /// The console's public hostname
     #[arg(long)]
     pub console_domain: Option<String>,
     /// ACME account email for certificate notices
     #[arg(long)]
     pub email: Option<String>,
     /// Switch to plain HTTP (drop TLS)
-    #[arg(long, conflicts_with = "domain")]
+    #[arg(long, conflicts_with = "console_domain")]
     pub plain_http: bool,
-    /// Run behind your own reverse proxy (needs --domain)
+    /// Run behind your own reverse proxy (needs --console-domain)
     #[arg(long, conflicts_with = "plain_http")]
     pub behind_proxy: bool,
     /// Non-interactive: apply the flags without the guided flow
@@ -138,24 +130,24 @@ pub struct DomainArgs {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install the stack (default when no subcommand is given)
+    /// Install the processor stack (default when no subcommand is given)
     Install(InstallArgs),
-    /// Change how the mint is reached: domain + HTTPS, own proxy, or plain HTTP
+    /// Change how the console is reached: domain + HTTPS, own proxy, or plain HTTP
     Domain(DomainArgs),
-    /// Containers, console health, mint supervisor state, versions
+    /// Containers, console health, versions
     Status,
-    /// Follow service logs (optionally: processor, mint, caddy)
+    /// Follow service logs (optionally: processor, caddy)
     Logs {
         services: Vec<String>,
     },
     /// Update artifacts + image to a release (default: latest)
     Update(UpdateArgs),
-    /// Archive all volumes and .env into a tar.gz (stops services briefly)
+    /// Archive the processor volumes and .env into a tar.gz (stops services briefly)
     Backup {
-        /// Output file (default: ./custom-unit-mint-backup-<stamp>.tar.gz)
+        /// Output file (default: ./pecan-backup-<stamp>.tar.gz)
         output: Option<PathBuf>,
     },
-    /// Replace ALL state from a backup archive
+    /// Replace the processor's state from a backup archive
     Restore {
         archive: PathBuf,
         /// Skip the confirmation
@@ -168,7 +160,8 @@ enum Command {
     Stop,
     /// Remove the containers; --purge also deletes volumes and the install dir
     Uninstall {
-        /// Also delete ALL volumes (keys, database) and the install directory
+        /// Also delete ALL volumes (accounts, attachment config, ticket ledger)
+        /// and the install directory
         #[arg(long)]
         purge: bool,
         /// Skip the typed confirmation

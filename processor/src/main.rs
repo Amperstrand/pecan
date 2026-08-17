@@ -2,32 +2,33 @@
 //!
 //! Single binary that runs:
 //!   * a gRPC `cdk-payment-processor` server on $CDK_BRANCH_PROCESSOR_GRPC_PORT,
-//!     implementing the "branch" custom payment method for the configured units.
-//!     cdk-mintd connects to this and routes all mint/melt for that method to us.
+//!     implementing the "branch" custom payment method for one configured unit.
+//!     The operator's own cdk-mintd connects to this and routes all mint/melt
+//!     for that method to us.
 //!   * a web UI on $CDK_BRANCH_PROCESSOR_HTTP_PORT for branch operators to sign
 //!     in (username + password from the users.json store; first boot seeds a
-//!     demo admin/admin account), match wallet-created quotes by quote id,
-//!     mark them paid when physical cash is exchanged, and manage units,
-//!     keysets, and users.
+//!     demo admin/admin account), match wallet-created quotes by quote id, and
+//!     mark them paid when physical cash is exchanged — plus a Mint tab that
+//!     verifies the attached mint's configuration and says what to fix.
 //!
-//! First boot bootstraps a complete configuration (generated recovery seed,
-//! method "branch", no units) with zero interaction — there is no setup mode.
-//! The mint starts immediately but advertises nothing until the operator adds
-//! the first unit from the console.
+//! The processor never writes mint configuration. It attaches to exactly one
+//! existing cdk-mintd: the operator completes setup in the console (unit +
+//! mint URL), applies the generated config snippet to their mintd, and the
+//! attachment checklist plus an end-to-end self-test confirm the link.
 
 mod backend;
+mod checks;
 mod clients;
 mod config;
 mod sessions;
 mod state;
-mod supply;
 mod users;
 mod web;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,12 +36,14 @@ use anyhow::{anyhow, Context, Result};
 use cdk_common::nuts::CurrencyUnit;
 use cdk_payment_processor::PaymentProcessorServer;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 use tracing_subscriber::EnvFilter;
 
 use crate::backend::BranchBackend;
-use crate::clients::{KeysetEntry, MintHttpClient, MintRpcClient};
-use crate::config::{AppConfig, BootstrapEndpoints, ConfigStore, UnitLifecycle};
+use crate::checks::SelfTestOutcome;
+use crate::clients::MintHttpClient;
+use crate::config::{AppConfig, ConfigStore, LoadedConfig, LEGACY_BACKUP_FILENAME};
 use crate::sessions::SessionStore;
 use crate::state::BranchState;
 use crate::users::UserStore;
@@ -51,14 +54,10 @@ const ENV_GRPC_ADDR: &str = "CDK_BRANCH_PROCESSOR_GRPC_ADDR";
 const ENV_GRPC_PORT: &str = "CDK_BRANCH_PROCESSOR_GRPC_PORT";
 const ENV_HTTP_ADDR: &str = "CDK_BRANCH_PROCESSOR_HTTP_ADDR";
 const ENV_HTTP_PORT: &str = "CDK_BRANCH_PROCESSOR_HTTP_PORT";
-const ENV_MINT_RPC_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_RPC_URL";
-const ENV_MINT_HTTP_URL: &str = "CDK_BRANCH_PROCESSOR_MINT_HTTP_URL";
-const ENV_DEFAULT_MINT_PUBLIC_URL: &str = "CDK_BRANCH_PROCESSOR_DEFAULT_MINT_PUBLIC_URL";
-const ENV_MINT_GRPC_ADDR: &str = "CDK_BRANCH_PROCESSOR_MINT_GRPC_ADDR";
-/// Path of cdk-mintd's sqlite database for the read-only supply audit.
-/// Set to an empty string to disable auditing (e.g. a rig without access to
-/// the mint's work dir).
-const ENV_MINT_DB_PATH: &str = "CDK_BRANCH_PROCESSOR_MINT_DB_PATH";
+/// Optional directory with `server.pem`, `server.key`, and `ca.pem`: serves
+/// the payment gRPC endpoint over mutual TLS (the mint then sets
+/// `[grpc_processor] tls_dir` instead of `allow_insecure`). Unset = plaintext.
+const ENV_TLS_DIR: &str = "CDK_BRANCH_PROCESSOR_TLS_DIR";
 /// First-boot provisioning knob for the installer: seeds the "admin" account
 /// with this password instead of the demo credentials, but only while no
 /// users.json exists. Ignored ever after — not a password reset. Empty or
@@ -67,23 +66,13 @@ const ENV_INITIAL_ADMIN_PASSWORD: &str = "CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PAS
 /// Image/build version stamped by the Dockerfile (git tag or edge-<sha>);
 /// surfaces in /healthz and the console. "dev" when unset.
 const ENV_VERSION: &str = "CDK_BRANCH_PROCESSOR_VERSION";
-/// Installer's declaration of the mint attachment, consumed only when a
-/// fresh config is bootstrapped: "bundled" (default) or "external-pending"
-/// (processor-only install; the operator connects a mint in the console).
-/// Existing setup.json files own the connection state — env is ignored.
-const ENV_MINT_MODE: &str = "CDK_BRANCH_PROCESSOR_MINT_MODE";
 
 const DEFAULT_WORK_DIR: &str = "/var/lib/cdk-branch-processor";
-const DEFAULT_CONFIG_DIR: &str = "/var/lib/custom-unit-mint/config";
+const DEFAULT_CONFIG_DIR: &str = "/var/lib/pecan/config";
 const DEFAULT_GRPC_ADDR: &str = "0.0.0.0";
 const DEFAULT_GRPC_PORT: u16 = 50051;
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0";
 const DEFAULT_HTTP_PORT: u16 = 9090;
-const DEFAULT_MINT_HTTP_URL: &str = "http://mint:8089";
-const DEFAULT_MINT_RPC_URL: &str = "http://mint:8091";
-const DEFAULT_PUBLIC_URL: &str = "http://localhost:8089";
-const DEFAULT_MINT_GRPC_ADDR: &str = "http://processor";
-const DEFAULT_MINT_DB_PATH: &str = "/var/lib/cdk-mintd/cdk-mintd.sqlite";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -109,8 +98,10 @@ async fn main() -> Result<()> {
     // sessions are operational scratch and live in the work dir.
     let users_path = config_dir.join("users.json");
     let sessions_path = work_dir.join("sessions.json");
-    let config_store =
-        ConfigStore::new(config_dir).with_backup_path(work_dir.join("managed-stack-backup.json"));
+    // The managed-stack era mirrored setup.json into the work dir; register
+    // it as a legacy migration source for installs upgrading mid-loss.
+    let config_store = ConfigStore::new(config_dir)
+        .with_legacy_mirror(work_dir.join("managed-stack-backup.json"));
 
     let grpc_addr = std::env::var(ENV_GRPC_ADDR).unwrap_or_else(|_| DEFAULT_GRPC_ADDR.into());
     let grpc_port: u16 = std::env::var(ENV_GRPC_PORT)
@@ -123,20 +114,12 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_HTTP_PORT);
     let http_socket = SocketAddr::from_str(&format!("{http_addr}:{http_port}"))?;
+    let tls_dir = std::env::var(ENV_TLS_DIR)
+        .ok()
+        .map(|dir| dir.trim().to_string())
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from);
 
-    let mint_rpc_url =
-        std::env::var(ENV_MINT_RPC_URL).unwrap_or_else(|_| DEFAULT_MINT_RPC_URL.into());
-    let mint_http_url =
-        std::env::var(ENV_MINT_HTTP_URL).unwrap_or_else(|_| DEFAULT_MINT_HTTP_URL.into());
-    let default_public_url =
-        std::env::var(ENV_DEFAULT_MINT_PUBLIC_URL).unwrap_or_else(|_| DEFAULT_PUBLIC_URL.into());
-    let mint_grpc_addr =
-        std::env::var(ENV_MINT_GRPC_ADDR).unwrap_or_else(|_| DEFAULT_MINT_GRPC_ADDR.into());
-    let mint_db_path = match std::env::var(ENV_MINT_DB_PATH) {
-        Ok(path) if path.trim().is_empty() => None,
-        Ok(path) => Some(PathBuf::from(path)),
-        Err(_) => Some(PathBuf::from(DEFAULT_MINT_DB_PATH)),
-    };
     let initial_admin_password = std::env::var(ENV_INITIAL_ADMIN_PASSWORD)
         .ok()
         .filter(|password| !password.trim().is_empty());
@@ -147,164 +130,106 @@ async fn main() -> Result<()> {
 
     let state_path = work_dir.join("tickets.json");
 
-    // Load the config, or bootstrap a complete one on first boot. The old
-    // browser setup wizard is gone: the stack comes up working immediately.
-    let bootstrap_mint_connection = match std::env::var(ENV_MINT_MODE).ok().as_deref() {
-        Some("external-pending") => config::MintConnection::Unset,
-        _ => config::MintConnection::Bundled,
-    };
-    let mut app_config = match config_store.load().await? {
-        Some(config) => config,
+    // Load the config, bootstrap a fresh one, or migrate a v3 managed-stack
+    // file. Ordering matters for crash safety: the operator password from a
+    // legacy file is seeded into users.json BEFORE the legacy file is
+    // replaced, so the hash is never in zero places.
+    let (mut migrated, mut fresh) = (None, false);
+    let app_config = match config_store.load().await? {
         None => {
-            let config = config::bootstrap_config(
-                BootstrapEndpoints {
-                    public_url: default_public_url.clone(),
-                    mint_http_url: mint_http_url.clone(),
-                    mint_rpc_url: mint_rpc_url.clone(),
-                    processor_grpc_addr: mint_grpc_addr.clone(),
-                    processor_grpc_port: grpc_port,
-                },
-                bootstrap_mint_connection,
-                unix_now(),
-            )?;
-            config_store.save(&config).await?;
-            tracing::info!(
-                "bootstrapped new mint configuration at {}",
-                config_store.app_config_path().display()
-            );
+            fresh = true;
+            config::bootstrap_config(unix_now())
+        }
+        Some(LoadedConfig::Current(config)) => config,
+        Some(LoadedConfig::Legacy {
+            config,
+            auth_hash,
+            raw,
+        }) => {
+            migrated = Some((auth_hash, raw));
             config
         }
     };
-
-    // Infra endpoints are deployment topology: env (with its documented
-    // defaults) wins on every boot, so a moved service or corrected port
-    // never requires editing setup.json — and the gRPC port rendered into
-    // mint.toml stays in lockstep with the port this process binds below.
-    // With unchanged env this is an identity operation, so the re-rendered
-    // mint.toml is byte-identical and the supervisor does not restart the
-    // mint. public_url stays persisted (operator-owned, edited in the console).
-    app_config.apply_infra_endpoints(&config::InfraEndpoints {
-        mint_http_url: mint_http_url.clone(),
-        mint_rpc_url: mint_rpc_url.clone(),
-        processor_grpc_addr: mint_grpc_addr.clone(),
-        processor_grpc_port: grpc_port,
-    });
-
-    // Auth migration, ordered for crash safety: seed users.json from the
-    // legacy operator hash BEFORE stripping it from setup.json. A crash in
-    // between converges on the next boot (users.json exists, so the legacy
-    // hash is ignored and then stripped) — the hash is never in zero places.
-    let users = UserStore::load(
-        users_path,
-        app_config
-            .auth
-            .as_ref()
-            .map(|auth| auth.password_hash.clone()),
-        initial_admin_password,
-    )
-    .await?;
-    if app_config.auth.take().is_some() {
-        tracing::info!("migrated the operator password into users.json as user 'admin'");
+    let legacy_auth_hash = migrated.as_ref().and_then(|(hash, _)| hash.clone());
+    let users = UserStore::load(users_path, legacy_auth_hash, initial_admin_password).await?;
+    if let Some((_, legacy_raw)) = migrated {
+        config_store
+            .finish_migration(&app_config, &legacy_raw)
+            .await?;
+        tracing::info!(
+            "migrated managed-stack configuration to v4; the old setup.json (which contains \
+             the previously-bundled mint's recovery mnemonic) is preserved as {}",
+            LEGACY_BACKUP_FILENAME
+        );
+    } else if fresh {
+        config_store.save(&app_config).await?;
+        tracing::info!(
+            "bootstrapped new configuration at {}; complete setup in the console",
+            config_store.app_config_path().display()
+        );
     }
-    config_store.save(&app_config).await?;
-    config_store.write_mint_config(&app_config).await?;
     let sessions = SessionStore::load(sessions_path).await?;
+    let branch = BranchState::load(state_path).await?;
 
-    let app_config = app_config;
-    let mut units = HashMap::new();
-    for managed in app_config
-        .units
-        .iter()
-        .filter(|unit| unit.lifecycle != UnitLifecycle::Retired)
-    {
-        let unit: CurrencyUnit = managed
-            .unit
-            .parse()
-            .map_err(|e| anyhow!("bad configured unit {}: {e}", managed.unit))?;
-        units.insert(unit, managed.lifecycle);
-    }
-    // Empty until the operator adds the first unit on a fresh install.
-    let primary_unit: Option<CurrencyUnit> = if app_config.mint.unit.is_empty() {
+    let unit: Option<CurrencyUnit> = if app_config.unit.is_empty() {
         None
     } else {
         Some(
             app_config
-                .mint
                 .unit
                 .parse()
-                .map_err(|e| anyhow!("bad primary unit: {e}"))?,
+                .map_err(|e| anyhow!("bad configured unit {}: {e}", app_config.unit))?,
         )
     };
-    let method = app_config.mint.method.clone();
-    let branch = BranchState::load(state_path).await?;
-
     let backend = Arc::new(BranchBackend::new(
         branch.clone(),
-        units,
-        primary_unit,
-        method.clone(),
+        unit,
+        app_config.method.clone(),
     ));
     let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
         .map_err(|e| anyhow!("payment processor server init: {e}"))?;
     server
-        .start(None)
+        .start(tls_dir.clone())
         .await
         .map_err(|e| anyhow!("grpc start: {e}"))?;
     tracing::info!(
-        "branch-processor gRPC on {grpc_addr}:{grpc_port} (method={method}, units={})",
-        if app_config.units.is_empty() {
-            "none configured yet".to_string()
+        "branch-processor gRPC on {grpc_addr}:{grpc_port} (method={}, unit={}, tls={})",
+        app_config.method,
+        if app_config.unit.is_empty() {
+            "not set up yet"
         } else {
-            app_config
-                .units
-                .iter()
-                .map(|u| u.unit.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
-        }
+            &app_config.unit
+        },
+        if tls_dir.is_some() { "on" } else { "off" },
     );
     let grpc_server = Some(server);
 
-    let mint_rpc = MintRpcClient::new(app_config.endpoints.mint_rpc_url.clone());
-    let mint_http = MintHttpClient::new(app_config.endpoints.mint_http_url.clone());
-    // Management-RPC-driven workers only run when a management RPC exists:
-    // always for the bundled mint, only with an RPC URL for an external one.
-    // The console states the degradation instead of the logs guessing at it.
-    if app_config.mint_connection.has_management_rpc() {
-        spawn_rollover_worker(
-            app_config.clone(),
-            mint_rpc.clone(),
-            mint_http.clone(),
-            branch.clone(),
-        );
-        spawn_quote_ttl_sync(mint_rpc.clone(), branch.clone());
-    } else {
-        tracing::info!(
-            "no mint management RPC in this connection mode — keyset rotation \
-             and the quote-TTL sync are disabled"
-        );
-    }
-    spawn_ticket_sweeper(branch.clone());
+    let config = Arc::new(RwLock::new(app_config));
+    let self_test: Arc<RwLock<Option<SelfTestOutcome>>> = Arc::new(RwLock::new(None));
+    let self_test_running = Arc::new(AtomicBool::new(false));
 
-    // The supply audit reads the bundled mint's sqlite through the shared
-    // volume; an external mint's database is out of reach by definition.
-    let audit_db_path = if app_config.mint_connection.is_bundled() {
-        mint_db_path
-    } else {
-        None
-    };
+    spawn_ticket_sweeper(branch.clone());
+    spawn_self_test_on_first_attach(
+        config.clone(),
+        config_store.clone(),
+        branch.clone(),
+        backend.clone(),
+        self_test.clone(),
+        self_test_running.clone(),
+    );
 
     let app = web::router(web::WebState::new(
         branch,
-        backend.clone(),
-        mint_rpc,
-        mint_http,
-        supply::SupplyReader::new(audit_db_path),
-        app_config,
-        config_store.clone(),
+        backend,
+        config,
+        config_store,
         users,
         sessions,
         version,
+        format!("{grpc_addr}:{grpc_port}"),
+        tls_dir.is_some(),
+        self_test,
+        self_test_running,
     ));
 
     tracing::info!("branch-processor HTTP on {http_socket}");
@@ -339,125 +264,59 @@ fn spawn_ticket_sweeper(branch: BranchState) {
     });
 }
 
-/// Assert the mint's quote TTLs on every boot. The TTL is persisted in the
-/// mint's database (the generated mint.toml only seeds fresh installs), so
-/// without this an existing deployment would keep the cdk defaults (1 h mint,
-/// 60 s melt) and disagree with the processor's ticket-expiry bookkeeping.
-///
-/// Retries until it succeeds: on a fresh install the mint does not even start
-/// until the operator adds the first unit, which can be arbitrarily later.
-/// (That path is also covered by mint.toml seeding a brand-new database, but
-/// the retry keeps every ordering correct.) Quick retries for the first
-/// minute, then one quiet probe per minute.
-///
-/// First success doubles as the "the mint just came up" signal: it pushes an
-/// SSE change so every open console refetches and its health tiles settle
-/// without a manual reload.
-fn spawn_quote_ttl_sync(mint_rpc: MintRpcClient, branch: BranchState) {
-    tokio::spawn(async move {
-        let mut attempt = 0u32;
-        loop {
-            match mint_rpc
-                .set_quote_ttl(config::MINT_QUOTE_TTL_SECS, config::MELT_QUOTE_TTL_SECS)
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        "mint quote TTLs set: mint {}s, melt {}s",
-                        config::MINT_QUOTE_TTL_SECS,
-                        config::MELT_QUOTE_TTL_SECS
-                    );
-                    branch.notify_ui_change();
-                    return;
-                }
-                Err(e) => {
-                    attempt += 1;
-                    if attempt == 30 {
-                        tracing::info!(
-                            "mint not reachable yet for the quote-TTL sync (normal until the \
-                             first unit exists); will keep retrying every 60s: {e:#}"
-                        );
-                    }
-                    let delay = if attempt < 30 { 2 } else { 60 };
-                    sleep(Duration::from_secs(delay)).await;
-                }
-            }
-        }
-    });
-}
-
-fn spawn_rollover_worker(
-    config: AppConfig,
-    mint_rpc: MintRpcClient,
-    mint_http: MintHttpClient,
+/// Run the end-to-end self-test automatically, once, when the mint first
+/// attaches to the payment stream — so a fresh install's checklist completes
+/// itself the moment the operator's mintd comes up. Manual runs from the
+/// console take precedence; a successful run locks the unit.
+fn spawn_self_test_on_first_attach(
+    config: Arc<RwLock<AppConfig>>,
+    config_store: ConfigStore,
     branch: BranchState,
+    backend: Arc<BranchBackend>,
+    self_test: Arc<RwLock<Option<SelfTestOutcome>>>,
+    running: Arc<AtomicBool>,
 ) {
-    if !config
-        .units
-        .iter()
-        .any(|unit| unit.lifecycle == UnitLifecycle::Active && unit.rollover.enabled)
-    {
-        return;
-    }
     tokio::spawn(async move {
-        sleep(Duration::from_secs(8)).await;
         loop {
-            if let Err(e) = reconcile_rollover(&config, &mint_rpc, &mint_http, &branch).await {
-                tracing::warn!("keyset rollover check failed: {e:#}");
+            sleep(Duration::from_secs(5)).await;
+            if self_test.read().await.is_some() {
+                // A run (manual or ours) already happened this boot.
+                return;
             }
-            sleep(Duration::from_secs(60)).await;
+            if backend.stream_attached_at().is_none() {
+                continue;
+            }
+            let snapshot = config.read().await.clone();
+            if !snapshot.setup_complete() {
+                continue;
+            }
+            if running.swap(true, Ordering::SeqCst) {
+                continue; // manual run in flight; check again next tick
+            }
+            tracing::info!("mint attached — running the end-to-end self-test");
+            let outcome = checks::run_self_test(
+                &MintHttpClient::new(snapshot.mint_url.clone()),
+                &branch,
+                &snapshot.method,
+                &snapshot.unit,
+            )
+            .await;
+            let succeeded = outcome.ok;
+            *self_test.write().await = Some(outcome);
+            running.store(false, Ordering::SeqCst);
+            if succeeded {
+                let mut updated = config.write().await;
+                if !updated.unit_locked {
+                    updated.lock_unit();
+                    if let Err(e) = config_store.save(&updated).await {
+                        tracing::warn!("could not persist unit lock: {e:#}");
+                    }
+                }
+            }
+            branch.notify_ui_change();
+            return;
         }
     });
-}
-
-async fn reconcile_rollover(
-    config: &AppConfig,
-    mint_rpc: &MintRpcClient,
-    mint_http: &MintHttpClient,
-    branch: &BranchState,
-) -> Result<()> {
-    let keysets = mint_http.list_keysets().await?;
-    let now = unix_now();
-    for managed in config
-        .units
-        .iter()
-        .filter(|unit| unit.lifecycle == UnitLifecycle::Active && unit.rollover.enabled)
-    {
-        let threshold = managed.rollover.rotate_before_expiry_days * 86_400;
-        let active = keysets
-            .iter()
-            .find(|ks| ks.unit == managed.unit && ks.active);
-        let should_rotate = match active {
-            None => true,
-            Some(KeysetEntry {
-                final_expiry: None, ..
-            }) => true,
-            Some(KeysetEntry {
-                final_expiry: Some(expiry),
-                ..
-            }) => *expiry <= now.saturating_add(threshold),
-        };
-
-        if should_rotate {
-            let final_expiry = now + managed.rollover.keyset_lifetime_days * 86_400;
-            let result = mint_rpc
-                .rotate_next_keyset(
-                    managed.unit.clone(),
-                    managed.rollover.amounts.clone(),
-                    Some(managed.rollover.input_fee_ppk),
-                    Some(final_expiry),
-                )
-                .await?;
-            tracing::info!(
-                "rotated keyset {} for unit {} with final_expiry {}",
-                result.id,
-                managed.unit,
-                final_expiry
-            );
-            branch.notify_ui_change();
-        }
-    }
-    Ok(())
 }
 
 fn unix_now() -> u64 {
