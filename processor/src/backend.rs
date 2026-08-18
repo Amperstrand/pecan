@@ -13,8 +13,8 @@
 //! declares the payout amount in the melt quote request's `amount` field.
 //!
 //! The backend serves exactly one unit — the stock cdk-mintd boot handshake
-//! compares its `[[ln]] unit` against the single unit reported by
-//! `get_settings`. The unit is set (and can change, until locked) from the
+//! compares its `[[payment_backend]] unit` against the single unit reported
+//! by `get_settings`. The unit is set (and can change, until locked) from the
 //! console without a restart.
 
 use std::pin::Pin;
@@ -49,7 +49,7 @@ pub struct BranchBackend {
     /// means "the mint found this backend", not "the mint is up right now".
     stream_attached_at: AtomicU64,
     /// Unix seconds of the most recent `get_settings` call (cdk-mintd calls
-    /// it while booting its `[[ln]]` entry); 0 = never.
+    /// it while booting its `[[payment_backend]]` entry); 0 = never.
     last_settings_at: AtomicU64,
 }
 
@@ -143,7 +143,8 @@ impl MintPayment for BranchBackend {
         custom.insert(self.method.clone(), "{}".to_string());
         Ok(SettingsResponse {
             // The stock boot handshake compares this against the mint's
-            // `[[ln]] unit` (strict, modulo sat/msat) — one unit per install.
+            // `[[payment_backend]] unit` (strict, modulo sat/msat) — one unit
+            // per install.
             unit: unit.to_string(),
             // bolt is not a valid rail here; advertising None for both is intentional.
             bolt11: None::<Bolt11Settings>,

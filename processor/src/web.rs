@@ -52,6 +52,9 @@ pub struct WebState {
     /// Whether the gRPC endpoint serves TLS (CDK_BRANCH_PROCESSOR_TLS_DIR);
     /// decides which transport stanza the config snippet emits.
     pub grpc_tls: bool,
+    /// The gRPC port as published on the host (compose may remap 50051);
+    /// feeds the console's attachment prefill.
+    pub published_grpc_port: u16,
     pub self_test: Arc<RwLock<Option<SelfTestOutcome>>>,
     pub self_test_running: Arc<AtomicBool>,
 }
@@ -68,6 +71,7 @@ impl WebState {
         version: String,
         grpc_bind: String,
         grpc_tls: bool,
+        published_grpc_port: u16,
         self_test: Arc<RwLock<Option<SelfTestOutcome>>>,
         self_test_running: Arc<AtomicBool>,
     ) -> Self {
@@ -81,6 +85,7 @@ impl WebState {
             version: Arc::new(version),
             grpc_bind: Arc::new(grpc_bind),
             grpc_tls,
+            published_grpc_port,
             self_test,
             self_test_running,
         }
@@ -378,6 +383,8 @@ struct ApiSetup {
     /// Where this process actually listens for the mint.
     grpc_bind: String,
     grpc_tls: bool,
+    /// Host-published gRPC port, for the attachment prefill.
+    published_grpc_port: u16,
     attached: bool,
     setup_complete: bool,
 }
@@ -556,6 +563,7 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
             advertised_grpc: config.advertised_grpc.clone(),
             grpc_bind: state.grpc_bind.as_ref().clone(),
             grpc_tls: state.grpc_tls,
+            published_grpc_port: state.published_grpc_port,
             attached: config.is_attached(),
             setup_complete: config.setup_complete(),
         },

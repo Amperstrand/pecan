@@ -82,6 +82,14 @@ is now `Option<Amount<CurrencyUnit>>` (upstream #2146); `#2275` may add a `metho
 (field 5 — our PR deliberately took 6/7); verify `WaitPaymentResponse`/event shapes
 against the accounting refactor (`04cbe81c`). None affect the ticket model.
 
+*Executed 2026-08-18: #2295 merged 2026-08-11 and shipped in cdk **v0.18.0-rc.0**;
+repinned to crates.io `=0.18.0-rc.0` (zero code drift — the PR-head pin already matched
+the merged API), `COMPATIBLE_CDK_REV` became `COMPATIBLE_CDK_VERSION`,
+`docker/mintd/Dockerfile` deleted; operators run the official
+`cashubtc/mintd:0.18.0-rc.0` image. The 0.18 config model (database-authoritative,
+`config init`/`config apply`, `[[ln]]` → `[[payment_backend]]`) is reflected in the
+snippet renderer and checklist remedies.*
+
 ---
 
 ## 3. Target architecture
@@ -462,6 +470,13 @@ before deleting the old model), 2 and 3 can interleave.
 3. **One-box convenience**: no compose-managed mint service (recommended); docs show a
    worked example running the temporary mintd image beside the processor, attached like
    any external mint.
+   *Revisited 2026-08-18: a compose-managed mint returns as an opt-in installer mode
+   (`--with-mint`). The 2026-08 objection was the temporary fork-built image; with
+   #2295 shipped in the stock `cashubtc/mintd:0.18.0-rc.0` image that objection is
+   gone. The mint stays stock and self-contained — installer-written import document,
+   seed shown once + carried in backups, image pinned independently of pecan releases;
+   the console still only verifies. Processor side: the `CDK_BRANCH_PROCESSOR_INITIAL_*`
+   first-boot attachment envs.*
 4. **TLS default**: `allow_insecure = true` + private-network warning as the default
    posture, `TLS_DIR` supported for operators who bring certs (recommended). Full mTLS
    tooling deferred.

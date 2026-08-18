@@ -60,6 +60,8 @@ export interface SetupState {
   /** Where this processor actually listens for the mint. */
   grpc_bind: string
   grpc_tls: boolean
+  /** Host-published gRPC port, for the attachment prefill. */
+  published_grpc_port: number
   attached: boolean
   setup_complete: boolean
 }

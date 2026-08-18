@@ -1,5 +1,10 @@
 # Upstream research 02 — Threading the mint quote id and NUT-20 pubkey to payment backends
 
+> **Update 2026-08-18:** PR [cashubtc/cdk#2295](https://github.com/cashubtc/cdk/pull/2295)
+> merged 2026-08-11 (merge commit `87d03f8`) and shipped in cdk **v0.18.0-rc.0**.
+> Pecan pins that release from crates.io; the body below stays verbatim as the
+> record of the investigation.
+
 Status: research complete against pinned cdk rev `6132607495ae0741e412a63f2acc34e4ccddfc55`
 (tag `v0.17.2`, fetched from `https://github.com/cashubtc/cdk` — remote verified via
 `~/.cargo/git/db/cdk-57defa95db2b7762/FETCH_HEAD`). Date: 2026-08-01.
