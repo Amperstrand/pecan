@@ -5,9 +5,9 @@
 //! the deployment: status / logs / update / backup / restore / start / stop /
 //! uninstall / version.
 //!
-//! The installer sets up the processor (payment backend + operator console)
-//! only. The mint is not provisioned here: the operator attaches their own
-//! cdk-mintd from the console's Mint tab after installation.
+//! Two install shapes: the processor alone (attach a mint you already run,
+//! in the console's Mint tab or via flags), or processor + a bundled
+//! cdk-mintd (`--with-mint`) that leaves the install fully connected.
 
 use std::path::PathBuf;
 
@@ -18,6 +18,7 @@ mod compose;
 mod dns;
 mod envfile;
 mod install;
+mod mint;
 mod ops;
 mod passphrase;
 mod preflight;
@@ -74,11 +75,41 @@ pub struct InstallArgs {
     pub behind_proxy: bool,
     /// Bind address for the payment gRPC your cdk-mintd connects to
     /// (default 127.0.0.1; use 0.0.0.0 for a mint on another machine)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "with_mint")]
     pub grpc_bind: Option<String>,
     /// Host port for the payment gRPC (second instances need distinct ports)
     #[arg(long, default_value_t = 50051)]
     pub grpc_port: u16,
+    /// Also run a mint on this server (official cashubtc/mintd image),
+    /// configured and connected by the installer
+    #[arg(long)]
+    pub with_mint: bool,
+    /// Currency unit this install serves (lowercase letters, digits, - and _).
+    /// Required with --with-mint; with --mint-url it pre-attaches an
+    /// existing mint headlessly
+    #[arg(long)]
+    pub unit: Option<String>,
+    /// Public hostname for the bundled mint (wallets connect here); required
+    /// with --with-mint unless --plain-http
+    #[arg(long, requires = "with_mint")]
+    pub mint_domain: Option<String>,
+    /// With --unit (and no --with-mint): the existing mint's public URL to
+    /// pre-attach. With --with-mint: override the derived mint URL (CI/NAT)
+    #[arg(long)]
+    pub mint_url: Option<String>,
+    /// With --unit --mint-url: the host:port your mintd dials to reach this
+    /// processor (default derived from the gRPC bind and public IP)
+    #[arg(long, conflicts_with = "with_mint")]
+    pub advertised_grpc: Option<String>,
+    /// Host port for the bundled mint's wallet-facing HTTP API (default 3338)
+    #[arg(long, requires = "with_mint")]
+    pub mint_port: Option<u16>,
+    /// Pin the bundled mint's image tag (default: the release-tested one)
+    #[arg(long, requires = "with_mint")]
+    pub mint_version: Option<String>,
+    /// Headless consent to install Docker via get.docker.com when missing
+    #[arg(long)]
+    pub install_docker: bool,
     /// (testing) Fetch artifacts from this git ref instead of the release tag
     #[arg(long = "ref")]
     pub artifact_ref: Option<String>,
@@ -95,6 +126,10 @@ pub struct UpdateArgs {
     /// Update to this release instead of the latest
     #[arg(long)]
     pub version: Option<String>,
+    /// Bundled-mint installs only: upgrade the mint image to this tag.
+    /// The mint is never updated implicitly — it holds money.
+    #[arg(long)]
+    pub mint_version: Option<String>,
     /// Non-interactive
     #[arg(long, short = 'y')]
     pub yes: bool,
@@ -114,6 +149,9 @@ pub struct DomainArgs {
     /// The console's public hostname
     #[arg(long)]
     pub console_domain: Option<String>,
+    /// Bundled-mint installs only: the mint's public hostname
+    #[arg(long)]
+    pub mint_domain: Option<String>,
     /// ACME account email for certificate notices
     #[arg(long)]
     pub email: Option<String>,
@@ -131,12 +169,12 @@ pub struct DomainArgs {
 #[derive(Subcommand)]
 enum Command {
     /// Install the processor stack (default when no subcommand is given)
-    Install(InstallArgs),
+    Install(Box<InstallArgs>),
     /// Change how the console is reached: domain + HTTPS, own proxy, or plain HTTP
     Domain(DomainArgs),
     /// Containers, console health, versions
     Status,
-    /// Follow service logs (optionally: processor, caddy)
+    /// Follow service logs (optionally: processor, caddy, mintd)
     Logs {
         services: Vec<String>,
     },

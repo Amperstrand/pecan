@@ -1,19 +1,27 @@
-# Pecan — branch processor: payment backend + teller console that
-# attaches to ONE cdk-mintd you operate. The mint is not part of this stack:
-# you point your mintd's [grpc_processor] at the processor's gRPC port (the
-# console's Mint tab generates the exact snippet and verifies the link).
+# Pecan — branch processor: payment backend + teller console that attaches
+# to ONE cdk-mintd. Two stack shapes, chosen at install time:
+#
+#   processor only     — you operate the mint elsewhere and point its
+#                        [grpc_processor] at the processor's gRPC port (the
+#                        console's Mint tab generates the exact snippet and
+#                        verifies the link).
+#   processor + mint   — profile "mint" adds the official cashubtc/mintd
+#                        image beside the processor; the installer writes its
+#                        config and connects everything on first boot.
 #
 #   processor — implements the "branch" custom payment method over gRPC
-#               (:50051, your cdk-mintd connects IN) and serves the operator
+#               (:50051, the mint connects IN) and serves the operator
 #               web UI on :9090.
-#   caddy     — optional TLS termination for the console (profile "tls"):
-#               auto-provisions Let's Encrypt certificates for $CONSOLE_DOMAIN.
-#               Enabled by the installer via COMPOSE_PROFILES=tls in .env.
+#   caddy     — optional TLS termination (profile "tls"): auto-provisions
+#               Let's Encrypt certificates for $CONSOLE_DOMAIN (and
+#               $MINT_DOMAIN when the mint is bundled).
+#   mintd     — optional bundled mint (profile "mint"): official cdk-mintd,
+#               configured by the installer, dials the processor over the
+#               compose network.
 #
-# Compatibility: your cdk-mintd must be built from the cdk revision shown in
-# the console's Mint tab (PR cashubtc/cdk#2295 — the payment-processor
-# protocol version is checked strictly at connect time). Until an upstream
-# release contains the PR, docker/mintd/Dockerfile builds a compatible mintd.
+# Compatibility: an externally-run cdk-mintd must be v0.18.0-rc.0 or later
+# (the payment-processor protocol version is checked strictly at connect
+# time); the console's Mint tab names the required release.
 #
 # Every ${VAR} below is documented in .env.example. Production installs are
 # managed by mintctl (see install.sh); from a source checkout,
@@ -27,9 +35,10 @@ services:
     ports:
       - "${BIND_ADDR:-0.0.0.0}:${UI_PORT:-9090}:9090" # operator web UI
       # Payment gRPC your cdk-mintd connects to. Loopback by default (mint on
-      # the same host); a mint on another machine needs GRPC_BIND_ADDR=0.0.0.0
-      # plus a firewall rule limiting access to the mint's host — or TLS via
-      # GRPC_TLS_DIR. Plaintext gRPC carries no authentication.
+      # the same host or bundled); a mint on another machine needs
+      # GRPC_BIND_ADDR=0.0.0.0 plus a firewall rule limiting access to the
+      # mint's host — or TLS via GRPC_TLS_DIR. Plaintext gRPC carries no
+      # authentication.
       - "${GRPC_BIND_ADDR:-127.0.0.1}:${GRPC_PORT:-50051}:50051"
     environment:
       RUST_LOG: "info,h2=warn,hyper=warn,reqwest=warn"
@@ -42,6 +51,14 @@ services:
       # First boot only (before users.json exists): seeds the admin account
       # with this password instead of the demo admin/admin credentials.
       CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:-}"
+      # First boot only (before setup.json exists): pre-seeds the Mint-tab
+      # attachment so bundled and flag-attached installs boot connected.
+      CDK_BRANCH_PROCESSOR_INITIAL_UNIT: "${INITIAL_UNIT:-}"
+      CDK_BRANCH_PROCESSOR_INITIAL_MINT_URL: "${INITIAL_MINT_URL:-}"
+      CDK_BRANCH_PROCESSOR_INITIAL_ADVERTISED_GRPC: "${INITIAL_ADVERTISED_GRPC:-}"
+      # The gRPC port as published on the host; feeds the console's
+      # attachment prefill when the operator types the snippet by hand.
+      CDK_BRANCH_PROCESSOR_PUBLISHED_GRPC_PORT: "${GRPC_PORT:-50051}"
       # Optional mutual TLS for the payment gRPC endpoint: a directory inside
       # the container with server.pem, server.key, and ca.pem. Requires a
       # matching bind mount below; see .env.example.
@@ -71,12 +88,62 @@ services:
       - "443:443/udp" # HTTP/3
     environment:
       CONSOLE_DOMAIN: "${CONSOLE_DOMAIN:-}"
+      MINT_DOMAIN: "${MINT_DOMAIN:-}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
       - processor
+    restart: unless-stopped
+    networks:
+      custom-unit:
+        # The mint's public hostname resolves to Caddy inside the compose
+        # network too, so the processor's checklist and self-test reach
+        # https://$MINT_DOMAIN without depending on hairpin NAT. TLS still
+        # verifies — Caddy serves the real certificate.
+        aliases:
+          - "${MINT_DOMAIN:-mint-domain.invalid}"
+
+  mintd:
+    image: cashubtc/mintd:${MINT_VERSION:-0.18.0-rc.0}
+    profiles: ["mint"]
+    # The official image has no entrypoint script; this mirrors upstream's
+    # docker-mintd-entrypoint.sh. `config init` imports the installer-written
+    # TOML exactly once — after that the mint database is authoritative and
+    # edits to ./mint/config.toml need an explicit `config apply` (see
+    # docs/operations.md).
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if ! cdk-mintd --work-dir /data config show >/dev/null 2>&1; then
+          cdk-mintd --work-dir /data config init --file /config/mint.toml
+        fi
+        exec cdk-mintd --work-dir /data
+    environment:
+      CDK_MINTD_DATABASE: "sqlite"
+      CDK_MINTD_WORK_DIR: "/data"
+    ports:
+      # Loopback in TLS/behind-proxy modes (the proxy is the public surface);
+      # 0.0.0.0 in plain-HTTP mode.
+      - "${MINT_BIND_ADDR:-127.0.0.1}:${MINT_PORT:-3338}:8085"
+    volumes:
+      - mintd-data:/data
+      - ./mint/config.toml:/config/mint.toml:ro
+      # The mint's seed — generated by the installer, shown once, included in
+      # mintctl backup. Anyone holding it can issue this mint's ecash.
+      - ./mint/mnemonic:/run/secrets/mint-mnemonic:ro
+    depends_on:
+      processor:
+        condition: service_healthy
+    healthcheck:
+      # debian-slim ships bash but no curl: HTTP probe via /dev/tcp.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8085 && printf 'GET /v1/info HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 64 <&3 | grep -q ' 200 '"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - custom-unit
@@ -90,3 +157,4 @@ volumes:
   config-data:
   caddy-data:
   caddy-config:
+  mintd-data:

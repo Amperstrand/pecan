@@ -63,6 +63,19 @@ const ENV_TLS_DIR: &str = "CDK_BRANCH_PROCESSOR_TLS_DIR";
 /// users.json exists. Ignored ever after — not a password reset. Empty or
 /// whitespace-only counts as unset.
 const ENV_INITIAL_ADMIN_PASSWORD: &str = "CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD";
+/// First-boot provisioning knobs for the installer: pre-seed the Mint-tab
+/// attachment (unit / mint URL / advertised gRPC endpoint) so a bundled or
+/// flag-attached install boots already attached. Consumed only while no
+/// setup.json exists — ignored ever after, not a re-attachment mechanism.
+/// Empty counts as unset; an invalid value refuses to boot (a headless
+/// install that silently booted unattached would strand the operator).
+const ENV_INITIAL_UNIT: &str = "CDK_BRANCH_PROCESSOR_INITIAL_UNIT";
+const ENV_INITIAL_MINT_URL: &str = "CDK_BRANCH_PROCESSOR_INITIAL_MINT_URL";
+const ENV_INITIAL_ADVERTISED_GRPC: &str = "CDK_BRANCH_PROCESSOR_INITIAL_ADVERTISED_GRPC";
+/// The host-published gRPC port as seen from outside the container (compose
+/// may remap 50051). Only feeds the console's attachment prefill and snippet
+/// guidance; defaults to the bound port.
+const ENV_PUBLISHED_GRPC_PORT: &str = "CDK_BRANCH_PROCESSOR_PUBLISHED_GRPC_PORT";
 /// Image/build version stamped by the Dockerfile (git tag or edge-<sha>);
 /// surfaces in /healthz and the console. "dev" when unset.
 const ENV_VERSION: &str = "CDK_BRANCH_PROCESSOR_VERSION";
@@ -123,6 +136,19 @@ async fn main() -> Result<()> {
     let initial_admin_password = std::env::var(ENV_INITIAL_ADMIN_PASSWORD)
         .ok()
         .filter(|password| !password.trim().is_empty());
+    let env_trimmed = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let initial_unit = env_trimmed(ENV_INITIAL_UNIT);
+    let initial_mint_url = env_trimmed(ENV_INITIAL_MINT_URL);
+    let initial_advertised_grpc = env_trimmed(ENV_INITIAL_ADVERTISED_GRPC);
+    let published_grpc_port: u16 = std::env::var(ENV_PUBLISHED_GRPC_PORT)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(grpc_port);
     let version = std::env::var(ENV_VERSION)
         .ok()
         .filter(|version| !version.trim().is_empty())
@@ -135,19 +161,43 @@ async fn main() -> Result<()> {
     // legacy file is seeded into users.json BEFORE the legacy file is
     // replaced, so the hash is never in zero places.
     let (mut migrated, mut fresh) = (None, false);
+    let has_initial_attachment =
+        initial_unit.is_some() || initial_mint_url.is_some() || initial_advertised_grpc.is_some();
     let app_config = match config_store.load().await? {
         None => {
             fresh = true;
-            config::bootstrap_config(unix_now())
+            let mut bootstrapped = config::bootstrap_config(unix_now());
+            config::apply_initial_attachment(
+                &mut bootstrapped,
+                initial_unit.as_deref(),
+                initial_mint_url.as_deref(),
+                initial_advertised_grpc.as_deref(),
+            )
+            .with_context(|| {
+                format!(
+                    "{ENV_INITIAL_UNIT} / {ENV_INITIAL_MINT_URL} / {ENV_INITIAL_ADVERTISED_GRPC}"
+                )
+            })?;
+            bootstrapped
         }
-        Some(LoadedConfig::Current(config)) => config,
-        Some(LoadedConfig::Legacy {
-            config,
-            auth_hash,
-            raw,
-        }) => {
-            migrated = Some((auth_hash, raw));
-            config
+        Some(loaded) => {
+            if has_initial_attachment {
+                tracing::info!(
+                    "setup.json already exists; {ENV_INITIAL_UNIT}/{ENV_INITIAL_MINT_URL}/\
+                     {ENV_INITIAL_ADVERTISED_GRPC} are first-boot-only and were ignored"
+                );
+            }
+            match loaded {
+                LoadedConfig::Current(config) => config,
+                LoadedConfig::Legacy {
+                    config,
+                    auth_hash,
+                    raw,
+                } => {
+                    migrated = Some((auth_hash, raw));
+                    config
+                }
+            }
         }
     };
     let legacy_auth_hash = migrated.as_ref().and_then(|(hash, _)| hash.clone());
@@ -163,10 +213,20 @@ async fn main() -> Result<()> {
         );
     } else if fresh {
         config_store.save(&app_config).await?;
-        tracing::info!(
-            "bootstrapped new configuration at {}; complete setup in the console",
-            config_store.app_config_path().display()
-        );
+        if has_initial_attachment {
+            tracing::info!(
+                "bootstrapped new configuration at {} with attachment pre-seeded from the \
+                 environment (unit={}, mint_url={})",
+                config_store.app_config_path().display(),
+                app_config.unit,
+                app_config.mint_url,
+            );
+        } else {
+            tracing::info!(
+                "bootstrapped new configuration at {}; complete setup in the console",
+                config_store.app_config_path().display()
+            );
+        }
     }
     let sessions = SessionStore::load(sessions_path).await?;
     let branch = BranchState::load(state_path).await?;
@@ -228,6 +288,7 @@ async fn main() -> Result<()> {
         version,
         format!("{grpc_addr}:{grpc_port}"),
         tls_dir.is_some(),
+        published_grpc_port,
         self_test,
         self_test_running,
     ));

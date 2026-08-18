@@ -52,19 +52,34 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
         working-directory: mintctl
 
-  # The three places naming the compatible cdk revision must agree — the
+  # The compatible cdk version must agree everywhere it appears — the
   # payment-processor protocol check between mint and processor is
   # strict-equality, so a drifted pin ships a broken pairing.
   pin-check:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: cdk rev pins agree
+      - name: cdk version pins agree
         run: |
-          CDK_REV=$(sed -n 's/^ARG CDK_REV=//p' docker/mintd/Dockerfile)
-          test -n "$CDK_REV"
-          grep -q "rev = \"$CDK_REV\"" processor/Cargo.toml
-          grep -q "$CDK_REV" processor/src/config.rs
+          CDK_VERSION=$(sed -n 's/^pub const COMPATIBLE_CDK_VERSION: &str = "\(.*\)";$/\1/p' processor/src/config.rs)
+          test -n "$CDK_VERSION"
+          grep -q "version = \"=$CDK_VERSION\"" processor/Cargo.toml
+          grep -q "MINTD_DEFAULT_TAG: &str = \"$CDK_VERSION\"" mintctl/src/mint.rs
+          # Every literal mintd image tag in the repo (bare or as the
+          # ${MINT_VERSION:-...} compose default) must equal the compatible
+          # version. Tags start with a digit, so interpolations like
+          # cashubtc/mintd:{COMPATIBLE_CDK_VERSION} are naturally skipped.
+          tags=$(grep -rhoE 'cashubtc/mintd:(\$\{MINT_VERSION:-)?[0-9][A-Za-z0-9.-]*' \
+                   --include="*.yml" --include="*.yaml" --include="*.rs" --include="*.toml" \
+                   --include="*.md" --include=".env.example" . \
+                 | sed -E 's|^cashubtc/mintd:(\$\{MINT_VERSION:-)?||' | sort -u)
+          test -n "$tags"
+          for tag in $tags; do
+            if [ "$tag" != "$CDK_VERSION" ]; then
+              echo "cashubtc/mintd tag '$tag' disagrees with COMPATIBLE_CDK_VERSION=$CDK_VERSION" >&2
+              exit 1
+            fi
+          done
 
   shellcheck:
     runs-on: ubuntu-24.04

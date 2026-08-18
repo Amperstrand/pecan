@@ -31,6 +31,17 @@ pub fn status() -> Result<()> {
         Some(running) => ui::say(format!("console: ok (version {running})")),
         None => ui::say(format!("console: not responding on 127.0.0.1:{ui_port}")),
     }
+    if let Some(mint_version) = envf.get("MINT_VERSION").filter(|v| !v.is_empty()) {
+        let mint_port = envf.get("MINT_PORT").unwrap_or_else(|| "3338".into());
+        let mint_url = format!("http://127.0.0.1:{mint_port}/v1/info");
+        if compose::wait_http_ok(&mint_url, std::time::Duration::from_secs(3)) {
+            ui::say(format!("mint:    ok (cashubtc/mintd:{mint_version})"));
+        } else {
+            ui::say(format!(
+                "mint:    not responding on 127.0.0.1:{mint_port} (cashubtc/mintd:{mint_version})"
+            ));
+        }
+    }
     ui::say(format!(
         "installed version: {}",
         if version.is_empty() { "unknown" } else { &version }
@@ -55,17 +66,30 @@ pub fn logs(services: &[String]) -> Result<()> {
 pub fn update(args: &UpdateArgs) -> Result<()> {
     let stack = Stack::discover()?;
     let mut envf = env(&stack)?;
-    // Pre-0.2 installs bundled a managed cdk-mintd in this compose project
-    // (marker: the MINT_MODE key the old installer wrote). The new compose
-    // file has no mint service, so `up --remove-orphans` would take their
-    // mint container down mid-update. Refuse and point at the migration note.
+    // Pre-0.2 installs bundled a MANAGED cdk-mintd in this compose project
+    // (marker: the MINT_MODE key the old installer wrote — none of the
+    // current MINT_* keys is MINT_MODE, so this cannot misfire on 0.3+
+    // bundled-mint installs). The new compose file has no managed mint
+    // service, so `up --remove-orphans` would take their mint container down
+    // mid-update. Refuse and point at the migration note.
     if envf.get("MINT_MODE").is_some() {
         bail!(
             "this install was created by a pre-0.2 version that bundled a managed mint. \
-             Since 0.2 the processor attaches to a mint you operate yourself and no longer \
-             provisions one — updating in place would remove the bundled mint container. \
+             Since 0.2 the mint runs from its own official image (or outside the stack) — \
+             updating in place would remove the old managed mint container. \
              See docs/operations.md (\"Migrating from the bundled mint\") before updating."
         );
+    }
+    // The bundled mint's image is pinned independently: it holds money, so a
+    // pecan release never drags it along. --mint-version upgrades it
+    // deliberately (with or without a processor update).
+    if let Some(mint_version) = &args.mint_version {
+        if envf.get("MINT_VERSION").is_none() {
+            bail!("--mint-version only applies to installs with a bundled mint");
+        }
+        envf.set("MINT_VERSION", mint_version);
+        envf.save()?;
+        ui::say(format!("mint image pinned to cashubtc/mintd:{mint_version}"));
     }
     let current = envf.get("VERSION").unwrap_or_default();
     let target = match &args.version {
@@ -74,7 +98,23 @@ pub fn update(args: &UpdateArgs) -> Result<()> {
             .context("could not resolve the latest release; pass --version vX.Y.Z")?,
     };
     if target == current {
-        ui::say(format!("already on {current}"));
+        if args.mint_version.is_some() {
+            // Only the mint moves: pull and restart with the new pin.
+            if !args.no_pull {
+                stack.compose(&["pull", "--quiet"])?;
+            }
+            stack.compose(&["up", "-d", "--remove-orphans"])?;
+            let mint_port = envf.get("MINT_PORT").unwrap_or_else(|| "3338".into());
+            if !compose::wait_http_ok(
+                &format!("http://127.0.0.1:{mint_port}/v1/info"),
+                Duration::from_secs(120),
+            ) {
+                bail!("the mint did not come back after the update — check 'mintctl logs mintd'");
+            }
+            ui::say("mint updated");
+        } else {
+            ui::say(format!("already on {current}"));
+        }
         return Ok(());
     }
     ui::say(format!(
@@ -99,6 +139,20 @@ pub fn update(args: &UpdateArgs) -> Result<()> {
     std::fs::rename(&staged_binary, stack.install_dir.join("mintctl"))
         .context("move mintctl into place")?;
     caddy::apply_acme_email(&stack.install_dir, &envf.get("ACME_EMAIL").unwrap_or_default())?;
+    // The fresh Caddyfile artifact has no mint site block — re-apply it for
+    // bundled-mint installs serving the mint through the bundled Caddy.
+    let mint_site_enabled = envf
+        .get("COMPOSE_PROFILES")
+        .unwrap_or_default()
+        .split(',')
+        .any(|p| p.trim() == "mint")
+        && envf
+            .get("COMPOSE_PROFILES")
+            .unwrap_or_default()
+            .split(',')
+            .any(|p| p.trim() == "tls")
+        && envf.get("MINT_DOMAIN").is_some_and(|d| !d.is_empty());
+    caddy::apply_mint_site(&stack.install_dir, mint_site_enabled)?;
 
     envf.set("VERSION", &target);
     envf.save()?;
@@ -150,37 +204,56 @@ pub fn backup(output: Option<PathBuf>) -> Result<()> {
         .and_then(|n| n.to_str())
         .context("backup path has no file name")?;
 
+    let has_mint = envf
+        .get("COMPOSE_PROFILES")
+        .unwrap_or_default()
+        .split(',')
+        .any(|p| p.trim() == "mint");
+
     ui::say("Stopping services for a consistent snapshot ...");
     stack.compose(&["stop"])?;
-    let status = std::process::Command::new("docker")
-        .args(["run", "--rm"])
+    let mut cmd = std::process::Command::new("docker");
+    cmd.args(["run", "--rm"])
         .args(["-v", &format!("{project}_config-data:/backup/config:ro")])
         .args(["-v", &format!("{project}_processor-data:/backup/processor:ro")])
         .args(["-v", &format!("{}:/backup/install:ro", stack.install_dir.display())])
-        .args(["-v", &format!("{}:/out", out_dir.display())])
-        .arg("debian:bookworm-slim")
-        .args([
-            "tar",
-            "czf",
-            &format!("/out/{out_name}"),
-            "-C",
-            "/backup",
-            "config",
-            "processor",
-            "install/.env",
-        ])
-        .status()
-        .context("run the backup container")?;
+        .args(["-v", &format!("{}:/out", out_dir.display())]);
+    if has_mint {
+        cmd.args(["-v", &format!("{project}_mintd-data:/backup/mint-data:ro")]);
+    }
+    cmd.arg("debian:bookworm-slim").args([
+        "tar",
+        "czf",
+        &format!("/out/{out_name}"),
+        "-C",
+        "/backup",
+        "config",
+        "processor",
+        "install/.env",
+    ]);
+    if has_mint {
+        // The mint's database and its seed + config: the archive can mint
+        // this install's ecash.
+        cmd.args(["mint-data", "install/mint"]);
+    }
+    let status = cmd.status().context("run the backup container")?;
     stack.compose(&["start"])?;
     if !status.success() {
         bail!("the backup container failed");
     }
     ui::say("");
     ui::say(format!("Backup written to {}", out.display()));
-    ui::say("It contains the operator accounts (password hashes), the attachment");
-    ui::say("configuration, and the ticket ledger — store it encrypted, off this");
-    ui::say("server. The mint's own data is NOT included; the mint is backed up");
-    ui::say("by whoever operates it.");
+    if has_mint {
+        ui::say("It contains the operator accounts (password hashes), the attachment");
+        ui::say("configuration, the ticket ledger, AND the mint's database and SEED —");
+        ui::say("this archive can issue your ecash. Encrypt it and store it off this");
+        ui::say("server.");
+    } else {
+        ui::say("It contains the operator accounts (password hashes), the attachment");
+        ui::say("configuration, and the ticket ledger — store it encrypted, off this");
+        ui::say("server. The mint's own data is NOT included; the mint is backed up");
+        ui::say("by whoever operates it.");
+    }
     Ok(())
 }
 
@@ -202,16 +275,53 @@ pub fn restore(archive: PathBuf, yes: bool) -> Result<()> {
         .and_then(|n| n.to_str())
         .context("archive path has no file name")?;
 
+    // Which shape does the archive have, and does it match this install?
+    let listing = std::process::Command::new("tar")
+        .args(["tzf", &archive.display().to_string()])
+        .output()
+        .context("inspect the archive (tar tzf)")?;
+    if !listing.status.success() {
+        bail!("could not read {} (tar tzf failed)", archive.display());
+    }
+    let members = String::from_utf8_lossy(&listing.stdout);
+    let archive_has_mint = members.lines().any(|l| l.starts_with("mint-data/"));
+    let install_has_mint = envf
+        .get("COMPOSE_PROFILES")
+        .unwrap_or_default()
+        .split(',')
+        .any(|p| p.trim() == "mint");
+    if archive_has_mint && !install_has_mint {
+        bail!(
+            "this archive contains a bundled mint (database + seed), but this install \
+             is processor-only. Re-install with --with-mint first, then restore."
+        );
+    }
+    if !archive_has_mint && install_has_mint {
+        bail!(
+            "this install bundles a mint, but the archive has no mint data — restoring \
+             would leave the processor's ledger out of step with the running mint. \
+             Restore it into a processor-only install, or use a bundled-mint backup."
+        );
+    }
+
     ui::say("Restoring replaces the processor's current state (attachment config,");
     ui::say(format!(
         "operator accounts, ticket ledger) of project '{project}' with the archive"
     ));
-    ui::say("contents. (.env is not touched; the mint is unaffected.)");
+    if archive_has_mint {
+        ui::say("contents, INCLUDING the mint's database and seed. (.env is not touched.)");
+    } else {
+        ui::say("contents. (.env is not touched; the mint is unaffected.)");
+    }
     if !ui_prompt.confirm("Continue?") {
         bail!("restore cancelled");
     }
     stack.compose(&["down", "--remove-orphans"])?;
-    for vol in ["config-data", "processor-data"] {
+    let mut volumes = vec!["config-data", "processor-data"];
+    if archive_has_mint {
+        volumes.push("mintd-data");
+    }
+    for vol in &volumes {
         let status = std::process::Command::new("docker")
             .args(["volume", "create", &format!("{project}_{vol}")])
             .stdout(std::process::Stdio::null())
@@ -221,22 +331,39 @@ pub fn restore(archive: PathBuf, yes: bool) -> Result<()> {
             bail!("could not create volume {project}_{vol}");
         }
     }
-    // Extracting only config/processor also accepts pre-0.2 archives, whose
-    // additional mint/ directory is simply skipped.
-    let status = std::process::Command::new("docker")
-        .args(["run", "--rm"])
+    // Extracting named members only also accepts pre-0.2 archives, whose
+    // additional mint/ directory is simply skipped. Bundled archives restore
+    // the mint volume plus the install-dir mint/ files (config + seed, 0600)
+    // together, so cdk's signer-fingerprint check stays consistent.
+    let script = if archive_has_mint {
+        format!(
+            "find /restore/config /restore/processor /restore/mint-data -mindepth 1 -delete \
+             && tar xzf /in/{archive_name} -C /restore config processor mint-data \
+             && rm -rf /restore/install-dir/mint \
+             && tar xzf /in/{archive_name} -C /restore-staging install/mint \
+             && mv /restore-staging/install/mint /restore/install-dir/mint \
+             && chmod 700 /restore/install-dir/mint \
+             && chmod 600 /restore/install-dir/mint/*"
+        )
+    } else {
+        format!(
+            "find /restore/config /restore/processor -mindepth 1 -delete \
+             && tar xzf /in/{archive_name} -C /restore config processor"
+        )
+    };
+    let mut cmd = std::process::Command::new("docker");
+    cmd.args(["run", "--rm"])
         .args(["-v", &format!("{project}_config-data:/restore/config")])
         .args(["-v", &format!("{project}_processor-data:/restore/processor")])
-        .args(["-v", &format!("{}:/in:ro", archive_dir.display())])
+        .args(["-v", &format!("{}:/in:ro", archive_dir.display())]);
+    if archive_has_mint {
+        cmd.args(["-v", &format!("{project}_mintd-data:/restore/mint-data")])
+            .args(["-v", &format!("{}:/restore/install-dir", stack.install_dir.display())])
+            .args(["--tmpfs", "/restore-staging"]);
+    }
+    let status = cmd
         .arg("debian:bookworm-slim")
-        .args([
-            "sh",
-            "-c",
-            &format!(
-                "find /restore/config /restore/processor -mindepth 1 -delete \
-                 && tar xzf /in/{archive_name} -C /restore config processor"
-            ),
-        ])
+        .args(["sh", "-c", &script])
         .status()
         .context("run the restore container")?;
     if !status.success() {
@@ -265,11 +392,25 @@ pub fn uninstall(purge: bool, yes: bool) -> Result<()> {
         .unwrap_or_else(|| compose::project_name(&stack.install_dir));
 
     if purge {
+        let has_mint = envf
+            .get("COMPOSE_PROFILES")
+            .unwrap_or_default()
+            .split(',')
+            .any(|p| p.trim() == "mint");
         ui::say("PURGE deletes the containers, ALL VOLUMES (operator accounts,");
-        ui::say(format!(
-            "attachment config, the ticket ledger), and {}. This cannot be undone.",
-            stack.install_dir.display()
-        ));
+        if has_mint {
+            ui::say("attachment config, the ticket ledger, the mint's database and its");
+            ui::say(format!(
+                "SEED in {}/mint), and the directory itself. This cannot",
+                stack.install_dir.display()
+            ));
+            ui::say("be undone — without a backup, the mint's issued ecash dies with it.");
+        } else {
+            ui::say(format!(
+                "attachment config, the ticket ledger), and {}. This cannot be undone.",
+                stack.install_dir.display()
+            ));
+        }
         if !ui_prompt.confirm_typed(
             &format!("Type the project name ({project}) to confirm"),
             &project,

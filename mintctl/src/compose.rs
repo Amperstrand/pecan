@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
 
-use crate::ui::{self, Ui};
+use crate::ui;
 
 pub const BIN_LINK: &str = "/usr/local/bin/mintctl";
 pub const DEFAULT_LINUX_DIR: &str = "/opt/pecan";
@@ -153,8 +153,10 @@ fn is_root() -> bool {
         .unwrap_or(false)
 }
 
-/// Port of bash `ensure_docker`, including the get.docker.com install offer.
-pub fn ensure_docker(ui: Ui) -> Result<()> {
+/// Headless docker preflight. Piping get.docker.com into a root shell is
+/// never implicit: it requires the explicit --install-docker consent flag
+/// (the guided wizard asks interactively instead).
+pub fn ensure_docker(allow_install: bool) -> Result<()> {
     if !docker_available() {
         if cfg!(target_os = "macos") {
             bail!(
@@ -162,8 +164,8 @@ pub fn ensure_docker(ui: Ui) -> Result<()> {
                  https://docs.docker.com/desktop/ (or OrbStack) and re-run."
             );
         }
-        ui::say("Docker is not installed.");
-        if ui.confirm("Install Docker now via https://get.docker.com?") {
+        if allow_install {
+            ui::say("Docker is not installed — installing via https://get.docker.com ...");
             let status = Command::new("sh")
                 .args(["-c", "curl -fsSL https://get.docker.com | sh"])
                 .status()
@@ -172,7 +174,10 @@ pub fn ensure_docker(ui: Ui) -> Result<()> {
                 bail!("the Docker installer failed");
             }
         } else {
-            bail!("Docker is required. Install it and re-run.");
+            bail!(
+                "Docker is not installed. Re-run with --install-docker to fetch it from \
+                 https://get.docker.com, or install Docker yourself and re-run."
+            );
         }
     }
     if !docker_daemon_running() {
@@ -199,6 +204,21 @@ pub fn wait_healthy(ui_port: u16, budget: Duration) -> bool {
     let url = format!("http://127.0.0.1:{ui_port}/healthz");
     while std::time::Instant::now() < deadline {
         if probe_healthz(&url).is_some() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    false
+}
+
+/// Poll an arbitrary URL until it answers 2xx (the bundled mint's /v1/info).
+pub fn wait_http_ok(url: &str, budget: Duration) -> bool {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(3))
+        .build();
+    let deadline = std::time::Instant::now() + budget;
+    while std::time::Instant::now() < deadline {
+        if agent.get(url).call().is_ok() {
             return true;
         }
         std::thread::sleep(Duration::from_secs(2));

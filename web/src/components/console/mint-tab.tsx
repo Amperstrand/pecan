@@ -85,7 +85,7 @@ function AttachmentCard({ snapshot }: { snapshot: AppSnapshot }) {
   const [busy, setBusy] = useState(false)
 
   function defaultGrpc() {
-    return `${window.location.hostname}:50051`
+    return `${window.location.hostname}:${setup.published_grpc_port}`
   }
 
   function startEditing() {
@@ -320,8 +320,9 @@ function SnippetCard({ snapshot }: { snapshot: AppSnapshot }) {
       <CardHeader>
         <CardTitle>Config for your cdk-mintd</CardTitle>
         <CardDescription>
-          Merge into your mint.toml, then restart your mintd. The checklist settles itself once
-          the mint reconnects.
+          Apply to your mintd&apos;s stored configuration (cdk-mintd config apply — the
+          snippet&apos;s header shows the exact commands), then restart your mintd. The
+          checklist settles itself once the mint reconnects.
         </CardDescription>
         {snapshot.snippet && (
           <CardAction>

@@ -5,8 +5,10 @@
 # ZeroSSL) and persist in the caddy-data volume. HTTP→HTTPS redirects and the
 # ACME HTTP-01 challenge on :80 are automatic — no extra config needed.
 #
-# The mint is not part of this stack — its operator terminates TLS for the
-# wallet-facing mint URL however they run the mint.
+# When the install bundles the mint (compose profile "mint"), mintctl appends
+# a second site block for $MINT_DOMAIN between marker comments — leave that
+# block to mintctl. An externally-run mint terminates TLS however its
+# operator runs it.
 #
 # To receive ACME account notices, add a global block at the top (mintctl
 # does this when ACME_EMAIL is set in .env):

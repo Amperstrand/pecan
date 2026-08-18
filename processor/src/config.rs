@@ -20,15 +20,18 @@ use serde::{Deserialize, Serialize};
 
 pub const PASSWORD_MIN_LENGTH: usize = 8;
 
-/// The cdk revision both sides of the payment-processor link must be built
-/// from (strict protocol-version equality, "4.0.0" at this rev). This is the
-/// head of PR cashubtc/cdk#2295; update together with processor/Cargo.toml
-/// and docker/mintd/Dockerfile when the PR merges or a release ships.
-pub const COMPATIBLE_CDK_REV: &str = "f3478044380d057d337174d7c6631ffc3159bf2c";
+/// The minimum cdk release the attached cdk-mintd must run. What actually
+/// gates the link is strict equality of the payment-processor protocol
+/// version ([`cdk_common::PAYMENT_PROCESSOR_PROTOCOL_VERSION`]); this release
+/// is the first that speaks it. Keep in lockstep with processor/Cargo.toml —
+/// CI's pin-check enforces the pair.
+pub const COMPATIBLE_CDK_VERSION: &str = "0.18.0-rc.0";
 
-/// Human-readable pointer shown wherever the rev alone would be cryptic.
-pub const COMPATIBLE_CDK_NOTE: &str =
-    "cashubtc/cdk PR #2295 (github.com/zeugmaster/cdk, branch feat/custom-incoming-quote-id-pubkey)";
+/// The official docker image operators can run instead of building cdk-mintd
+/// themselves.
+pub fn compatible_mintd_image() -> String {
+    format!("cashubtc/mintd:{COMPATIBLE_CDK_VERSION}")
+}
 
 /// Bookkeeping lifetime for a melt ticket the wallet never funds. The mint's
 /// own melt-quote TTL governs the wallet; this only bounds how long an
@@ -165,9 +168,9 @@ pub struct AppConfig {
     /// practice; kept in the file so the value is visible and greppable.
     pub method: String,
     /// The single currency unit this install serves. Empty until the operator
-    /// completes setup. Must match the attached mint's `[[ln]] unit` and
-    /// `[grpc_processor].supported_units` entry byte-for-byte — guaranteed by
-    /// generating the config snippet from this value.
+    /// completes setup. Must match the attached mint's `[[payment_backend]]
+    /// unit` and `[grpc_processor].supported_units` entry byte-for-byte —
+    /// guaranteed by generating the config snippet from this value.
     #[serde(default)]
     pub unit: String,
     /// The attached mint's public HTTP base URL (the same URL wallets use).
@@ -203,6 +206,23 @@ pub fn bootstrap_config(configured_at: u64) -> AppConfig {
         unit_locked: false,
         migrated_from_managed: false,
     }
+}
+
+/// Apply the installer's first-boot attachment environment to a freshly
+/// bootstrapped config. Values pass the same validation as the console form;
+/// an invalid value is a hard error — a headless install that silently booted
+/// unattached would strand the operator with nothing but a log line, while a
+/// refusal surfaces in the installer's health wait.
+pub fn apply_initial_attachment(
+    config: &mut AppConfig,
+    unit: Option<&str>,
+    mint_url: Option<&str>,
+    advertised_grpc: Option<&str>,
+) -> Result<()> {
+    if unit.is_none() && mint_url.is_none() && advertised_grpc.is_none() {
+        return Ok(());
+    }
+    config.set_attachment(unit, mint_url.unwrap_or(""), advertised_grpc.unwrap_or(""))
 }
 
 impl AppConfig {
@@ -296,15 +316,22 @@ pub fn render_mint_snippet(config: &AppConfig, grpc_tls: bool) -> Option<String>
             .to_string()
     };
     Some(format!(
-        r#"# Branch settlement backend — merge into your cdk-mintd mint.toml,
-# then restart your mintd.
+        r#"# Branch settlement backend — add to your cdk-mintd's stored configuration.
 #
-# Requires cdk-mintd built from cdk rev {rev}
-# ({note}) — the payment-processor
-# protocol check is strict, so other builds are rejected at connect time.
+# cdk-mintd {version}+ keeps its configuration in the mint database:
+#   fresh mint:    cdk-mintd config init --file mint.toml   (then start it)
+#   running mint:  cdk-mintd config export --file mint.toml
+#                  …merge this snippet into the exported file…
+#                  cdk-mintd config apply --file mint.toml
+#                  then restart cdk-mintd
+# Editing a mint.toml on disk without `config apply` changes nothing.
+#
+# Requires cdk-mintd v{version} or later (docker image {image}) —
+# the payment-processor protocol check (protocol {proto}) is strict, so older
+# builds are rejected at connect time.
 
-[[ln]]
-ln_backend = "grpcprocessor"
+[[payment_backend]]
+backend = "grpcprocessor"
 unit = "{unit}"
 min_mint = 1
 max_mint = 500000
@@ -317,15 +344,15 @@ address = "{host}"
 port = {port}
 {transport}
 
-# Fresh mint databases only — seeds counter-friendly quote lifetimes.
-# (cdk's default melt TTL of 60 s is too short for a counter visit; on an
-# existing database, adjust it over your management RPC instead.)
+# Counter-friendly quote lifetimes (cdk's defaults: 3600 s deposits, 60 s
+# payouts — a wallet's confirmation screen misses a 60 s melt window).
 [info.quote_ttl]
 mint_ttl = 1800
 melt_ttl = 900
 "#,
-        rev = COMPATIBLE_CDK_REV,
-        note = COMPATIBLE_CDK_NOTE,
+        version = COMPATIBLE_CDK_VERSION,
+        image = compatible_mintd_image(),
+        proto = cdk_common::PAYMENT_PROCESSOR_PROTOCOL_VERSION,
         unit = toml_escape(&config.unit),
         host = toml_escape(&host),
         port = port,
@@ -665,11 +692,53 @@ mod tests {
         assert!(snippet.contains("address = \"10.0.0.5\""));
         assert!(snippet.contains("port = 50051"));
         assert!(snippet.contains("allow_insecure = true"));
-        assert!(snippet.contains(COMPATIBLE_CDK_REV));
+        assert!(snippet.contains("[[payment_backend]]"));
+        assert!(snippet.contains("backend = \"grpcprocessor\""));
+        assert!(snippet.contains(COMPATIBLE_CDK_VERSION));
+        assert!(!snippet.contains("[[ln]]"));
 
         let tls = render_mint_snippet(&config, true).expect("tls snippet");
         assert!(tls.contains("tls_dir"));
         assert!(!tls.contains("allow_insecure"));
+    }
+
+    #[test]
+    fn initial_attachment_applies_and_validates() {
+        // Full trio: unit lowercased, URL trailing slash trimmed, scheme
+        // stripped from the gRPC endpoint.
+        let mut config = bootstrap_config(1);
+        apply_initial_attachment(
+            &mut config,
+            Some("ORA"),
+            Some("https://mint.example.org/"),
+            Some("http://processor:50051"),
+        )
+        .expect("initial attachment");
+        assert_eq!(config.unit, "ora");
+        assert_eq!(config.mint_url, "https://mint.example.org");
+        assert_eq!(config.advertised_grpc, "processor:50051");
+        assert!(config.setup_complete());
+
+        // Subset: unit only — incomplete but valid, console finishes the rest.
+        let mut config = bootstrap_config(1);
+        apply_initial_attachment(&mut config, Some("ora"), None, None).expect("unit only");
+        assert_eq!(config.unit, "ora");
+        assert!(!config.is_attached());
+        assert!(config.validate().is_ok());
+
+        // Invalid values are hard errors.
+        let mut config = bootstrap_config(1);
+        assert!(apply_initial_attachment(&mut config, Some("NO SPACES"), None, None).is_err());
+        let mut config = bootstrap_config(1);
+        assert!(apply_initial_attachment(&mut config, None, Some("ftp://x"), None).is_err());
+        let mut config = bootstrap_config(1);
+        assert!(apply_initial_attachment(&mut config, None, None, Some("host/path")).is_err());
+
+        // No vars at all: a plain bootstrap, untouched.
+        let mut config = bootstrap_config(7);
+        apply_initial_attachment(&mut config, None, None, None).expect("no-op");
+        assert!(!config.setup_complete());
+        assert_eq!(config.configured_at, 7);
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //! and no `--yes`) and the pure-flag path (automation, `curl | bash --yes`,
 //! CI). Execution is shared; the wizard wraps it in progress UI.
 //!
-//! The installer provisions the processor only. The mint is never installed
-//! here — the operator attaches their own cdk-mintd from the console.
+//! Two shapes: processor only (attach a mint you already run — in the
+//! console's Mint tab, or headlessly via --unit/--mint-url), or processor +
+//! a bundled cdk-mintd (--with-mint) that boots fully connected.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,9 +17,11 @@ use time::format_description::well_known::Rfc3339;
 use crate::caddy;
 use crate::compose::{self, Stack, BIN_LINK, DEFAULT_LINUX_DIR};
 use crate::dns;
+use crate::mint;
 use crate::passphrase;
+use crate::preflight::{self, PortStatus};
 use crate::release::{self, ArtifactSource};
-use crate::ui::{self, Ui};
+use crate::ui;
 use crate::wizard;
 use crate::InstallArgs;
 
@@ -33,6 +36,34 @@ pub enum AccessMode {
     BehindProxy,
 }
 
+/// The console's Mint-tab attachment pre-seeded at first boot (bundled
+/// installs and headless --unit/--mint-url attaches). Lands in .env as the
+/// INITIAL_* keys the processor consumes only while no setup.json exists.
+pub struct AttachPlan {
+    pub unit: String,
+    pub mint_url: String,
+    /// host[:port] the mint dials to reach this processor.
+    pub advertised_grpc: String,
+}
+
+/// A bundled mint (compose profile "mint", official cashubtc/mintd image).
+pub struct MintPlan {
+    /// Public hostname (empty in plain-HTTP mode).
+    pub mint_domain: String,
+    /// The wallet-facing URL — also the [info].url in the mint's config and
+    /// the processor's attached mint URL.
+    pub mint_url: String,
+    /// Host port for the mint's HTTP API.
+    pub mint_port: u16,
+    /// 127.0.0.1 behind Caddy/own proxy, 0.0.0.0 in plain-HTTP mode.
+    pub mint_bind_addr: String,
+    /// cashubtc/mintd image tag (pinned independently of the pecan VERSION).
+    pub mintd_version: String,
+    /// The mint's BIP39 seed — generated at plan time, written 0600, shown
+    /// once in the finish screen.
+    pub mnemonic: String,
+}
+
 pub struct InstallPlan {
     pub install_dir: PathBuf,
     pub version: String,
@@ -43,20 +74,34 @@ pub struct InstallPlan {
     pub ui_port: u16,
     pub bind_addr: String,
     /// Where the payment gRPC is published for the operator's mintd: loopback
-    /// for a same-host mintd, 0.0.0.0 (plus operator firewalling or TLS) for
-    /// one on another machine.
+    /// for a same-host (or bundled) mintd, 0.0.0.0 (plus operator
+    /// firewalling or TLS) for one on another machine.
     pub grpc_bind_addr: String,
     pub grpc_port: u16,
     pub public_ip: Option<String>,
     pub admin_password: String,
+    /// First-boot attachment (both shapes; None = attach later in the console).
+    pub attach: Option<AttachPlan>,
+    /// The bundled mint (None = processor only).
+    pub mint: Option<MintPlan>,
 }
 
 impl InstallPlan {
-    pub fn compose_profiles(&self) -> &'static str {
-        match self.access {
-            AccessMode::DomainTls => "tls",
-            AccessMode::PlainHttp | AccessMode::BehindProxy => "",
+    pub fn compose_profiles(&self) -> String {
+        let mut profiles: Vec<&str> = Vec::new();
+        if self.access == AccessMode::DomainTls {
+            profiles.push("tls");
         }
+        if self.mint.is_some() {
+            profiles.push("mint");
+        }
+        profiles.join(",")
+    }
+
+    /// Whether the Caddyfile carries the mint site block ({$MINT_DOMAIN}).
+    pub fn mint_site_enabled(&self) -> bool {
+        self.access == AccessMode::DomainTls
+            && self.mint.as_ref().is_some_and(|m| !m.mint_domain.is_empty())
     }
 
     pub fn console_url(&self) -> String {
@@ -87,10 +132,9 @@ pub fn run(args: &InstallArgs) -> Result<()> {
 }
 
 fn run_noninteractive(args: &InstallArgs) -> Result<()> {
-    let ui = Ui::new(true);
     preflight_platform()?;
     let install_dir = resolve_install_dir(args.dir.clone())?;
-    compose::ensure_docker(ui)?;
+    compose::ensure_docker(args.install_docker)?;
     guard_fresh_dir(&install_dir)?;
 
     let version = match &args.version {
@@ -102,14 +146,17 @@ fn run_noninteractive(args: &InstallArgs) -> Result<()> {
     };
     let source = artifact_source(args.artifacts_dir.clone(), args.artifact_ref.clone(), &version);
 
-    ui::say(format!(
-        "Installing the branch processor {version} into {}",
-        install_dir.display()
-    ));
-    fetch_deploy_artifacts(&source, &install_dir)?;
-    install_binary(&source, &version, &install_dir.join("mintctl"))?;
-
     let plan = plan_from_flags(args, install_dir, version)?;
+    warn_on_unconfirmed_dns(&plan);
+
+    ui::say(format!(
+        "Installing the branch processor {}{} into {}",
+        plan.version,
+        if plan.mint.is_some() { " + mint" } else { "" },
+        plan.install_dir.display()
+    ));
+    fetch_deploy_artifacts(&source, &plan.install_dir)?;
+    install_binary(&source, &plan.version, &plan.install_dir.join("mintctl"))?;
     write_config(&plan)?;
 
     let stack = Stack {
@@ -122,8 +169,12 @@ fn run_noninteractive(args: &InstallArgs) -> Result<()> {
             plan.version
         ));
     } else {
-        ui::say(format!("Pulling the image ({}) ...", plan.version));
+        ui::say(format!("Pulling the images ({}) ...", plan.version));
         pull_image(&stack)?;
+    }
+    if plan.mint.is_some() {
+        ui::say("Validating the mint configuration ...");
+        validate_mint_config(&stack)?;
     }
     stack.compose(&["up", "-d", "--remove-orphans"])?;
 
@@ -135,12 +186,69 @@ fn run_noninteractive(args: &InstallArgs) -> Result<()> {
             plan.install_dir.display()
         );
     }
+    if let Some(mint_plan) = &plan.mint {
+        ui::say("Waiting for the mint to come up ...");
+        let url = format!("http://127.0.0.1:{}/v1/info", mint_plan.mint_port);
+        if !compose::wait_http_ok(&url, Duration::from_secs(120)) {
+            let _ = stack.compose(&["ps"]);
+            bail!(
+                "the mint did not come up within 2 minutes — check '{}/mintctl logs mintd'",
+                plan.install_dir.display()
+            );
+        }
+    }
     install_cli_symlink(&plan.install_dir);
     print_summary(&plan);
     Ok(())
 }
 
-/// Resolve the access mode from flags alone (no prompts).
+/// Run cdk-mintd's own `config validate` against the rendered import
+/// document — template or secret errors surface with upstream's message
+/// before anything starts.
+pub fn validate_mint_config(stack: &Stack) -> Result<()> {
+    stack.compose_quiet(&[
+        "run",
+        "--rm",
+        "--no-deps",
+        "mintd",
+        "cdk-mintd",
+        "--work-dir",
+        "/data",
+        "config",
+        "validate",
+        "--file",
+        "/config/mint.toml",
+    ])
+}
+
+/// Headless DNS posture: warn, never fail — Caddy retries certificates in
+/// the background, and CI installs have no DNS at all.
+fn warn_on_unconfirmed_dns(plan: &InstallPlan) {
+    if plan.access != AccessMode::DomainTls {
+        return;
+    }
+    let mut domains = vec![plan.console_domain.as_str()];
+    if let Some(m) = &plan.mint {
+        if !m.mint_domain.is_empty() {
+            domains.push(m.mint_domain.as_str());
+        }
+    }
+    for domain in domains {
+        let confirmed = dns::check(domain, plan.public_ip.as_deref())
+            .map(|c| c.matches)
+            .unwrap_or(false);
+        if !confirmed {
+            ui::warn(format!(
+                "DNS for {domain} does not resolve to this server yet — certificates \
+                 will be retried in the background once the record is right"
+            ));
+        }
+    }
+}
+
+/// Resolve the full plan from flags alone (no prompts). Port conflicts are
+/// fatal here — headless installs must fail fast with the remedy flag named,
+/// not later at `docker compose up`.
 fn plan_from_flags(args: &InstallArgs, install_dir: PathBuf, version: String) -> Result<InstallPlan> {
     let console_domain = args.console_domain.clone().unwrap_or_default();
     if !console_domain.is_empty() && !dns::valid_hostname(&console_domain) {
@@ -159,6 +267,123 @@ fn plan_from_flags(args: &InstallArgs, install_dir: PathBuf, version: String) ->
     } else {
         AccessMode::DomainTls
     };
+    let public_ip = compose::detect_public_ip();
+
+    // --- the mint: bundled, pre-attached, or neither ------------------------
+    let unit = args
+        .unit
+        .as_deref()
+        .map(mint::validate_unit_slug)
+        .transpose()?;
+    let (attach, mint_plan) = if args.with_mint {
+        let unit = unit.ok_or_else(|| {
+            anyhow::anyhow!("--with-mint needs --unit: the currency unit this install serves")
+        })?;
+        let mint_domain = args.mint_domain.clone().unwrap_or_default();
+        if access != AccessMode::PlainHttp {
+            if mint_domain.is_empty() {
+                bail!("--with-mint needs --mint-domain: the mint's public hostname wallets connect to");
+            }
+            if !dns::valid_hostname(&mint_domain) {
+                bail!("--mint-domain {mint_domain} is not a valid hostname");
+            }
+            if mint_domain == console_domain {
+                bail!("--mint-domain must differ from --console-domain — they are two sites");
+            }
+        }
+        let mint_port = args.mint_port.unwrap_or(3338);
+        let mint_url = match &args.mint_url {
+            Some(url) => url.trim_end_matches('/').to_string(),
+            None => match access {
+                AccessMode::DomainTls | AccessMode::BehindProxy => {
+                    format!("https://{mint_domain}")
+                }
+                AccessMode::PlainHttp => match &public_ip {
+                    Some(ip) => format!("http://{ip}:{mint_port}"),
+                    None => bail!(
+                        "could not detect this server's public IP for the mint URL — \
+                         pass --mint-url http://<address>:{mint_port}"
+                    ),
+                },
+            },
+        };
+        (
+            Some(AttachPlan {
+                unit,
+                mint_url: mint_url.clone(),
+                advertised_grpc: "processor:50051".into(),
+            }),
+            Some(MintPlan {
+                mint_domain: if access == AccessMode::PlainHttp {
+                    String::new()
+                } else {
+                    mint_domain
+                },
+                mint_url,
+                mint_port,
+                mint_bind_addr: match access {
+                    AccessMode::PlainHttp => "0.0.0.0".into(),
+                    AccessMode::DomainTls | AccessMode::BehindProxy => "127.0.0.1".into(),
+                },
+                mintd_version: args
+                    .mint_version
+                    .clone()
+                    .unwrap_or_else(|| mint::MINTD_DEFAULT_TAG.into()),
+                mnemonic: mint::generate_mnemonic(),
+            }),
+        )
+    } else if let Some(unit) = unit {
+        // Pre-attach an existing mint headlessly.
+        let mint_url = args.mint_url.clone().ok_or_else(|| {
+            anyhow::anyhow!("--unit without --with-mint needs --mint-url: the existing mint's public URL")
+        })?;
+        let grpc_bind = args.grpc_bind.as_deref().unwrap_or("127.0.0.1");
+        let advertised = match &args.advertised_grpc {
+            Some(endpoint) => endpoint.clone(),
+            None if grpc_bind == "127.0.0.1" => format!("127.0.0.1:{}", args.grpc_port),
+            None => match &public_ip {
+                Some(ip) => format!("{ip}:{}", args.grpc_port),
+                None => bail!(
+                    "could not detect this server's public IP for the advertised gRPC \
+                     endpoint — pass --advertised-grpc <host:port>"
+                ),
+            },
+        };
+        (
+            Some(AttachPlan {
+                unit,
+                mint_url: mint_url.trim_end_matches('/').to_string(),
+                advertised_grpc: advertised,
+            }),
+            None,
+        )
+    } else {
+        if args.mint_url.is_some() {
+            bail!("--mint-url needs --unit: attaching a mint requires both");
+        }
+        (None, None)
+    };
+
+    // --- fail fast on busy ports -------------------------------------------
+    let mut port_checks = vec![
+        (args.ui_port, "console", "--ui-port"),
+        (args.grpc_port, "payment gRPC", "--grpc-port"),
+    ];
+    if let Some(m) = &mint_plan {
+        port_checks.push((m.mint_port, "mint", "--mint-port"));
+    }
+    for (port, label, flag) in port_checks {
+        if preflight::port_status(port) == PortStatus::Busy {
+            bail!("port {port} (for the {label}) is already in use — pass {flag} <port>");
+        }
+    }
+    if access == AccessMode::DomainTls && preflight::ports_80_443_busy() {
+        bail!(
+            "ports 80/443 are already in use (an existing reverse proxy, most likely) — \
+             re-run with --behind-proxy, or free the ports for the bundled Caddy"
+        );
+    }
+
     Ok(InstallPlan {
         bind_addr: args.bind.clone().unwrap_or_else(|| {
             match access {
@@ -167,10 +392,15 @@ fn plan_from_flags(args: &InstallArgs, install_dir: PathBuf, version: String) ->
             }
             .to_string()
         }),
-        grpc_bind_addr: args
-            .grpc_bind
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1".to_string()),
+        grpc_bind_addr: if mint_plan.is_some() {
+            // The bundled mint dials processor:50051 over the compose
+            // network; the host publish stays loopback-only.
+            "127.0.0.1".to_string()
+        } else {
+            args.grpc_bind
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1".to_string())
+        },
         grpc_port: args.grpc_port,
         install_dir,
         version,
@@ -183,8 +413,10 @@ fn plan_from_flags(args: &InstallArgs, install_dir: PathBuf, version: String) ->
         },
         acme_email: args.email.clone().unwrap_or_default(),
         ui_port: args.ui_port,
-        public_ip: compose::detect_public_ip(),
+        public_ip,
         admin_password: passphrase::generate(),
+        attach,
+        mint: mint_plan,
     })
 }
 
@@ -286,10 +518,25 @@ pub fn install_binary(source: &ArtifactSource, version: &str, dest: &Path) -> Re
     Ok(())
 }
 
-/// Write .env (0600) and finish the Caddyfile / proxy snippets for the plan.
+/// Write .env (0600), the mint's config + seed when bundled, and finish the
+/// Caddyfile / proxy snippets for the plan.
 pub fn write_config(plan: &InstallPlan) -> Result<()> {
     write_env(plan)?;
+    if let Some(mint_plan) = &plan.mint {
+        let unit = plan
+            .attach
+            .as_ref()
+            .map(|a| a.unit.as_str())
+            .unwrap_or_default();
+        mint::write_mint_files(
+            &plan.install_dir,
+            unit,
+            &mint_plan.mint_url,
+            &mint_plan.mnemonic,
+        )?;
+    }
     caddy::apply_acme_email(&plan.install_dir, &plan.acme_email)?;
+    caddy::apply_mint_site(&plan.install_dir, plan.mint_site_enabled())?;
     if plan.access == AccessMode::BehindProxy {
         caddy::write_proxy_snippets(plan)?;
     }
@@ -317,13 +564,17 @@ pub fn install_cli_symlink(install_dir: &Path) {
 /// Poll the console through the operator's own proxy / Caddy over verified
 /// HTTPS until certificates are issued and routing works.
 pub fn wait_for_tls(console_domain: &str, budget: Duration) -> bool {
-    let url = format!("https://{console_domain}/healthz");
+    wait_for_tls_url(&format!("https://{console_domain}/healthz"), budget)
+}
+
+/// Same wait for an arbitrary URL (the bundled mint's /v1/info).
+pub fn wait_for_tls_url(url: &str, budget: Duration) -> bool {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(5))
         .build();
     let deadline = std::time::Instant::now() + budget;
     while std::time::Instant::now() < deadline {
-        if agent.get(&url).call().is_ok() {
+        if agent.get(url).call().is_ok() {
             return true;
         }
         std::thread::sleep(Duration::from_secs(3));
@@ -337,7 +588,7 @@ fn write_env(plan: &InstallPlan) -> Result<()> {
         .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
         .format(&Rfc3339)
         .unwrap_or_default();
-    let body = format!(
+    let mut body = format!(
         "# Generated by the Pecan installer {now}.\n\
          # Every key is documented in .env.example.\n\
          VERSION={version}\n\
@@ -363,6 +614,33 @@ fn write_env(plan: &InstallPlan) -> Result<()> {
         admin_password = plan.admin_password,
         acme_email = plan.acme_email,
     );
+    if let Some(attach) = &plan.attach {
+        body.push_str(&format!(
+            "# First boot only; inert once setup.json exists. Later changes happen in\n\
+             # the console's Mint tab.\n\
+             INITIAL_UNIT={unit}\n\
+             INITIAL_MINT_URL={mint_url}\n\
+             INITIAL_ADVERTISED_GRPC={advertised}\n",
+            unit = attach.unit,
+            mint_url = attach.mint_url,
+            advertised = attach.advertised_grpc,
+        ));
+    }
+    if let Some(mint_plan) = &plan.mint {
+        body.push_str(&format!(
+            "# The bundled mint. MINT_VERSION moves independently of VERSION:\n\
+             # 'mintctl update' never touches it (the mint holds money);\n\
+             # upgrade deliberately with 'mintctl update --mint-version <tag>'.\n\
+             MINT_VERSION={mintd_version}\n\
+             MINT_PORT={mint_port}\n\
+             MINT_BIND_ADDR={mint_bind}\n\
+             MINT_DOMAIN={mint_domain}\n",
+            mintd_version = mint_plan.mintd_version,
+            mint_port = mint_plan.mint_port,
+            mint_bind = mint_plan.mint_bind_addr,
+            mint_domain = mint_plan.mint_domain,
+        ));
+    }
     let env_path = plan.install_dir.join(".env");
     std::fs::write(&env_path, body).with_context(|| format!("write {}", env_path.display()))?;
     std::fs::set_permissions(&env_path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
@@ -370,17 +648,41 @@ fn write_env(plan: &InstallPlan) -> Result<()> {
 }
 
 pub fn next_steps(plan: &InstallPlan) -> Vec<String> {
-    vec![
-        "1. Mint tab   — set your unit and your mint's URL; copy the config snippet.".into(),
-        format!(
-            "2. Your mintd — merge the snippet into its mint.toml and restart it.\n     \
-             (It must be built from the compatible cdk revision — the Mint tab\n     \
-             shows which one and why; its gRPC target is {}.)",
-            plan.grpc_endpoint()
-        ),
-        "3. Mint tab   — the checklist and self-test confirm the link end to end.".into(),
-        "4. Access tab — add teller accounts as needed.".into(),
-    ]
+    match (&plan.mint, &plan.attach) {
+        // Bundled mint: everything is already connected.
+        (Some(mint_plan), _) => vec![
+            "1. Write down the mint seed shown above — it is the only recovery path.".into(),
+            "2. Mint tab   — the checklist and automatic self-test confirm and lock\n     \
+             the unit (give it a minute or two)."
+                .into(),
+            "3. Access tab — add teller accounts as needed.".into(),
+            format!("4. Wallets connect to {}.", mint_plan.mint_url),
+        ],
+        // Pre-attached existing mint: the console form is already filled in.
+        (None, Some(attach)) => vec![
+            "1. Mint tab   — copy the config snippet (the attachment is already set).".into(),
+            format!(
+                "2. Your mintd — apply the snippet (cdk-mintd config apply) and restart it.\n     \
+                 (It must run the compatible cdk release — the Mint tab shows\n     \
+                 which one and why; its gRPC target is {}.)",
+                attach.advertised_grpc
+            ),
+            "3. Mint tab   — the checklist and self-test confirm the link end to end.".into(),
+            "4. Access tab — add teller accounts as needed.".into(),
+        ],
+        // Attach later, in the console.
+        (None, None) => vec![
+            "1. Mint tab   — set your unit and your mint's URL; copy the config snippet.".into(),
+            format!(
+                "2. Your mintd — apply the snippet (cdk-mintd config apply) and restart it.\n     \
+                 (It must run the compatible cdk release — the Mint tab shows\n     \
+                 which one and why; its gRPC target is {}.)",
+                plan.grpc_endpoint()
+            ),
+            "3. Mint tab   — the checklist and self-test confirm the link end to end.".into(),
+            "4. Access tab — add teller accounts as needed.".into(),
+        ],
+    }
 }
 
 fn print_summary(plan: &InstallPlan) {
@@ -388,17 +690,47 @@ fn print_summary(plan: &InstallPlan) {
     say("");
     say("============================================================");
     say(format!(
-        " Pecan branch processor {} is running",
-        plan.version
+        " Pecan branch processor {}{} is running",
+        plan.version,
+        if plan.mint.is_some() { " + mint" } else { "" },
     ));
     say("============================================================");
     say("");
     say(format!("  Operator console:  {}", plan.console_url()));
-    say(format!(
-        "  Payment gRPC:      {}  (your cdk-mintd connects here)",
-        plan.grpc_endpoint()
-    ));
+    match &plan.mint {
+        Some(mint_plan) => {
+            let unit = plan
+                .attach
+                .as_ref()
+                .map(|a| a.unit.as_str())
+                .unwrap_or_default();
+            say(format!(
+                "  Mint:              {}  (wallets connect here; unit \"{unit}\")",
+                mint_plan.mint_url
+            ));
+            say("  Payment link:      internal (processor:50051 on the compose network)");
+        }
+        None => {
+            say(format!(
+                "  Payment gRPC:      {}  (your cdk-mintd connects here)",
+                plan.grpc_endpoint()
+            ));
+        }
+    }
     say("");
+    if let Some(mint_plan) = &plan.mint {
+        say("  MINT SEED — write these 12 words down and store them offline.");
+        say("  Anyone holding them can issue your ecash; without them the");
+        say("  mint cannot be recovered.");
+        say("");
+        say(format!("      {}", mint_plan.mnemonic));
+        say("");
+        say(format!(
+            "  (also stored in {}/mint/mnemonic; included in mintctl backup)",
+            plan.install_dir.display()
+        ));
+        say("");
+    }
     say(format!("  Sign in:           admin / {}", plan.admin_password));
     say(format!(
         "                     (also stored in {}/.env)",
@@ -419,10 +751,16 @@ fn print_summary(plan: &InstallPlan) {
         }
         AccessMode::PlainHttp => {
             say("  Plain-HTTP mode: fine on a trusted LAN, not for the public");
-            say(format!("  internet. Firewall: allow {}.", plan.ui_port));
+            match &plan.mint {
+                Some(mint_plan) => say(format!(
+                    "  internet. Firewall: allow {} and {}.",
+                    plan.ui_port, mint_plan.mint_port
+                )),
+                None => say(format!("  internet. Firewall: allow {}.", plan.ui_port)),
+            }
         }
         AccessMode::BehindProxy => {
-            say("  Your reverse proxy terminates TLS. A ready-made server block:");
+            say("  Your reverse proxy terminates TLS. Ready-made server blocks:");
             say(format!(
                 "    {}/proxy-snippets/  (Caddy and nginx)",
                 plan.install_dir.display()
@@ -431,6 +769,12 @@ fn print_summary(plan: &InstallPlan) {
                 "  Proxy {} to 127.0.0.1:{}.",
                 plan.console_domain, plan.ui_port
             ));
+            if let Some(mint_plan) = &plan.mint {
+                say(format!(
+                    "  Proxy {} to 127.0.0.1:{}.",
+                    mint_plan.mint_domain, mint_plan.mint_port
+                ));
+            }
         }
     }
     if plan.grpc_bind_addr == "0.0.0.0" {
