@@ -244,9 +244,17 @@ pub fn probe_healthz(url: &str) -> Option<String> {
 }
 
 pub fn detect_public_ip() -> Option<String> {
-    // ifconfig.me serves HTML to non-curl user agents — use the /ip endpoint
-    // and refuse anything that does not parse as an address.
-    for url in ["https://ifconfig.me/ip", "https://icanhazip.com"] {
+    // IPv4-only endpoints first: the DNS preflight compares this address
+    // against A records, and on a dual-stack host the generic endpoints
+    // answer over IPv6 — which then never matches. ifconfig.me serves HTML
+    // to non-curl user agents — use the /ip endpoint — and refuse anything
+    // that does not parse as an address.
+    for url in [
+        "https://ipv4.icanhazip.com",
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ] {
         let Ok(resp) = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(5))
             .build()
