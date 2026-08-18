@@ -19,7 +19,7 @@ pub struct DnsCheck {
     pub behind_cloudflare: bool,
 }
 
-pub fn check(domain: &str, public_ip: Option<&str>) -> Result<DnsCheck> {
+fn public_resolver() -> Result<Resolver> {
     let ips = NameServerConfigGroup::from_ips_clear(
         &[IpAddr::from([1, 1, 1, 1]), IpAddr::from([8, 8, 8, 8])],
         53,
@@ -28,8 +28,12 @@ pub fn check(domain: &str, public_ip: Option<&str>) -> Result<DnsCheck> {
     let mut opts = ResolverOpts::default();
     opts.timeout = Duration::from_secs(4);
     opts.attempts = 1;
-    let resolver = Resolver::new(ResolverConfig::from_parts(None, vec![], ips), opts)
-        .context("build DNS resolver")?;
+    Resolver::new(ResolverConfig::from_parts(None, vec![], ips), opts)
+        .context("build DNS resolver")
+}
+
+pub fn check(domain: &str, public_ip: Option<&str>) -> Result<DnsCheck> {
+    let resolver = public_resolver()?;
     let resolved: Vec<IpAddr> = resolver
         .lookup_ip(format!("{domain}."))
         .map(|lookup| lookup.iter().collect())
@@ -44,6 +48,49 @@ pub fn check(domain: &str, public_ip: Option<&str>) -> Result<DnsCheck> {
         },
         behind_cloudflare: resolved.iter().any(is_cloudflare),
         resolved,
+    })
+}
+
+/// AAAA records for the domain from the public resolvers. Advisory only —
+/// Let's Encrypt prefers IPv6 when an AAAA exists, so a wrong AAAA breaks
+/// certificate issuance even when the A record is perfect.
+pub fn lookup_aaaa(domain: &str) -> Vec<IpAddr> {
+    let Ok(resolver) = public_resolver() else {
+        return Vec::new();
+    };
+    resolver
+        .ipv6_lookup(format!("{domain}."))
+        .map(|lookup| lookup.iter().map(|aaaa| IpAddr::V6(aaaa.0)).collect())
+        .unwrap_or_default()
+}
+
+/// A warning when the domain's AAAA record would sabotage certificate
+/// issuance: it exists but does not point at this server's detected IPv6
+/// (or the server has no IPv6 egress at all). None = nothing concerning.
+pub fn aaaa_advisory(domain: &str, public_ipv6: Option<&str>) -> Option<String> {
+    let aaaa = lookup_aaaa(domain);
+    if aaaa.is_empty() {
+        return None;
+    }
+    let expected: Option<IpAddr> = public_ipv6.and_then(|ip| ip.parse().ok());
+    if let Some(expected) = expected {
+        if aaaa.contains(&expected) {
+            return None;
+        }
+    }
+    let ips: Vec<String> = aaaa.iter().map(|ip| ip.to_string()).collect();
+    let ips = ips.join(", ");
+    Some(match expected {
+        Some(expected) => format!(
+            "{domain} has an AAAA record ({ips}) that is not this server's \
+             IPv6 ({expected}). Let's Encrypt prefers IPv6 when an AAAA exists — \
+             fix or remove that record, or certificate issuance may fail."
+        ),
+        None => format!(
+            "{domain} has an AAAA record ({ips}), but this server shows no IPv6 \
+             egress. Let's Encrypt prefers IPv6 when an AAAA exists — remove the \
+             record unless IPv6 to this server really works."
+        ),
     })
 }
 

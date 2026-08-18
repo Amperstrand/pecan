@@ -233,6 +233,7 @@ fn warn_on_unconfirmed_dns(plan: &InstallPlan) {
             domains.push(m.mint_domain.as_str());
         }
     }
+    let public_ipv6 = compose::detect_public_ipv6();
     for domain in domains {
         let confirmed = dns::check(domain, plan.public_ip.as_deref())
             .map(|c| c.matches)
@@ -242,6 +243,9 @@ fn warn_on_unconfirmed_dns(plan: &InstallPlan) {
                 "DNS for {domain} does not resolve to this server yet — certificates \
                  will be retried in the background once the record is right"
             ));
+        }
+        if let Some(advisory) = dns::aaaa_advisory(domain, public_ipv6.as_deref()) {
+            ui::warn(advisory);
         }
     }
 }
