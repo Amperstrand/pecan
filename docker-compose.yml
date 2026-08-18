@@ -138,8 +138,9 @@ services:
       processor:
         condition: service_healthy
     healthcheck:
-      # debian-slim ships bash but no curl: HTTP probe via /dev/tcp.
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8085 && printf 'GET /v1/info HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 64 <&3 | grep -q ' 200 '"]
+      # The official image is Alpine-based: busybox wget is present, curl
+      # and bash are not. busybox wget exits non-zero on HTTP errors.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8085/v1/info"]
       interval: 30s
       timeout: 5s
       retries: 3
