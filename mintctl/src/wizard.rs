@@ -543,14 +543,20 @@ fn confirm_dns(domains: &[&str], public_ip: Option<&str>, access: &mut AccessMod
             return Ok(());
         }
         sp.stop("DNS is not confirmed yet:");
+        let mut any_mismatch = false;
         for check in checks.iter().flatten() {
             let status = if check.matches {
                 "ok".to_string()
             } else if check.resolved.is_empty() {
                 "no record found".to_string()
             } else {
+                any_mismatch = true;
                 let ips: Vec<String> = check.resolved.iter().map(|ip| ip.to_string()).collect();
-                format!("resolves to {}", ips.join(", "))
+                format!(
+                    "resolves to {} — not the detected address ({})",
+                    ips.join(", "),
+                    public_ip.unwrap_or("unknown")
+                )
             };
             log::step(format!("{}  —  {status}", check.domain))?;
             if check.behind_cloudflare {
@@ -561,7 +567,15 @@ fn confirm_dns(domains: &[&str], public_ip: Option<&str>, access: &mut AccessMod
                 ))?;
             }
         }
-        log::info("Freshly created records can take a few minutes to propagate.")?;
+        if any_mismatch {
+            log::info(
+                "If the resolved address IS this server (several IPs, NAT, or the\n\
+                 detection answered over IPv6), choose \"Continue anyway\" — certificates\n\
+                 only need the record to actually reach this machine.",
+            )?;
+        } else {
+            log::info("Freshly created records can take a few minutes to propagate.")?;
+        }
 
         #[derive(Clone, PartialEq, Eq)]
         enum Next {
