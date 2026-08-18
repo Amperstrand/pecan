@@ -319,8 +319,9 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cashu"
-version = "0.17.0"
-source = "git+https://github.com/zeugmaster/cdk?rev=f3478044380d057d337174d7c6631ffc3159bf2c#f3478044380d057d337174d7c6631ffc3159bf2c"
+version = "0.18.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6463ffe63daef96435ab0a1718ba80ba14774f6b64c2c5ba43996b416abdf541"
 dependencies = [
  "bitcoin",
  "cbor-diag",
@@ -375,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "cdk-branch-processor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -397,8 +398,9 @@ dependencies = [
 
 [[package]]
 name = "cdk-common"
-version = "0.17.0"
-source = "git+https://github.com/zeugmaster/cdk?rev=f3478044380d057d337174d7c6631ffc3159bf2c#f3478044380d057d337174d7c6631ffc3159bf2c"
+version = "0.18.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4c22af99c2c82eef2ec46f801699464585412372193cdb8c3588e26502c1043"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -407,7 +409,8 @@ dependencies = [
  "cbor-diag",
  "ciborium",
  "futures",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
+ "gloo-timers",
  "jsonwebtoken",
  "lightning",
  "lightning-invoice",
@@ -429,17 +432,19 @@ dependencies = [
 
 [[package]]
 name = "cdk-http-client"
-version = "0.17.0"
-source = "git+https://github.com/zeugmaster/cdk?rev=f3478044380d057d337174d7c6631ffc3159bf2c#f3478044380d057d337174d7c6631ffc3159bf2c"
+version = "0.18.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52ec9e1bc18f5f3700e4cc33d3e1d29fddd88067d563a204ec7982f885391057"
 dependencies = [
  "async-trait",
  "bitreq",
  "cashu",
  "futures",
  "futures-channel",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "js-sys",
  "regex",
+ "rustls",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -455,8 +460,9 @@ dependencies = [
 
 [[package]]
 name = "cdk-payment-processor"
-version = "0.17.0"
-source = "git+https://github.com/zeugmaster/cdk?rev=f3478044380d057d337174d7c6631ffc3159bf2c#f3478044380d057d337174d7c6631ffc3159bf2c"
+version = "0.18.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9aef6b3c04045b5852ceeb64d65e13746805d77c17a1bdbb5b1a644549937f39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -899,10 +905,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

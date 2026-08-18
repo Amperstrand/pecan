@@ -5,9 +5,12 @@ installation created by the installer (deployment files + `.env` + the
 `mintctl` binary in one directory, default `/opt/pecan`).
 
 Scope note: this stack is the **branch processor** — the payment backend and
-teller console that attaches to one cdk-mintd you operate. The mint itself
-(its seed, database, backups, keysets, TLS for the wallet-facing URL) is
-yours to run with cdk's own tooling; nothing here manages it.
+teller console that attaches to one cdk-mintd. If you run the mint yourself
+(its seed, database, backups, keysets, TLS for the wallet-facing URL), it is
+yours to run with cdk's own tooling; nothing here manages it. Installs
+created with `--with-mint` additionally run the official `cashubtc/mintd`
+image in the same compose project — see "Running the bundled mint" below for
+what that changes.
 
 ## The .env file
 
@@ -21,25 +24,35 @@ The important ones:
 | `COMPOSE_PROJECT_NAME` | prefixes container and volume names; never change it on an existing install (the volumes would be orphaned) |
 | `UI_PORT` | host port for the operator console |
 | `BIND_ADDR` | host interface for the console port: `127.0.0.1` in TLS and behind-proxy modes, `0.0.0.0` in plain-HTTP mode |
-| `COMPOSE_PROFILES` | `tls` enables the bundled Caddy for the console |
+| `COMPOSE_PROFILES` | stack shape: `tls` enables the bundled Caddy, `mint` the bundled mint, `tls,mint` both |
 | `CONSOLE_DOMAIN` | hostname Caddy serves and gets certificates for |
 | `INITIAL_ADMIN_PASSWORD` | first boot only — seeds the admin account (change forced at first sign-in); inert once `users.json` exists |
 | `ACME_EMAIL` | optional; `mintctl update` re-applies it to the Caddyfile |
-| `GRPC_BIND_ADDR` / `GRPC_PORT` | where the payment gRPC is published for your mintd (loopback:50051 by default; plaintext gRPC has no auth — firewall it or use TLS) |
+| `GRPC_BIND_ADDR` / `GRPC_PORT` | where the payment gRPC is published for your mintd (loopback:50051 by default; plaintext gRPC has no auth — firewall it or use TLS). `GRPC_PORT` also feeds the console's attachment prefill |
 | `GRPC_TLS_DIR` | optional mutual TLS for the payment gRPC (see `.env.example`) |
+| `INITIAL_UNIT` / `INITIAL_MINT_URL` / `INITIAL_ADVERTISED_GRPC` | first boot only — pre-seed the Mint-tab attachment (bundled installs and headless attach flags); inert once `setup.json` exists |
+| `MINT_VERSION` | bundled mint's image tag; moves independently of `VERSION` (`mintctl update --mint-version`) |
+| `MINT_PORT` / `MINT_BIND_ADDR` | host port and interface for the bundled mint's wallet-facing API |
+| `MINT_DOMAIN` | the bundled mint's public hostname (Caddy site + compose network alias) |
 
 Prefer `mintctl domain` over hand-editing the access keys; for anything else,
 apply `.env` edits with `mintctl stop && mintctl start`.
 
 ## Attaching your mint
 
+(Only for processor-only installs — a bundled mint arrives already attached.)
 Everything happens in the console's **Mint tab**:
 
 1. Set the **unit** (e.g. `ora`) and the mint's public **URL** — the same URL
-   wallets use. Setup applies live; no restart.
-2. Copy the generated **config snippet** into your mintd's `mint.toml`
-   (a complete example lives at `docs/examples/mint.toml`) and restart your
-   mintd.
+   wallets use. Setup applies live; no restart. (Headless installs can
+   pre-seed this step with `mintctl install --unit <u> --mint-url <url>`.)
+2. Apply the generated **config snippet** to your mintd. cdk-mintd 0.18+
+   keeps its configuration in the mint database, so a mint.toml on disk is an
+   import document: fresh mint — `cdk-mintd config init --file mint.toml`,
+   then start it; running mint — `cdk-mintd config export --file mint.toml`,
+   merge the snippet, `cdk-mintd config apply --file mint.toml`, restart.
+   Editing the file without `config apply` changes nothing. A complete
+   example lives at `docs/examples/mint.toml`.
 3. Watch the **attachment checklist** settle: reachable → advertised →
    linked → keys → end-to-end. Every failing check comes with the exact
    remedy.
@@ -48,10 +61,10 @@ Everything happens in the console's **Mint tab**:
    at this processor, then voids them. It also measures the mint's quote
    lifetimes and warns when they are too short for a counter visit.
 
-Compatibility: your mintd must be built from the cdk revision shown in the
-Mint tab (PR cashubtc/cdk#2295 — payment-processor protocol 4.0.0, strict
-equality at connect time). Until an upstream release contains the PR,
-`docker/mintd/Dockerfile` in the repo builds a compatible mintd.
+Compatibility: your mintd must run cdk-mintd v0.18.0-rc.0 or later — the
+first release whose payment-processor protocol (4.0.0, strict equality at
+connect time) carries the quote id on custom mint quotes. The official
+docker image `cashubtc/mintd:0.18.0-rc.0` is the easiest way to run one.
 
 The **unit locks** after the first successful self-test: issued ecash and
 quotes reference it. Changing a locked unit means starting over deliberately —
@@ -59,12 +72,43 @@ stop the processor, edit `unit` and `unit_locked` in `setup.json` on the
 config volume, and accept that existing tickets for the old unit remain
 history-only.
 
-Advertisement pinning heads-up (a cdk behavior the checklist detects): while
-`[mint_management_rpc]` is enabled, cdk-mintd pins its advertised capabilities
-to the database at first boot — adding the `[[ln]]` entry to an existing mint
-later will not show up in `/v1/info`. Either restart the mint with the RPC
-disabled once, or update the stored advertisement over the RPC
-(`cdk-mint-cli update-nut04` / `update-nut05`).
+## Running the bundled mint
+
+Installs created with `--with-mint` (or the wizard's "processor and a new
+mint" choice) run the official `cashubtc/mintd` image in the same compose
+project, pre-attached and self-tested by the time the installer finishes.
+What changes compared to a processor-only install:
+
+- **The seed is yours to keep.** The installer generates the mint's 12-word
+  BIP39 seed, shows it exactly once in the finish screen, and stores it at
+  `<install-dir>/mint/mnemonic` (0600). It is the mint: anyone holding it can
+  issue your ecash; without it a lost server means lost keys. Write it down,
+  store it offline.
+- **The mint's config is database-authoritative.** The installer's
+  `<install-dir>/mint/config.toml` was imported once by `cdk-mintd config
+  init` on first start. To change mint settings later (metadata, quote TTLs,
+  limits), edit the file and apply it explicitly:
+
+  ```sh
+  cd <install-dir>
+  docker compose -f docker-compose.yml --project-directory . \
+    run --rm --no-deps mintd cdk-mintd --work-dir /data config apply --file /config/mint.toml
+  ./mintctl start
+  ```
+
+- **`mintctl backup` includes the mint** — the `mintd-data` volume (mint
+  database) and the `mint/` directory (config + seed). Such an archive can
+  issue your ecash: encrypt it. `mintctl restore` restores mint and
+  processor state together and refuses archives whose shape (with/without
+  mint) does not match the install.
+- **Updates never touch the mint implicitly.** `mintctl update` moves the
+  processor stack only; the mint's image is pinned by `MINT_VERSION` and
+  upgraded deliberately with `mintctl update --mint-version <tag>`.
+- **`mintctl status`** additionally probes the mint's `/v1/info`; `mintctl
+  logs mintd` follows its log.
+- For immediate-effect capability changes, cdk's management RPC
+  (`cdk-mint-cli`) remains available if you enable `[mint_management_rpc]`
+  in the mint's config yourself.
 
 ## Persistence
 
@@ -75,11 +119,12 @@ Docker Compose uses named volumes:
 | `config-data` | processor config (`setup.json`), user accounts (`users.json`) |
 | `processor-data` | branch ticket store (`tickets.json`), login sessions |
 | `caddy-data`, `caddy-config` | TLS certificates and Caddy state (TLS mode only) |
+| `mintd-data` | the bundled mint's database and work dir (bundled installs only) |
 
 Updates and recreates keep these volumes. `mintctl backup` / `restore` are
-the supported way to snapshot and move them. The mint's data lives wherever
-you run the mint — it is not part of this stack. To reset the processor for
-a fresh local demo: `docker compose down -v`.
+the supported way to snapshot and move them. An externally-run mint's data
+lives wherever you run that mint — it is not part of this stack. To reset
+the processor for a fresh local demo: `docker compose down -v`.
 
 ## Backup and restore drill
 
@@ -89,9 +134,11 @@ mintctl backup /root/branch-$(date +%F).tar.gz     # brief downtime
 
 The archive contains the processor's two data volumes and `.env`: operator
 accounts (password hashes), the attachment configuration, and the ticket
-ledger. Encrypt it (e.g. `age`/`gpg`) and store it off the server. **It does
-not contain any mint data** — the mint's seed and database are backed up by
-whoever operates the mint.
+ledger. On bundled-mint installs it additionally contains the mint's
+database volume and the `mint/` directory — **including the seed**, so the
+archive can issue your ecash. Encrypt it (e.g. `age`/`gpg`) and store it off
+the server. For a processor-only install, no mint data is included — the
+mint's seed and database are backed up by whoever operates the mint.
 
 Restore onto the same install:
 
@@ -133,8 +180,10 @@ container. To migrate:
    mnemonic) is preserved as `setup.json.v3-managed.bak` on the config volume
    and is never deleted; the console shows a one-time notice.
 4. In the Mint tab, confirm the attachment (URL of your now-self-run mint)
-   and run the self-test. Note: the mint must be rebuilt from the compatible
-   cdk revision (the old bundled build predates the required protocol).
+   and run the self-test. Note: the mint must run cdk-mintd v0.18.0-rc.0 or
+   later (the old bundled build predates the required protocol), and its old
+   generated `mint.toml` needs `cdk-mintd config migrate` first — 0.18
+   refuses `--config` at startup and literal secrets in the TOML.
 5. The old `mint-data` volume is no longer referenced by compose; remove it
    only after the mint runs elsewhere and is verified.
 
@@ -142,7 +191,7 @@ container. To migrate:
 
 ```sh
 curl -fsSL .../install.sh | bash -s -- --dir /opt/second-branch \
-    --ui-port 19090 --grpc-port 51051 --console-domain console2.example.org
+    --ui-port 19090 --grpc-port 60051 --console-domain console2.example.org
 ```
 
 Each install directory is fully self-contained (own project name, volumes,
@@ -173,7 +222,10 @@ domain with automatic HTTPS, a new domain, or behind-your-own-proxy — with
 the same DNS live-check and certificate wait as the installer
 (non-interactive: `mintctl domain --console-domain new.example.org --yes`).
 It updates `.env`, re-renders the proxy snippet when applicable, and
-recreates the affected containers.
+recreates the affected containers. On bundled-mint installs it also carries
+the mint's hostname through (`--mint-domain`); remember that changing the
+mint's hostname changes the URL wallets — and the console's Mint tab —
+point at.
 
 ## Updates and rollback
 

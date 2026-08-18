@@ -4,9 +4,10 @@
 //! flag twin so automation never lands here. Cancelling any prompt (ESC or
 //! Ctrl-C) aborts cleanly without touching the system.
 //!
-//! The wizard sets up the processor only: console reachability, the payment
-//! gRPC bind for the operator's own cdk-mintd, and the first admin password.
-//! Attaching the mint happens afterwards, in the console's Mint tab.
+//! The first substantive question picks the shape: processor + a new bundled
+//! mint (unit and mint hostname collected here, everything connected at the
+//! end), or processor only (attach a mint you already run afterwards, in the
+//! console's Mint tab).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,7 +18,8 @@ use cliclack::{confirm, input, intro, log, note, outro, outro_cancel, select, sp
 use crate::compose::{self, Stack};
 use crate::dns;
 use crate::envfile::EnvFile;
-use crate::install::{self, AccessMode, InstallPlan};
+use crate::install::{self, AccessMode, AttachPlan, InstallPlan, MintPlan};
+use crate::mint;
 use crate::preflight::{self, PortStatus};
 use crate::release;
 use crate::{caddy, passphrase};
@@ -112,16 +114,49 @@ pub fn run(args: &InstallArgs) -> Result<()> {
     }
 
     let sp = spinner();
-    sp.start("Detecting the server's public IP ...");
+    sp.start("Detecting the server's public address ...");
     let public_ip = compose::detect_public_ip();
-    match &public_ip {
-        Some(ip) => sp.stop(format!("Public IP: {ip}")),
-        None => sp.stop("Public IP: could not detect (offline or LAN-only) — continuing"),
+    let public_ipv6 = compose::detect_public_ipv6();
+    match (&public_ip, &public_ipv6) {
+        (Some(v4), Some(v6)) => sp.stop(format!("Public IP: {v4}  (IPv6: {v6})")),
+        (Some(v4), None) => sp.stop(format!("Public IP: {v4}")),
+        (None, Some(v6)) => sp.stop(format!("Public IP: {v6} (IPv6 only)")),
+        (None, None) => sp.stop("Public IP: could not detect (offline or LAN-only) — continuing"),
     }
+
+    // --- what to install ----------------------------------------------------
+    let with_mint = if args.with_mint {
+        true
+    } else {
+        #[derive(Clone, PartialEq, Eq)]
+        enum Shape {
+            Full,
+            ProcessorOnly,
+        }
+        let shape = step!(select("What should this server run?")
+            .item(
+                Shape::Full,
+                "The processor and a new mint",
+                "bundled cdk-mintd; everything is connected when the install finishes"
+            )
+            .item(
+                Shape::ProcessorOnly,
+                "The processor only",
+                "attach a mint you already run, in the console's Mint tab"
+            )
+            .initial_value(Shape::Full)
+            .interact());
+        shape == Shape::Full
+    };
 
     let mut ui_port = args.ui_port;
     let mut grpc_port = args.grpc_port;
-    for (label, port) in [("console", &mut ui_port), ("payment gRPC", &mut grpc_port)] {
+    let mut mint_port = args.mint_port.unwrap_or(3338);
+    let mut port_checks = vec![("console", &mut ui_port), ("payment gRPC", &mut grpc_port)];
+    if with_mint {
+        port_checks.push(("mint", &mut mint_port));
+    }
+    for (label, port) in port_checks {
         if preflight::port_status(*port) == PortStatus::Busy {
             log::warning(format!("Port {port} (for the {label}) is already in use."))?;
             let answer: String = step!(input(format!("Alternative {label} port"))
@@ -135,9 +170,41 @@ pub fn run(args: &InstallArgs) -> Result<()> {
         }
     }
 
-    // --- where the mint runs ------------------------------------------------
+    // --- the unit (bundled mint) -------------------------------------------
+    let unit = if with_mint {
+        let preset = args.unit.clone().unwrap_or_default();
+        let entered: String = if preset.is_empty() {
+            step!(input("Currency unit this mint issues")
+                .placeholder("ora")
+                .validate(|value: &String| {
+                    match mint::validate_unit_slug(value) {
+                        Ok(_) => Ok(()),
+                        Err(_) => Err("lowercase letters, digits, - and _ only (e.g. \"ora\")"),
+                    }
+                })
+                .interact())
+        } else {
+            preset
+        };
+        let unit = mint::validate_unit_slug(&entered)?;
+        if mint::RESERVED_UNITS.contains(&unit.as_str()) {
+            log::warning(format!(
+                "\"{unit}\" is a unit wallets treat specially — a name that is \
+                 unambiguously yours avoids confusion."
+            ))?;
+        }
+        Some(unit)
+    } else {
+        None
+    };
+
+    // --- where the mint runs (processor-only shape) -------------------------
     let mut grpc_bind_addr = args.grpc_bind.clone().unwrap_or_default();
-    if grpc_bind_addr.is_empty() {
+    if with_mint {
+        // The bundled mint dials processor:50051 over the compose network;
+        // the host publish stays loopback-only.
+        grpc_bind_addr = "127.0.0.1".into();
+    } else if grpc_bind_addr.is_empty() {
         #[derive(Clone, PartialEq, Eq)]
         enum MintLocation {
             SameHost,
@@ -168,7 +235,7 @@ pub fn run(args: &InstallArgs) -> Result<()> {
         };
     }
 
-    // --- console access -----------------------------------------------------
+    // --- console (and mint) access ------------------------------------------
     let ports_busy = preflight::ports_80_443_busy();
     let access = if args.behind_proxy {
         AccessMode::BehindProxy
@@ -184,7 +251,17 @@ pub fn run(args: &InstallArgs) -> Result<()> {
                  behind it instead of bringing its own.",
             )?;
         }
-        let mut sel = select("How should operators reach the console?")
+        let reach_question = if with_mint {
+            "How should operators (and wallets) reach this server?"
+        } else {
+            "How should operators reach the console?"
+        };
+        let tls_hint = if with_mint {
+            "bundled Caddy obtains certificates for the console and mint hostnames"
+        } else {
+            "bundled Caddy obtains certificates for the console hostname"
+        };
+        let mut sel = select(reach_question)
             .item(
                 AccessMode::DomainTls,
                 if ports_busy {
@@ -192,7 +269,7 @@ pub fn run(args: &InstallArgs) -> Result<()> {
                 } else {
                     "Domain with automatic HTTPS (recommended)"
                 },
-                "bundled Caddy obtains certificates for the console hostname"
+                tls_hint
             )
             .item(
                 AccessMode::BehindProxy,
@@ -217,10 +294,14 @@ pub fn run(args: &InstallArgs) -> Result<()> {
     };
 
     let mut console_domain = args.console_domain.clone().unwrap_or_default();
+    let mut mint_domain = args.mint_domain.clone().unwrap_or_default();
     let mut acme_email = args.email.clone().unwrap_or_default();
     let mut access = access;
     if access != AccessMode::PlainHttp {
         console_domain = collect_console_domain(&console_domain)?;
+        if with_mint {
+            mint_domain = collect_mint_domain(&mint_domain, &console_domain)?;
+        }
     }
     match access {
         AccessMode::DomainTls => {
@@ -255,10 +336,75 @@ pub fn run(args: &InstallArgs) -> Result<()> {
                 .interact());
             acme_email = acme_email.trim().to_string();
         }
-        confirm_dns(&console_domain, public_ip.as_deref(), &mut access)?;
+        let mut domains = vec![console_domain.as_str()];
+        if with_mint {
+            domains.push(mint_domain.as_str());
+        }
+        confirm_dns(
+            &domains,
+            public_ip.as_deref(),
+            public_ipv6.as_deref(),
+            &mut access,
+        )?;
     }
 
-    // --- summary + confirm --------------------------------------------------
+    // --- build the plan -----------------------------------------------------
+    let (attach, mint_plan) = if with_mint {
+        let unit = unit.expect("with_mint collects a unit");
+        let mint_url = match &args.mint_url {
+            Some(url) => url.trim_end_matches('/').to_string(),
+            None => match access {
+                AccessMode::DomainTls | AccessMode::BehindProxy => format!("https://{mint_domain}"),
+                AccessMode::PlainHttp => match &public_ip {
+                    Some(ip) => format!("http://{ip}:{mint_port}"),
+                    None => {
+                        let entered: String = step!(input(
+                            "Address wallets use to reach the mint (no public IP detected)"
+                        )
+                        .placeholder(&format!("http://192.168.1.10:{mint_port}"))
+                        .validate(|value: &String| {
+                            let v = value.trim();
+                            if v.starts_with("http://") || v.starts_with("https://") {
+                                Ok(())
+                            } else {
+                                Err("enter a full URL, e.g. http://192.168.1.10:3338")
+                            }
+                        })
+                        .interact());
+                        entered.trim().trim_end_matches('/').to_string()
+                    }
+                },
+            },
+        };
+        (
+            Some(AttachPlan {
+                unit,
+                mint_url: mint_url.clone(),
+                advertised_grpc: "processor:50051".into(),
+            }),
+            Some(MintPlan {
+                mint_domain: if access == AccessMode::PlainHttp {
+                    String::new()
+                } else {
+                    mint_domain.clone()
+                },
+                mint_url,
+                mint_port,
+                mint_bind_addr: match access {
+                    AccessMode::PlainHttp => "0.0.0.0".into(),
+                    _ => "127.0.0.1".into(),
+                },
+                mintd_version: args
+                    .mint_version
+                    .clone()
+                    .unwrap_or_else(|| mint::MINTD_DEFAULT_TAG.into()),
+                mnemonic: mint::generate_mnemonic(),
+            }),
+        )
+    } else {
+        (None, None)
+    };
+
     let plan = InstallPlan {
         bind_addr: args.bind.clone().unwrap_or_else(|| {
             match access {
@@ -282,16 +428,33 @@ pub fn run(args: &InstallArgs) -> Result<()> {
         grpc_port,
         public_ip,
         admin_password: passphrase::generate(),
+        attach,
+        mint: mint_plan,
     };
 
+    // --- summary + confirm --------------------------------------------------
     let access_line = match plan.access {
         AccessMode::DomainTls => format!("{} — automatic HTTPS", plan.console_url()),
         AccessMode::BehindProxy => format!("{} — via your own reverse proxy", plan.console_url()),
         AccessMode::PlainHttp => format!("{} — plain HTTP (LAN/testing)", plan.console_url()),
     };
-    note(
-        "Ready to install",
-        format!(
+    let body = match (&plan.mint, &plan.attach) {
+        (Some(mint_plan), Some(attach)) => format!(
+            "Console        {access_line}\n\
+             Mint           {mint_url} — unit \"{unit}\" (wallets connect here)\n\
+             Mint image     cashubtc/mintd:{mintd_version}\n\
+             Payment link   internal (processor:50051 on the compose network)\n\
+             Directory      {dir}\n\
+             Version        {version}\n\
+             \n\
+             A new mint seed (12 words) will be generated and shown once.",
+            mint_url = mint_plan.mint_url,
+            unit = attach.unit,
+            mintd_version = mint_plan.mintd_version,
+            dir = plan.install_dir.display(),
+            version = plan.version,
+        ),
+        _ => format!(
             "Console        {access_line}\n\
              Payment gRPC   {grpc} (your cdk-mintd connects here)\n\
              Directory      {dir}\n\
@@ -302,7 +465,8 @@ pub fn run(args: &InstallArgs) -> Result<()> {
             dir = plan.install_dir.display(),
             version = plan.version,
         ),
-    )?;
+    };
+    note("Ready to install", body)?;
     if !step!(confirm("Install now?").initial_value(true).interact()) {
         outro_cancel("Cancelled — nothing was changed.")?;
         bail!("install cancelled");
@@ -311,6 +475,27 @@ pub fn run(args: &InstallArgs) -> Result<()> {
     execute_with_progress(&plan, args)?;
     finish(&plan)?;
     Ok(())
+}
+
+fn collect_mint_domain(preset: &str, console_domain: &str) -> Result<String> {
+    if !preset.is_empty() && preset != console_domain {
+        return Ok(preset.to_string());
+    }
+    let console = console_domain.to_string();
+    let entered: String = step!(input("Hostname for the mint (wallets connect here)")
+        .placeholder("mint.example.org")
+        .validate(move |value: &String| {
+            let v = value.trim();
+            if !dns::valid_hostname(v) {
+                Err("enter a bare hostname like mint.example.org (no https://, lowercase)")
+            } else if v == console {
+                Err("the mint needs its own hostname, different from the console's")
+            } else {
+                Ok(())
+            }
+        })
+        .interact());
+    Ok(entered.trim().to_string())
 }
 
 fn collect_console_domain(preset: &str) -> Result<String> {
@@ -330,37 +515,85 @@ fn collect_console_domain(preset: &str) -> Result<String> {
     Ok(entered.trim().to_string())
 }
 
-/// Show the required record, then live-poll public DNS until it resolves to
-/// this server (or the operator decides otherwise).
+/// Show the required record(s) as a copy-ready table, then live-poll public
+/// DNS until every domain resolves to this server (or the operator decides
+/// otherwise). AAAA records are advisory: optional to create, but actively
+/// warned about when one exists and points away from this server, because
+/// Let's Encrypt prefers IPv6 the moment an AAAA exists.
 fn confirm_dns(
-    console_domain: &str,
+    domains: &[&str],
     public_ip: Option<&str>,
+    public_ipv6: Option<&str>,
     access: &mut AccessMode,
 ) -> Result<()> {
     let ip_hint = public_ip.unwrap_or("<this server's IP>");
+    let width = domains.iter().map(|d| d.len()).max().unwrap_or(0);
+    let mut lines: Vec<String> = domains
+        .iter()
+        .map(|domain| format!("A     {domain:<width$}  →  {ip_hint}"))
+        .collect();
+    if let Some(v6) = public_ipv6 {
+        lines.push(String::new());
+        lines.extend(
+            domains
+                .iter()
+                .map(|domain| format!("AAAA  {domain:<width$}  →  {v6}   (optional)")),
+        );
+        lines.push(String::new());
+        lines.push(
+            "The A records are required. AAAA is optional — add it only if IPv6\n\
+             to this server actually works; a wrong AAAA breaks certificates."
+                .into(),
+        );
+    }
+    lines.push(String::new());
+    lines.push("Ports 80 and 443 must be reachable from the internet.".into());
     note(
-        "DNS record required (pointing at this server)",
         format!(
-            "A/AAAA  {console_domain}  →  {ip_hint}\n\
-             Ports 80 and 443 must be reachable from the internet."
+            "Create with your DNS provider — record{} pointing at this server",
+            if domains.len() > 1 { "s" } else { "" }
         ),
+        lines.join("\n"),
     )?;
 
     loop {
         let sp = spinner();
         sp.start("Checking DNS via public resolvers (1.1.1.1, 8.8.8.8) ...");
-        let check = dns::check(console_domain, public_ip).ok();
-        if check.as_ref().is_some_and(|c| c.matches) {
-            sp.stop("DNS looks right — the record points at this server.");
+        let checks: Vec<_> = domains
+            .iter()
+            .map(|domain| dns::check(domain, public_ip).ok())
+            .collect();
+        if checks.iter().all(|c| c.as_ref().is_some_and(|c| c.matches)) {
+            sp.stop(format!(
+                "DNS looks right — the record{} at this server.",
+                if domains.len() > 1 {
+                    "s point"
+                } else {
+                    " points"
+                }
+            ));
+            for domain in domains {
+                if let Some(advisory) = dns::aaaa_advisory(domain, public_ipv6) {
+                    log::warning(advisory)?;
+                }
+            }
             return Ok(());
         }
         sp.stop("DNS is not confirmed yet:");
-        if let Some(check) = &check {
-            let status = if check.resolved.is_empty() {
+        let mut any_mismatch = false;
+        for check in checks.iter().flatten() {
+            let status = if check.matches {
+                "ok".to_string()
+            } else if check.resolved.is_empty() {
                 "no record found".to_string()
             } else {
+                any_mismatch = true;
                 let ips: Vec<String> = check.resolved.iter().map(|ip| ip.to_string()).collect();
-                format!("resolves to {}", ips.join(", "))
+                format!(
+                    "resolves to {} — not the detected address ({})",
+                    ips.join(", "),
+                    public_ip.unwrap_or("unknown")
+                )
             };
             log::step(format!("{}  —  {status}", check.domain))?;
             if check.behind_cloudflare {
@@ -370,8 +603,19 @@ fn confirm_dns(
                     check.domain
                 ))?;
             }
+            if let Some(advisory) = dns::aaaa_advisory(&check.domain, public_ipv6) {
+                log::warning(advisory)?;
+            }
         }
-        log::info("Freshly created records can take a few minutes to propagate.")?;
+        if any_mismatch {
+            log::info(
+                "If the resolved address IS this server (several IPs, NAT, or the\n\
+                 detection answered over IPv6), choose \"Continue anyway\" — certificates\n\
+                 only need the record to actually reach this machine.",
+            )?;
+        } else {
+            log::info("Freshly created records can take a few minutes to propagate.")?;
+        }
 
         #[derive(Clone, PartialEq, Eq)]
         enum Next {
@@ -468,6 +712,11 @@ fn ensure_docker_interactive() -> Result<()> {
 }
 
 fn execute_with_progress(plan: &InstallPlan, args: &InstallArgs) -> Result<()> {
+    if plan.no_pull {
+        // Before anything is written: a missing local image should not
+        // leave a half-finished install behind.
+        install::ensure_local_image(&plan.version)?;
+    }
     install::guard_fresh_dir(&plan.install_dir)?;
     let source =
         install::artifact_source(args.artifacts_dir.clone(), args.artifact_ref.clone(), &plan.version);
@@ -482,6 +731,7 @@ fn execute_with_progress(plan: &InstallPlan, args: &InstallArgs) -> Result<()> {
     let stack = Stack {
         install_dir: plan.install_dir.clone(),
     };
+    let images = if plan.mint.is_some() { "images" } else { "image" };
     if plan.no_pull {
         log::step(format!(
             "Skipping the image pull (--no-pull); using the local {} image.",
@@ -489,11 +739,26 @@ fn execute_with_progress(plan: &InstallPlan, args: &InstallArgs) -> Result<()> {
         ))?;
     } else {
         let sp = spinner();
-        sp.start(format!("Pulling the container image ({}) ...", plan.version));
+        sp.start(format!("Pulling the container {images} ({}) ...", plan.version));
         match stack.compose_quiet(&["pull", "--quiet"]) {
-            Ok(()) => sp.stop("Image pulled."),
+            Ok(()) => sp.stop(format!(
+                "{} pulled.",
+                if plan.mint.is_some() { "Images" } else { "Image" }
+            )),
             Err(e) => {
                 sp.error("Image pull failed");
+                return Err(e);
+            }
+        }
+    }
+
+    if plan.mint.is_some() {
+        let sp = spinner();
+        sp.start("Validating the mint configuration ...");
+        match install::validate_mint_config(&stack) {
+            Ok(()) => sp.stop("Mint configuration is valid."),
+            Err(e) => {
+                sp.error("The mint configuration did not validate");
                 return Err(e);
             }
         }
@@ -518,6 +783,18 @@ fn execute_with_progress(plan: &InstallPlan, args: &InstallArgs) -> Result<()> {
     }
     sp.stop("Operator console is up.");
 
+    if let Some(mint_plan) = &plan.mint {
+        let sp = spinner();
+        sp.start("Waiting for the mint ...");
+        let url = format!("http://127.0.0.1:{}/v1/info", mint_plan.mint_port);
+        if compose::wait_http_ok(&url, Duration::from_secs(120)) {
+            sp.stop("Mint is up and linked to the processor.");
+        } else {
+            sp.error("The mint did not come up within 2 minutes");
+            bail!("check '{}/mintctl logs mintd'", plan.install_dir.display());
+        }
+    }
+
     if plan.access == AccessMode::DomainTls {
         let sp = spinner();
         sp.start(format!(
@@ -535,39 +812,79 @@ fn execute_with_progress(plan: &InstallPlan, args: &InstallArgs) -> Result<()> {
                 plan.install_dir.display()
             ))?;
         }
+        if let Some(mint_plan) = &plan.mint {
+            let sp = spinner();
+            sp.start(format!(
+                "Waiting for certificates for {} ...",
+                mint_plan.mint_domain
+            ));
+            let url = format!("https://{}/v1/info", mint_plan.mint_domain);
+            if install::wait_for_tls_url(&url, Duration::from_secs(180)) {
+                sp.stop(format!("HTTPS is live at {}", mint_plan.mint_url));
+            } else {
+                sp.stop("Mint certificates are still pending — Caddy keeps retrying.");
+            }
+        }
     }
     install::install_cli_symlink(&plan.install_dir);
     Ok(())
 }
 
 fn finish(plan: &InstallPlan) -> Result<()> {
-    let mut body = format!(
-        "Operator console   {console}\n\
-         Payment gRPC       {grpc}  (your cdk-mintd connects here)\n\n\
-         Sign in as         admin\n\
-         Password           {password}\n\
-         (also stored in {dir}/.env — you will choose\n\
-         your own password at first sign-in)\n\nNext steps:",
-        console = plan.console_url(),
-        grpc = plan.grpc_endpoint(),
-        password = plan.admin_password,
-        dir = plan.install_dir.display(),
-    );
+    let mut body = match (&plan.mint, &plan.attach) {
+        (Some(mint_plan), Some(attach)) => format!(
+            "Operator console   {console}\n\
+             Mint               {mint_url}  (wallets connect here; unit \"{unit}\")\n\n\
+             Sign in as         admin\n\
+             Password           {password}\n\
+             (also stored in {dir}/.env — you will choose\n\
+             your own password at first sign-in)\n\n\
+             MINT SEED — write these 12 words down and store them offline.\n\
+             Anyone holding them can issue your ecash; without them the\n\
+             mint cannot be recovered.\n\n\
+             \x20   {mnemonic}\n\n\
+             (also stored in {dir}/mint/mnemonic; included in mintctl backup)\n\nNext steps:",
+            console = plan.console_url(),
+            mint_url = mint_plan.mint_url,
+            unit = attach.unit,
+            password = plan.admin_password,
+            dir = plan.install_dir.display(),
+            mnemonic = mint_plan.mnemonic,
+        ),
+        _ => format!(
+            "Operator console   {console}\n\
+             Payment gRPC       {grpc}  (your cdk-mintd connects here)\n\n\
+             Sign in as         admin\n\
+             Password           {password}\n\
+             (also stored in {dir}/.env — you will choose\n\
+             your own password at first sign-in)\n\nNext steps:",
+            console = plan.console_url(),
+            grpc = plan.grpc_endpoint(),
+            password = plan.admin_password,
+            dir = plan.install_dir.display(),
+        ),
+    };
     for step in install::next_steps(plan) {
         body.push_str(&format!("\n  {step}"));
     }
     if plan.access == AccessMode::BehindProxy {
         body.push_str(&format!(
-            "\n\nYour reverse proxy terminates TLS — ready-made server blocks:\n  \
-             {}/proxy-snippets/  (Caddy and nginx)",
-            plan.install_dir.display()
+            "\n\nYour reverse proxy terminates TLS — ready-made server blocks\n\
+             (console{and_mint}):\n  \
+             {dir}/proxy-snippets/  (Caddy and nginx)",
+            and_mint = if plan.mint.is_some() { " and mint" } else { "" },
+            dir = plan.install_dir.display()
         ));
     }
     note(
-        format!("Branch processor {} is running", plan.version),
+        format!(
+            "Branch processor {}{} is running",
+            plan.version,
+            if plan.mint.is_some() { " + mint" } else { "" }
+        ),
         body,
     )?;
-    outro("Manage with: mintctl status | logs | update | backup | restore | start | stop | uninstall")?;
+    outro("Manage with: mintctl status | logs | update | domain | backup | restore | start | stop | uninstall")?;
     Ok(())
 }
 
@@ -582,8 +899,20 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
 
     let current_domain = envf.get("CONSOLE_DOMAIN").unwrap_or_default();
     let ui_port: u16 = envf.get("UI_PORT").and_then(|p| p.parse().ok()).unwrap_or(9090);
+    // A bundled-mint install keeps its mint profile and gets the mint's
+    // hostname carried through every access change.
+    let has_mint = envf
+        .get("COMPOSE_PROFILES")
+        .unwrap_or_default()
+        .split(',')
+        .any(|p| p.trim() == "mint");
+    let current_mint_domain = envf.get("MINT_DOMAIN").unwrap_or_default();
+    let mint_port: u16 = envf
+        .get("MINT_PORT")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3338);
 
-    let (access, console_domain, acme_email) = if interactive {
+    let (access, console_domain, mint_domain, acme_email) = if interactive {
         intro(console::style(" Console domain & TLS ").on_cyan().black())?;
         if current_domain.is_empty() {
             log::info("Currently: plain HTTP (no domain).")?;
@@ -612,20 +941,39 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
             })
             .interact());
         let mut access = access;
-        let (mut console_domain, mut email) = (String::new(), String::new());
+        let mut console_domain = String::new();
+        let mut mint_domain = String::new();
+        // Preserved across access-mode switches; only DomainTls edits it.
+        let mut email = envf.get("ACME_EMAIL").unwrap_or_default();
         if access != AccessMode::PlainHttp {
             let preset = args.console_domain.clone().unwrap_or_default();
             console_domain = collect_console_domain(&preset)?;
+            if has_mint {
+                let preset = args
+                    .mint_domain
+                    .clone()
+                    .unwrap_or_else(|| current_mint_domain.clone());
+                mint_domain = collect_mint_domain(&preset, &console_domain)?;
+            }
         }
         if access == AccessMode::DomainTls {
-            email = args
-                .email
-                .clone()
-                .unwrap_or_else(|| envf.get("ACME_EMAIL").unwrap_or_default());
+            if let Some(flag_email) = &args.email {
+                email = flag_email.clone();
+            }
             let public_ip = compose::detect_public_ip();
-            confirm_dns(&console_domain, public_ip.as_deref(), &mut access)?;
+            let public_ipv6 = compose::detect_public_ipv6();
+            let mut domains = vec![console_domain.as_str()];
+            if has_mint {
+                domains.push(mint_domain.as_str());
+            }
+            confirm_dns(
+                &domains,
+                public_ip.as_deref(),
+                public_ipv6.as_deref(),
+                &mut access,
+            )?;
         }
-        (access, console_domain, email)
+        (access, console_domain, mint_domain, email)
     } else {
         let console_domain = args.console_domain.clone().unwrap_or_default();
         let access = if args.behind_proxy {
@@ -644,27 +992,75 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
         if access != AccessMode::PlainHttp && !dns::valid_hostname(&console_domain) {
             bail!("--console-domain {console_domain} is not a valid hostname");
         }
+        let mint_domain = if access == AccessMode::PlainHttp {
+            String::new()
+        } else if has_mint {
+            let domain = args
+                .mint_domain
+                .clone()
+                .unwrap_or_else(|| current_mint_domain.clone());
+            if domain.is_empty() {
+                bail!("this install bundles a mint — pass --mint-domain <hostname> as well");
+            }
+            if !dns::valid_hostname(&domain) {
+                bail!("--mint-domain {domain} is not a valid hostname");
+            }
+            domain
+        } else {
+            String::new()
+        };
         let email = args
             .email
             .clone()
             .unwrap_or_else(|| envf.get("ACME_EMAIL").unwrap_or_default());
-        (access, console_domain, email)
+        (access, console_domain, mint_domain, email)
     };
 
-    let (profiles, bind) = match access {
-        AccessMode::DomainTls => ("tls", "127.0.0.1"),
-        AccessMode::BehindProxy => ("", "127.0.0.1"),
-        AccessMode::PlainHttp => ("", "0.0.0.0"),
+    let (tls_profile, bind) = match access {
+        AccessMode::DomainTls => (Some("tls"), "127.0.0.1"),
+        AccessMode::BehindProxy => (None, "127.0.0.1"),
+        AccessMode::PlainHttp => (None, "0.0.0.0"),
     };
-    envf.set("COMPOSE_PROFILES", profiles);
+    let mut profiles: Vec<&str> = tls_profile.into_iter().collect();
+    if has_mint {
+        profiles.push("mint");
+    }
+    envf.set("COMPOSE_PROFILES", &profiles.join(","));
     envf.set("BIND_ADDR", bind);
     envf.set("CONSOLE_DOMAIN", &console_domain);
     envf.set("ACME_EMAIL", &acme_email);
+    if has_mint {
+        envf.set("MINT_DOMAIN", &mint_domain);
+        envf.set(
+            "MINT_BIND_ADDR",
+            if access == AccessMode::PlainHttp {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
+        );
+    }
     envf.save()?;
     caddy::apply_acme_email(&stack.install_dir, &acme_email)?;
+    caddy::apply_mint_site(
+        &stack.install_dir,
+        has_mint && access == AccessMode::DomainTls && !mint_domain.is_empty(),
+    )?;
     if access == AccessMode::BehindProxy {
-        let snippet_plan = snippet_plan(&stack, &console_domain, ui_port);
+        let snippet_plan = snippet_plan(
+            &stack,
+            &console_domain,
+            ui_port,
+            has_mint.then(|| (mint_domain.clone(), mint_port)),
+        );
         caddy::write_proxy_snippets(&snippet_plan)?;
+    }
+    if has_mint {
+        crate::ui::say(
+            "Heads-up: if the mint's hostname changed, its public URL changed too — \
+             update the mint URL in the console's Mint tab (and re-issue wallets the \
+             new address).",
+        );
     }
 
     let apply = |quiet: bool| -> Result<()> {
@@ -709,7 +1105,12 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
 }
 
 /// A minimal InstallPlan for snippet rendering on an existing install.
-fn snippet_plan(stack: &Stack, console_domain: &str, ui_port: u16) -> InstallPlan {
+fn snippet_plan(
+    stack: &Stack,
+    console_domain: &str,
+    ui_port: u16,
+    mint: Option<(String, u16)>,
+) -> InstallPlan {
     InstallPlan {
         install_dir: stack.install_dir.clone(),
         version: String::new(),
@@ -723,5 +1124,14 @@ fn snippet_plan(stack: &Stack, console_domain: &str, ui_port: u16) -> InstallPla
         grpc_port: 50051,
         public_ip: None,
         admin_password: String::new(),
+        attach: None,
+        mint: mint.map(|(mint_domain, mint_port)| MintPlan {
+            mint_url: format!("https://{mint_domain}"),
+            mint_domain,
+            mint_port,
+            mint_bind_addr: "127.0.0.1".into(),
+            mintd_version: String::new(),
+            mnemonic: String::new(),
+        }),
     }
 }

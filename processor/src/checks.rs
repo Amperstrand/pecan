@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::clients::{KeysetEntry, MintHttpClient};
-use crate::config::{COMPATIBLE_CDK_REV, COMPATIBLE_CDK_NOTE};
+use crate::config::{compatible_mintd_image, COMPATIBLE_CDK_VERSION};
 use crate::state::{BranchState, Ticket};
 
 /// Notes marker on tickets created (and immediately voided) by the
@@ -167,13 +167,13 @@ fn check_advertised(inputs: &ChecklistInputs) -> Check {
         .collect();
 
     let pinned_remedy = format!(
-        "Merge the config snippet below into your mint's mint.toml, then restart the mint. \
-         If the entry is already there and this check still fails, the mint pinned its \
-         advertised capabilities at an earlier start (cdk does this while the management \
-         RPC is enabled). Two ways out: restart the mint with [mint_management_rpc] \
-         disabled so the config wins again, or update the stored advertisement over the \
-         management RPC (cdk-mint-cli update-nut04 and update-nut05 for unit \"{unit}\", \
-         method \"{method}\").",
+        "Add the config snippet below to your mint's stored configuration and restart it: \
+         cdk-mintd config export --file mint.toml, merge the snippet, cdk-mintd config \
+         apply --file mint.toml, then restart. On cdk-mintd {version}+ the stored \
+         configuration is authoritative — editing a mint.toml on disk without `config \
+         apply` changes nothing. If the {method}/{unit} entry is already applied and this \
+         check still fails, check the mint's log for why the backend was skipped.",
+        version = COMPATIBLE_CDK_VERSION,
         unit = inputs.unit,
         method = inputs.method,
     );
@@ -205,7 +205,8 @@ fn check_advertised(inputs: &ChecklistInputs) -> Check {
                         inputs.unit
                     ),
                     remedy: Some(format!(
-                        "Remove the extra [[ln]] entries for {} from the mint's config.",
+                        "Remove the extra [[payment_backend]] entries for {} from the \
+                         mint's stored config (config export, edit, config apply, restart).",
                         extra_units.join(", ")
                     )),
                 }
@@ -274,8 +275,8 @@ fn check_linked(inputs: &ChecklistInputs) -> Check {
                      payment stream — its startup did not finish."
                 .into(),
             remedy: Some(
-                "Check the mint's log: a unit mismatch between its [[ln]] entry and the \
-                 unit configured here aborts its startup."
+                "Check the mint's log: a unit mismatch between its [[payment_backend]] \
+                 entry and the unit configured here aborts its startup."
                     .into(),
             ),
         },
@@ -298,10 +299,14 @@ fn check_linked(inputs: &ChecklistInputs) -> Check {
                     detail: "No mint has connected to this processor since it started.".into(),
                     remedy: Some(format!(
                         "Check [grpc_processor] address/port in the mint's config, the network \
-                         path between the two, and that the mint is built from cdk rev \
-                         {COMPATIBLE_CDK_REV} ({COMPATIBLE_CDK_NOTE}) — the payment-processor \
-                         protocol check rejects other builds at connect time; the rejection \
-                         appears in the mint's log, not here. Then restart the mint."
+                         path between the two, and that the mint runs cdk-mintd \
+                         v{version} or later (docker image {image}) — the payment-processor \
+                         protocol check (protocol {proto}) rejects older builds at connect \
+                         time; the rejection appears in the mint's log, not here. Then \
+                         restart the mint.",
+                        version = COMPATIBLE_CDK_VERSION,
+                        image = compatible_mintd_image(),
+                        proto = cdk_common::PAYMENT_PROCESSOR_PROTOCOL_VERSION,
                     )),
                 }
             }
@@ -368,8 +373,8 @@ fn check_keyset(inputs: &ChecklistInputs) -> Check {
                     detail: format!("The mint has no keys for {} yet.", inputs.unit),
                     remedy: Some(
                         "The mint creates keys for the unit on its first start with the \
-                         [[ln]] entry from the snippet — apply the snippet and restart the \
-                         mint."
+                         [[payment_backend]] entry from the snippet — apply the snippet \
+                         (cdk-mintd config apply) and restart the mint."
                             .into(),
                     ),
                 }
@@ -705,8 +710,8 @@ pub async fn run_self_test(
         if ttl < MIN_COMFORTABLE_MINT_TTL_SECS {
             warnings.push(format!(
                 "Deposit quotes expire after {} — tight for a counter visit; set \
-                 [info.quote_ttl] mint_ttl = 1800 on a fresh mint database, or adjust it \
-                 over the mint's management RPC.",
+                 [info.quote_ttl] mint_ttl = 1800 in the mint's stored config \
+                 (cdk-mintd config apply) and restart it.",
                 humanize_secs(ttl)
             ));
         }
@@ -715,8 +720,8 @@ pub async fn run_self_test(
         if ttl < MIN_COMFORTABLE_MELT_TTL_SECS {
             warnings.push(format!(
                 "Payout quotes expire after {} — wallets showing a confirmation screen will \
-                 miss the window; set [info.quote_ttl] melt_ttl = 900 on a fresh mint \
-                 database, or adjust it over the mint's management RPC.",
+                 miss the window; set [info.quote_ttl] melt_ttl = 900 in the mint's stored \
+                 config (cdk-mintd config apply) and restart it.",
                 humanize_secs(ttl)
             ));
         }
@@ -743,7 +748,8 @@ fn probe_rejection_remedy(
         format!(
             "The mint accepted the request but its call to this processor failed. Check the \
              mint's log; usual causes are a wrong [grpc_processor] address, a TLS mismatch, \
-             or a mint not built from cdk rev {COMPATIBLE_CDK_REV} (protocol 4.0.0)."
+             or a mint older than cdk v{COMPATIBLE_CDK_VERSION} (protocol {proto}).",
+            proto = cdk_common::PAYMENT_PROCESSOR_PROTOCOL_VERSION,
         )
     } else {
         format!(
@@ -833,10 +839,12 @@ mod tests {
         let checks = evaluate(&base_inputs(Some(&info), None));
         assert_eq!(status_of(&checks, "reachable"), CheckStatus::Ok);
         assert_eq!(status_of(&checks, "advertised"), CheckStatus::Ok);
-        // gRPC never attached → linked fails with the build-rev remedy.
+        // gRPC never attached → linked fails with the required-release remedy.
         let linked = checks.iter().find(|c| c.id == "linked").unwrap();
         assert_eq!(linked.status, CheckStatus::Fail);
-        assert!(linked.remedy.as_ref().unwrap().contains(COMPATIBLE_CDK_REV));
+        let remedy = linked.remedy.as_ref().unwrap();
+        assert!(remedy.contains(COMPATIBLE_CDK_VERSION));
+        assert!(remedy.contains(&compatible_mintd_image()));
     }
 
     #[test]
@@ -846,11 +854,7 @@ mod tests {
         let advertised = checks.iter().find(|c| c.id == "advertised").unwrap();
         assert_eq!(advertised.status, CheckStatus::Fail);
         assert!(advertised.remedy.as_ref().unwrap().contains("mint.toml"));
-        assert!(advertised
-            .remedy
-            .as_ref()
-            .unwrap()
-            .contains("update-nut04"));
+        assert!(advertised.remedy.as_ref().unwrap().contains("config apply"));
 
         let partial: anyhow::Result<Value> = Ok(info_with(
             json!([]),
