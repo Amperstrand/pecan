@@ -166,9 +166,8 @@ jobs:
   # mintctl binary built in this run) and walks the first-run path: install →
   # forced password change gates the console → new password → attachment
   # setup produces the checklist + snippet → the self-test fails gracefully
-  # against an unreachable mint. (Full mint↔processor integration needs a
-  # cdk-mintd built from the pinned rev — that lives in the e2e rig, not in
-  # the publish pipeline.)
+  # against an unreachable mint. (Full mint↔processor integration runs in
+  # smoke-mint below, against the official cashubtc/mintd image.)
   smoke:
     needs: [merge, mintctl]
     runs-on: ubuntu-24.04
@@ -221,7 +220,7 @@ jobs:
           curl -fsS -b /tmp/smoke-cookies http://127.0.0.1:9090/api/app > /tmp/smoke-app.json
           jq -e '.setup.setup_complete == true
                  and .setup.unit == "smoke"
-                 and (.snippet | type == "string" and contains("[[ln]]") and contains("unit = \"smoke\""))
+                 and (.snippet | type == "string" and contains("[[payment_backend]]") and contains("grpcprocessor") and contains("unit = \"smoke\""))
                  and (.checklist | length == 5)' /tmp/smoke-app.json
           # Port 9 is closed: the reachability check must fail loudly, with a remedy.
           jq -e '.checklist[] | select(.id == "reachable") | .status == "fail" and (.remedy | type == "string")' /tmp/smoke-app.json
@@ -235,8 +234,86 @@ jobs:
           cat install.log 2>/dev/null || true
           docker compose -f "$RUNNER_TEMP/branch-a/docker-compose.yml" --project-directory "$RUNNER_TEMP/branch-a" logs || true
 
+  # The bundled-mint first-run path, end to end against the REAL official
+  # cashubtc/mintd image: headless --with-mint install → mint config-inits and
+  # serves the unit → the pre-seeded attachment + auto self-test turn the
+  # checklist green and lock the unit with zero interaction → backup carries
+  # the mint. --mint-url overrides the derived URL because GitHub runners are
+  # NATed (the detected egress IP is not bound on the VM).
+  smoke-mint:
+    needs: [merge, mintctl]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: mintctl-linux-amd64
+      - name: Install with the bundled mint
+        run: |
+          chmod +x mintctl-linux-amd64
+          ./mintctl-linux-amd64 install --yes --plain-http --with-mint \
+            --unit smoke --mint-url http://mintd:8085 \
+            --dir "$RUNNER_TEMP/branch-mint" \
+            --version "${{ github.ref_type == 'tag' && github.ref_name || 'edge' }}" \
+            --artifacts-dir . | tee install.log
+          PW=$(sed -n 's/^INITIAL_ADMIN_PASSWORD=//p' "$RUNNER_TEMP/branch-mint/.env")
+          test -n "$PW"
+          echo "::add-mask::$PW"
+          echo "SMOKE_PW=$PW" >> "$GITHUB_ENV"
+      - name: Seed file is written safely
+        run: |
+          f="$RUNNER_TEMP/branch-mint/mint/mnemonic"
+          test "$(stat -c %a "$f")" = "600"
+          test "$(wc -w < "$f")" -eq 12
+      - name: Mint serves the unit
+        run: |
+          curl -fsS http://127.0.0.1:3338/v1/info | jq -e \
+            '.nuts."4".methods | map(select(.unit == "smoke")) | length > 0'
+          curl -fsS http://127.0.0.1:3338/v1/keysets | jq -e \
+            '.keysets | map(select(.unit == "smoke")) | length > 0'
+      - name: Checklist settles green and the unit locks
+        run: |
+          curl -fsS -c /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/login \
+            -H 'content-type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$SMOKE_PW\"}"
+          curl -fsS -b /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/me/password \
+            -H 'content-type: application/json' \
+            -d "{\"current_password\":\"$SMOKE_PW\",\"password\":\"smoke-chosen-pw-1\",\"password_confirm\":\"smoke-chosen-pw-1\"}"
+          ok=""
+          for i in $(seq 1 40); do
+            curl -fsS -b /tmp/smoke-cookies http://127.0.0.1:9090/api/app > /tmp/smoke-app.json || true
+            if jq -e '.setup.unit_locked == true
+                      and ([.checklist[].status] | all(. == "ok"))' /tmp/smoke-app.json >/dev/null; then
+              ok=1; break
+            fi
+            sleep 3
+          done
+          test -n "$ok" || { cat /tmp/smoke-app.json; exit 1; }
+      - name: Self-test rerun passes end to end
+        run: |
+          curl -fsS -b /tmp/smoke-cookies -X POST http://127.0.0.1:9090/api/mint/self-test \
+            | jq -e '.ok == true'
+      - name: Backup includes the mint
+        run: |
+          "$RUNNER_TEMP/branch-mint/mintctl" backup /tmp/smoke-backup.tar.gz
+          tar tzf /tmp/smoke-backup.tar.gz | grep -q '^mint-data'
+          tar tzf /tmp/smoke-backup.tar.gz | grep -q '^install/mint/mnemonic'
+      - name: Logs on failure
+        if: failure()
+        run: |
+          cat install.log 2>/dev/null || true
+          docker compose -f "$RUNNER_TEMP/branch-mint/docker-compose.yml" --project-directory "$RUNNER_TEMP/branch-mint" logs || true
+
   release:
-    needs: [merge, smoke, mintctl]
+    needs: [merge, smoke, smoke-mint, mintctl]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
