@@ -712,6 +712,11 @@ fn ensure_docker_interactive() -> Result<()> {
 }
 
 fn execute_with_progress(plan: &InstallPlan, args: &InstallArgs) -> Result<()> {
+    if plan.no_pull {
+        // Before anything is written: a missing local image should not
+        // leave a half-finished install behind.
+        install::ensure_local_image(&plan.version)?;
+    }
     install::guard_fresh_dir(&plan.install_dir)?;
     let source =
         install::artifact_source(args.artifacts_dir.clone(), args.artifact_ref.clone(), &plan.version);

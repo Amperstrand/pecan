@@ -113,6 +113,19 @@ pub fn project_name(install_dir: &Path) -> String {
         .collect()
 }
 
+/// Whether an image reference exists in the local daemon (docker image
+/// inspect). Used to fail fast when --no-pull names an image that was never
+/// built or tagged locally.
+pub fn image_present(reference: &str) -> bool {
+    Command::new("docker")
+        .args(["image", "inspect", reference])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub fn docker_available() -> bool {
     Command::new("docker")
         .arg("--version")

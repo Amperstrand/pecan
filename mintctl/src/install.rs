@@ -147,6 +147,11 @@ fn run_noninteractive(args: &InstallArgs) -> Result<()> {
     let source = artifact_source(args.artifacts_dir.clone(), args.artifact_ref.clone(), &version);
 
     let plan = plan_from_flags(args, install_dir, version)?;
+    if plan.no_pull {
+        // Before anything is written: a missing local image should not
+        // leave a half-finished install behind.
+        ensure_local_image(&plan.version)?;
+    }
     warn_on_unconfirmed_dns(&plan);
 
     ui::say(format!(
@@ -545,6 +550,21 @@ pub fn write_config(plan: &InstallPlan) -> Result<()> {
         caddy::write_proxy_snippets(plan)?;
     }
     Ok(())
+}
+
+/// --no-pull promises the processor image is already in the local daemon —
+/// verify that promise up front instead of failing five steps later with
+/// compose's registry error (the tag is usually local-only and unpullable).
+pub fn ensure_local_image(version: &str) -> Result<()> {
+    let reference = format!("ghcr.io/{}:{version}", release::REPO);
+    if compose::image_present(&reference) {
+        return Ok(());
+    }
+    bail!(
+        "--no-pull was given, but {reference} is not in the local docker daemon. \
+         Build and tag it first:\n  docker compose build processor\n  \
+         docker tag pecan:dev {reference}\n(or drop --no-pull to pull a published tag)"
+    )
 }
 
 pub fn pull_image(stack: &Stack) -> Result<()> {
