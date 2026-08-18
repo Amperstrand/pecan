@@ -273,6 +273,29 @@ pub fn detect_public_ip() -> Option<String> {
     None
 }
 
+/// The server's public IPv6, when it has working IPv6 egress. Used only to
+/// render the optional AAAA line in the DNS note and to sanity-check
+/// existing AAAA records — quick timeouts, since v4-only boxes fail here.
+pub fn detect_public_ipv6() -> Option<String> {
+    for url in ["https://ipv6.icanhazip.com", "https://api6.ipify.org"] {
+        let Ok(resp) = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .get(url)
+            .call()
+        else {
+            continue;
+        };
+        if let Ok(body) = resp.into_string() {
+            let ip = body.trim();
+            if ip.parse::<std::net::Ipv6Addr>().is_ok() {
+                return Some(ip.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

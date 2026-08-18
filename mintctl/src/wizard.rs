@@ -114,11 +114,14 @@ pub fn run(args: &InstallArgs) -> Result<()> {
     }
 
     let sp = spinner();
-    sp.start("Detecting the server's public IP ...");
+    sp.start("Detecting the server's public address ...");
     let public_ip = compose::detect_public_ip();
-    match &public_ip {
-        Some(ip) => sp.stop(format!("Public IP: {ip}")),
-        None => sp.stop("Public IP: could not detect (offline or LAN-only) — continuing"),
+    let public_ipv6 = compose::detect_public_ipv6();
+    match (&public_ip, &public_ipv6) {
+        (Some(v4), Some(v6)) => sp.stop(format!("Public IP: {v4}  (IPv6: {v6})")),
+        (Some(v4), None) => sp.stop(format!("Public IP: {v4}")),
+        (None, Some(v6)) => sp.stop(format!("Public IP: {v6} (IPv6 only)")),
+        (None, None) => sp.stop("Public IP: could not detect (offline or LAN-only) — continuing"),
     }
 
     // --- what to install ----------------------------------------------------
@@ -337,7 +340,12 @@ pub fn run(args: &InstallArgs) -> Result<()> {
         if with_mint {
             domains.push(mint_domain.as_str());
         }
-        confirm_dns(&domains, public_ip.as_deref(), &mut access)?;
+        confirm_dns(
+            &domains,
+            public_ip.as_deref(),
+            public_ipv6.as_deref(),
+            &mut access,
+        )?;
     }
 
     // --- build the plan -----------------------------------------------------
@@ -507,21 +515,45 @@ fn collect_console_domain(preset: &str) -> Result<String> {
     Ok(entered.trim().to_string())
 }
 
-/// Show the required record(s), then live-poll public DNS until every domain
-/// resolves to this server (or the operator decides otherwise).
-fn confirm_dns(domains: &[&str], public_ip: Option<&str>, access: &mut AccessMode) -> Result<()> {
+/// Show the required record(s) as a copy-ready table, then live-poll public
+/// DNS until every domain resolves to this server (or the operator decides
+/// otherwise). AAAA records are advisory: optional to create, but actively
+/// warned about when one exists and points away from this server, because
+/// Let's Encrypt prefers IPv6 the moment an AAAA exists.
+fn confirm_dns(
+    domains: &[&str],
+    public_ip: Option<&str>,
+    public_ipv6: Option<&str>,
+    access: &mut AccessMode,
+) -> Result<()> {
     let ip_hint = public_ip.unwrap_or("<this server's IP>");
-    let records = domains
+    let width = domains.iter().map(|d| d.len()).max().unwrap_or(0);
+    let mut lines: Vec<String> = domains
         .iter()
-        .map(|domain| format!("A/AAAA  {domain}  →  {ip_hint}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|domain| format!("A     {domain:<width$}  →  {ip_hint}"))
+        .collect();
+    if let Some(v6) = public_ipv6 {
+        lines.push(String::new());
+        lines.extend(
+            domains
+                .iter()
+                .map(|domain| format!("AAAA  {domain:<width$}  →  {v6}   (optional)")),
+        );
+        lines.push(String::new());
+        lines.push(
+            "The A records are required. AAAA is optional — add it only if IPv6\n\
+             to this server actually works; a wrong AAAA breaks certificates."
+                .into(),
+        );
+    }
+    lines.push(String::new());
+    lines.push("Ports 80 and 443 must be reachable from the internet.".into());
     note(
         format!(
-            "DNS record{} required (pointing at this server)",
+            "Create with your DNS provider — record{} pointing at this server",
             if domains.len() > 1 { "s" } else { "" }
         ),
-        format!("{records}\nPorts 80 and 443 must be reachable from the internet."),
+        lines.join("\n"),
     )?;
 
     loop {
@@ -540,6 +572,11 @@ fn confirm_dns(domains: &[&str], public_ip: Option<&str>, access: &mut AccessMod
                     " points"
                 }
             ));
+            for domain in domains {
+                if let Some(advisory) = dns::aaaa_advisory(domain, public_ipv6) {
+                    log::warning(advisory)?;
+                }
+            }
             return Ok(());
         }
         sp.stop("DNS is not confirmed yet:");
@@ -565,6 +602,9 @@ fn confirm_dns(domains: &[&str], public_ip: Option<&str>, access: &mut AccessMod
                      Certificate issuance needs the record set to \"DNS only\" (grey cloud).",
                     check.domain
                 ))?;
+            }
+            if let Some(advisory) = dns::aaaa_advisory(&check.domain, public_ipv6) {
+                log::warning(advisory)?;
             }
         }
         if any_mismatch {
@@ -916,11 +956,17 @@ pub fn domain_command(args: &DomainArgs) -> Result<()> {
                 email = flag_email.clone();
             }
             let public_ip = compose::detect_public_ip();
+            let public_ipv6 = compose::detect_public_ipv6();
             let mut domains = vec![console_domain.as_str()];
             if has_mint {
                 domains.push(mint_domain.as_str());
             }
-            confirm_dns(&domains, public_ip.as_deref(), &mut access)?;
+            confirm_dns(
+                &domains,
+                public_ip.as_deref(),
+                public_ipv6.as_deref(),
+                &mut access,
+            )?;
         }
         (access, console_domain, mint_domain, email)
     } else {
