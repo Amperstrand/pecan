@@ -17,7 +17,7 @@
 //! attachment checklist plus an end-to-end self-test confirm the link.
 
 mod backend;
-// mod backends; // TODO: enable after fixing types
+mod backends;
 mod checks;
 mod clients;
 mod config;
@@ -242,6 +242,38 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow!("bad configured unit {}: {e}", app_config.unit))?,
         )
     };
+    let sandbox = std::env::var("SANDBOX")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if sandbox {
+        let sandbox_method = std::env::var("SANDBOX_METHOD").unwrap_or_else(|_| "sandbox".into());
+        let backend = Arc::new(backends::sandbox::SandboxBackend::new(sandbox_method.clone()));
+        if let Some(u) = unit.as_ref() {
+            backend.set_unit(Some(u.clone()));
+        }
+        let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
+            .map_err(|e| anyhow!("payment processor server init: {e}"))?;
+        server
+            .start(tls_dir.clone())
+            .await
+            .map_err(|e| anyhow!("grpc start: {e}"))?;
+        tracing::info!(
+            "sandbox-processor gRPC on {grpc_addr}:{grpc_port} (method={sandbox_method}, unit={}, auto_settle={})",
+            app_config.unit,
+            std::env::var("SANDBOX_AUTO_SETTLE").unwrap_or_default()
+        );
+
+        let health_app = axum::Router::new()
+            .route("/healthz", axum::routing::get(|| async { "sandbox: ok" }));
+        let health_listener = TcpListener::bind(http_socket).await?;
+        tracing::info!("sandbox-processor HTTP on {http_socket}");
+        axum::serve(health_listener, health_app)
+            .await
+            .map_err(|e| anyhow!("http: {e}"))?;
+        return Ok(());
+    }
+
     let backend = Arc::new(BranchBackend::new(
         branch.clone(),
         unit,

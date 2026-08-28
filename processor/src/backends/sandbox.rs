@@ -1,26 +1,16 @@
-//! Sandbox payment backend for testing and demos.
+//! Sandbox payment backend — a generic template for testing payment flows.
 //!
-//! A `MintPayment` implementation that simulates a real payment rail with
-//! configurable behavior based on the amount's last digit. This provides a
-//! generic template that demonstrates every outcome a real processor might
-//! produce, without referencing any specific payment provider.
+//! Implements the same `MintPayment` trait as the branch/teller backend,
+//! with configurable behavior based on the amount's last digit. This
+//! demonstrates every outcome a real payment processor might produce,
+//! without referencing any specific payment provider.
 //!
-//! ## Rules (by last digit of the amount in the smallest unit)
+//! Rules (by last digit of amount in smallest unit):
+//!   0 → instant auto-settle     3 → ambiguous (unknown status)
+//!   1 → delayed auto-settle    4 → timeout (never resolves)
+//!   2 → refused                5-9 → manual (teller workflow)
 //!
-//! | Ends in | Behavior | Mint quote | Melt quote |
-//! |---------|----------|------------|------------|
-//! | 0 | Instant | Auto-paid immediately | Auto-settled immediately |
-//! | 1 | Delayed | Paid after ~2s | Settled after ~2s |
-//! | 2 | Refused | Never paid (explicit refusal) | Fails (explicit refusal) |
-//! | 3 | Ambiguous | Paid but status unknown | Settled but status unknown |
-//! | 4 | Timeout | Never paid (silent timeout) | Never settles (silent timeout) |
-//! | 5-9 | Normal | Standard flow (manual settle) | Standard flow (manual settle) |
-//!
-//! ## Configuration
-//!
-//! `SANDBOX_RULES` environment variable (JSON), defaults to the table above.
-//! `SANDBOX_AUTO_SETTLE` (bool, default false) — if true, amounts ending in
-//! 5-9 are also auto-settled (for fully automated testing).
+//! SANDBOX_AUTO_SETTLE=true makes 5-9 also auto-settle (for CI).
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -30,9 +20,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cdk_common::nuts::{CurrencyUnit, MeltQuoteState};
 use cdk_common::payment::{
-    CreateIncomingPaymentResponse, Error, Event, IncomingPaymentOptions,
-    MakePaymentResponse, MintPayment, OutgoingPaymentOptions, PaymentIdentifier,
-    PaymentQuoteResponse, SettingsResponse, WaitPaymentResponse,
+    Bolt11Settings, Bolt12Settings, CreateIncomingPaymentResponse, Error, Event,
+    IncomingPaymentOptions, MakePaymentResponse, MintPayment, OutgoingPaymentOptions,
+    PaymentIdentifier, PaymentQuoteResponse, SettingsResponse, WaitPaymentResponse,
 };
 use cdk_common::Amount;
 use futures::Stream;
@@ -41,18 +31,12 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 #[derive(Debug, Clone)]
-enum SandboxBehavior {
-    /// Instant: auto-paid/settled immediately
+pub enum SandboxBehavior {
     Instant,
-    /// Delayed: auto-paid/settled after a configurable delay
     Delayed(Duration),
-    /// Refused: explicitly rejected (positive proof of failure)
     Refused,
-    /// Ambiguous: payment succeeds but status is unknowable
     Ambiguous,
-    /// Timeout: silently never resolves
     Timeout,
-    /// Manual: requires human settlement (teller workflow)
     Manual,
 }
 
@@ -74,7 +58,6 @@ struct SandboxTicket {
     amount: u64,
     unit: String,
     behavior: SandboxBehavior,
-    created_at: u64,
     settled: bool,
 }
 
@@ -84,6 +67,13 @@ pub struct SandboxBackend {
     tickets: Arc<Mutex<HashMap<String, SandboxTicket>>>,
     event_tx: broadcast::Sender<Event>,
     auto_settle: bool,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
 }
 
 impl SandboxBackend {
@@ -109,6 +99,11 @@ impl SandboxBackend {
         self.unit.lock().expect("unit lock").clone()
     }
 
+    fn configured_unit(&self) -> Result<CurrencyUnit, Error> {
+        self.unit()
+            .ok_or_else(|| Error::Custom("sandbox unit not configured".into()))
+    }
+
     fn behavior_for(&self, amount: u64) -> SandboxBehavior {
         let behavior = SandboxBehavior::from_last_digit(amount);
         if self.auto_settle && matches!(behavior, SandboxBehavior::Manual) {
@@ -117,7 +112,7 @@ impl SandboxBackend {
         behavior
     }
 
-    fn spawn_auto_settle(&self, quote_id: String, delay: Duration) {
+    fn spawn_auto_settle(&self, quote_id: String, amount: u64, unit: String, delay: Duration) {
         let tickets = Arc::clone(&self.tickets);
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
@@ -125,11 +120,11 @@ impl SandboxBackend {
             if let Some(ticket) = tickets.lock().expect("tickets").get_mut(&quote_id) {
                 if !ticket.settled {
                     ticket.settled = true;
-                    let amount = Amount::new(ticket.amount, ticket.unit_typed());
+                    let unit_typed = CurrencyUnit::Custom(unit.as_str().into());
                     let _ = event_tx.send(Event::PaymentReceived(WaitPaymentResponse {
                         payment_identifier: PaymentIdentifier::CustomId(quote_id.clone()),
-                        payment_amount: amount,
-                        payment_id: format!("{}-sandbox", quote_id),
+                        payment_amount: Amount::new(amount, unit_typed),
+                        payment_id: format!("sandbox-{quote_id}"),
                     }));
                 }
             }
@@ -137,28 +132,21 @@ impl SandboxBackend {
     }
 }
 
-impl SandboxTicket {
-    fn unit_typed(&self) -> CurrencyUnit {
-        CurrencyUnit::Custom(self.unit.as_str().into())
-    }
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_secs()
-}
-
 #[async_trait]
 impl MintPayment for SandboxBackend {
     type Err = Error;
 
     async fn get_settings(&self) -> Result<SettingsResponse, Self::Err> {
-        Ok(SettingsResponse::Custom(
-            vec![self.method.clone()],
-            vec![self.unit.clone().unwrap_or(CurrencyUnit::Custom("nok".into()))],
-        ))
+        let unit = self.configured_unit()?;
+        let mut custom = HashMap::new();
+        custom.insert(self.method.clone(), "{}".to_string());
+        Ok(SettingsResponse {
+            unit: unit.to_string(),
+            bolt11: None::<Bolt11Settings>,
+            bolt12: None::<Bolt12Settings>,
+            onchain: None,
+            custom,
+        })
     }
 
     async fn create_incoming_payment_request(
@@ -175,29 +163,32 @@ impl MintPayment for SandboxBackend {
 
                 match behavior {
                     SandboxBehavior::Refused => Err(Error::Custom(
-                        "sandbox: amounts ending in 2 are refused (positive proof of failure)".into(),
+                        "sandbox: amounts ending in 2 are refused".into(),
                     )),
                     _ => {
                         let quote_id = opts.quote_id.to_string();
                         let unit = amount.unit().to_string();
-                        let ticket = SandboxTicket {
-                            quote_id: quote_id.clone(),
-                            amount: amount.value(),
-                            unit,
-                            behavior: behavior.clone(),
-                            created_at: unix_now(),
-                            settled: false,
-                        };
-                        self.tickets
-                            .lock()
-                            .expect("tickets")
-                            .insert(quote_id.clone(), ticket);
+                        let amt = amount.value();
 
-                        if let SandboxBehavior::Delayed(d) = behavior {
-                            self.spawn_auto_settle(quote_id.clone(), d);
-                        }
-                        if matches!(behavior, SandboxBehavior::Instant) {
-                            self.spawn_auto_settle(quote_id.clone(), Duration::from_millis(100));
+                        self.tickets.lock().expect("tickets").insert(
+                            quote_id.clone(),
+                            SandboxTicket {
+                                quote_id: quote_id.clone(),
+                                amount: amt,
+                                unit: unit.clone(),
+                                behavior: behavior.clone(),
+                                settled: false,
+                            },
+                        );
+
+                        match behavior {
+                            SandboxBehavior::Instant => {
+                                self.spawn_auto_settle(quote_id.clone(), amt, unit, Duration::from_millis(100));
+                            }
+                            SandboxBehavior::Delayed(d) => {
+                                self.spawn_auto_settle(quote_id.clone(), amt, unit, d);
+                            }
+                            _ => {}
                         }
 
                         Ok(CreateIncomingPaymentResponse {
@@ -215,7 +206,7 @@ impl MintPayment for SandboxBackend {
 
     async fn get_payment_quote(
         &self,
-        unit: &CurrencyUnit,
+        _unit: &CurrencyUnit,
         options: OutgoingPaymentOptions,
     ) -> Result<PaymentQuoteResponse, Self::Err> {
         match options {
@@ -232,18 +223,20 @@ impl MintPayment for SandboxBackend {
                     ));
                 }
 
+                let unit = self.configured_unit()?;
+                let state = match behavior {
+                    SandboxBehavior::Timeout => MeltQuoteState::Unknown,
+                    _ => MeltQuoteState::Unpaid,
+                };
+
                 Ok(PaymentQuoteResponse {
                     request_lookup_id: Some(PaymentIdentifier::CustomId(format!(
                         "SANDBOX-MELT-{}",
                         amount.value()
                     ))),
                     amount: amount.clone(),
-                    fee: Amount::new(0, unit.clone()),
-                    state: match behavior {
-                        SandboxBehavior::Timeout => MeltQuoteState::Unknown,
-                        _ => MeltQuoteState::Pending,
-                    },
-                    expiry: Some(unix_now() + 900),
+                    fee: Amount::new(0, unit),
+                    state,
                     extra_json: None,
                     estimated_blocks: None,
                     fee_options: None,
@@ -265,36 +258,32 @@ impl MintPayment for SandboxBackend {
                     .as_ref()
                     .ok_or_else(|| Error::Custom("amount required".into()))?;
                 let behavior = self.behavior_for(amount.value());
+                let unit = self.configured_unit()?;
 
-                let quote_id = opts
-                    .quote_id
-                    .map(|q| q.to_string())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let quote_id = opts.quote_id.to_string();
 
                 match behavior {
                     SandboxBehavior::Refused => Err(Error::Custom(
-                        "sandbox: amounts ending in 2 are refused (positive proof)".into(),
+                        "sandbox: amounts ending in 2 are refused".into(),
+                    )),
+                    SandboxBehavior::Ambiguous => Err(Error::Custom(
+                        "sandbox: amounts ending in 3 settle ambiguously".into(),
+                    )),
+                    SandboxBehavior::Timeout => Err(Error::Custom(
+                        "sandbox: amounts ending in 4 never resolve".into(),
                     )),
                     SandboxBehavior::Instant => Ok(MakePaymentResponse {
                         payment_lookup_id: PaymentIdentifier::CustomId(quote_id.clone()),
                         payment_proof: Some(format!("sandbox:instant:{quote_id}")),
                         status: MeltQuoteState::Paid,
-                        total_spent: amount.clone(),
-                        extra_json: None,
+                        total_spent: Amount::new(amount.value(), unit),
                     }),
-                    SandboxBehavior::Ambiguous => Err(Error::Custom(
-                        "sandbox: amounts ending in 3 settle ambiguously (status unknown)".into(),
-                    )),
-                    SandboxBehavior::Timeout => Err(Error::Custom(
-                        "sandbox: amounts ending in 4 never resolve (silent timeout)".into(),
-                    )),
                     SandboxBehavior::Delayed(_) | SandboxBehavior::Manual => {
                         Ok(MakePaymentResponse {
                             payment_lookup_id: PaymentIdentifier::CustomId(quote_id.clone()),
                             payment_proof: None,
                             status: MeltQuoteState::Pending,
-                            total_spent: amount.clone(),
-                            extra_json: None,
+                            total_spent: Amount::new(amount.value(), unit),
                         })
                     }
                 }
@@ -322,16 +311,18 @@ impl MintPayment for SandboxBackend {
         _identifier: &cdk_common::payment::PaymentIdentifier,
     ) -> Result<Vec<WaitPaymentResponse>, Self::Err> {
         let tickets = self.tickets.lock().expect("tickets");
-        let settled: Vec<WaitPaymentResponse> = tickets
+        Ok(tickets
             .values()
             .filter(|t| t.settled)
-            .map(|t| WaitPaymentResponse {
-                payment_identifier: PaymentIdentifier::CustomId(t.quote_id.clone()),
-                payment_amount: Amount::new(t.amount, t.unit_typed()),
-                payment_id: format!("{}-sandbox", t.quote_id),
+            .map(|t| {
+                let unit_typed = CurrencyUnit::Custom(t.unit.as_str().into());
+                WaitPaymentResponse {
+                    payment_identifier: PaymentIdentifier::CustomId(t.quote_id.clone()),
+                    payment_amount: Amount::new(t.amount, unit_typed),
+                    payment_id: format!("sandbox-{}", t.quote_id),
+                }
             })
-            .collect();
-        Ok(settled)
+            .collect())
     }
 
     async fn check_outgoing_payment(
@@ -343,31 +334,30 @@ impl MintPayment for SandboxBackend {
             _ => return Err(Error::Custom("unsupported identifier".into())),
         };
         let tickets = self.tickets.lock().expect("tickets");
+        let unit = self.configured_unit()?;
+
         if let Some(ticket) = tickets.get(&id) {
-            if ticket.settled {
-                Ok(MakePaymentResponse {
-                    payment_lookup_id: PaymentIdentifier::CustomId(id),
-                    payment_proof: Some(format!("sandbox:settled:{}", ticket.quote_id)),
-                    status: MeltQuoteState::Paid,
-                    total_spent: Amount::new(ticket.amount, ticket.unit_typed()),
-                    extra_json: None,
-                })
+            let status = if ticket.settled {
+                MeltQuoteState::Paid
             } else {
-                Ok(MakePaymentResponse {
-                    payment_lookup_id: PaymentIdentifier::CustomId(id),
-                    payment_proof: None,
-                    status: MeltQuoteState::Pending,
-                    total_spent: Amount::new(ticket.amount, ticket.unit_typed()),
-                    extra_json: None,
-                })
-            }
+                MeltQuoteState::Pending
+            };
+            Ok(MakePaymentResponse {
+                payment_lookup_id: PaymentIdentifier::CustomId(id),
+                payment_proof: if ticket.settled {
+                    Some(format!("sandbox:settled:{}", ticket.quote_id))
+                } else {
+                    None
+                },
+                status,
+                total_spent: Amount::new(ticket.amount, unit),
+            })
         } else {
             Ok(MakePaymentResponse {
                 payment_lookup_id: identifier.clone(),
                 payment_proof: None,
                 status: MeltQuoteState::Unknown,
-                total_spent: Amount::new(0, CurrencyUnit::Custom("nok".into())),
-                extra_json: None,
+                total_spent: Amount::new(0, unit),
             })
         }
     }
