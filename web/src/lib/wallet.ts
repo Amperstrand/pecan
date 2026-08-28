@@ -273,13 +273,21 @@ export async function createWithdraw(
   try {
     await wallet.meltProofs("branch", quote, proofArgs)
     submitted = true
-    // Mark submitted proofs as reserved
+  } catch (e) {
+    const err = e as { code?: number; message?: string }
+    // 20005 = async settlement timeout (expected for teller-based flows)
+    // The proofs WERE accepted and the ticket IS pending — not a failure
+    if (err.code === 20005 || (err.message && err.message.includes("pending"))) {
+      submitted = true
+    } else {
+      console.warn("meltProofs failed:", e)
+      submitted = false
+    }
+  }
+  if (submitted) {
     for (const p of selected) {
       await db.proofs.put({ ...p, reserved: true })
     }
-  } catch (e) {
-    console.warn("meltProofs failed:", e)
-    submitted = false
   }
 
   await addHistory("withdraw", amountOre, `Withdraw · ${recipient}`)

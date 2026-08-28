@@ -165,18 +165,24 @@ impl UserStore {
                              CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD",
                             path.display()
                         );
-                        // The installer chose this password, not the operator:
-                        // force a change at first sign-in.
-                        (hash_password(&password), true)
+                        // The deployer explicitly chose this password.
+                        (hash_password(&password), false)
                     }
-                    // Demo seed: deliberately exempt from the password
-                    // complexity rule; the UI warns until it is changed.
                     (None, None) => {
-                        tracing::info!(
-                            "seeding {} with demo credentials {DEMO_USERNAME}/{DEMO_PASSWORD}",
-                            path.display()
+                        use rand::Rng;
+                        let random: String = rand::thread_rng()
+                            .sample_iter(&rand::distributions::Alphanumeric)
+                            .take(20)
+                            .map(char::from)
+                            .collect();
+                        tracing::warn!(
+                            "no password configured — generated random admin password: {}",
+                            random
                         );
-                        (hash_password(DEMO_PASSWORD), false)
+                        tracing::info!(
+                            "set CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD to override"
+                        );
+                        (hash_password(&random), false)
                     }
                 };
                 let mut users = BTreeMap::new();
