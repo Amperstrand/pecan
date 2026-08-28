@@ -20,10 +20,10 @@ import {
   createWithdraw,
   getBalanceOre,
   getHistory,
+  getWallet,
   pollAndMint,
   pollWithdraw,
-} from "@/lib/coco/coco-wallet"
-import { getCoco } from "@/lib/coco/coco-wallet"
+} from "@/lib/wallet"
 
 interface HistoryRow {
   id?: number
@@ -47,7 +47,7 @@ type WithdrawState =
   | { phase: "done"; preimage: string }
   | { phase: "error"; message: string }
 
-export function WalletPage() {
+export function WalletClassicPage() {
   const [balance, setBalance] = useState<number | null>(null)
   const [history, setHistory] = useState<HistoryRow[]>([])
   const [depositAmount, setDepositAmount] = useState("")
@@ -68,7 +68,7 @@ export function WalletPage() {
   }, [])
 
   useEffect(() => {
-    getCoco().then(() => refresh()).catch(() => {}).finally(() => refresh())
+    getWallet().then(() => refresh()).catch(() => {}).finally(() => refresh())
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
@@ -300,7 +300,7 @@ export function WalletPage() {
       )}
 
       <p className="text-center text-xs text-muted-foreground">
-        Self-custodied — Coco 2 · keys stay in your browser.
+        Self-custodied — keys stay in your browser.
         <br />
         <a href="/console/" className="underline">Operator console</a>
         {" · "}

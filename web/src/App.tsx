@@ -13,6 +13,7 @@ import { ConsolePage } from "@/pages/console"
 import { LoginPage } from "@/pages/login"
 import { TellerPage } from "@/pages/teller"
 import { WalletPage } from "@/pages/wallet"
+import { WalletClassicPage } from "@/pages/wallet-classic"
 
 function App() {
   const pathname = usePathname()
@@ -21,6 +22,8 @@ function App() {
     <TooltipProvider>
       {pathname === "/login" ? (
         <LoginPage />
+      ) : pathname.endsWith("/wallet-classic") ? (
+        <WalletClassicPage />
       ) : pathname.endsWith("/wallet") ? (
         <WalletPage />
       ) : (

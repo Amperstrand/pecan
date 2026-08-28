@@ -1,0 +1,211 @@
+import { Amount } from "@cashu/cashu-ts"
+import { initializeCoco, type HistoryEntry, type Manager } from "@cashu/coco-core"
+import { IndexedDbRepositories } from "@cashu/coco-indexeddb"
+
+import { MINT_URL, UNIT } from "./branch-methods"
+import { MeltBranchHandler } from "./melt-branch-handler"
+import { MintBranchHandler } from "./mint-branch-handler"
+
+export interface HistoryRow {
+  id?: number
+  type: "deposit" | "withdraw"
+  amount_ore: number
+  description: string
+  created_at: number
+}
+
+export interface DepositQuote {
+  quoteId: string
+  tail: string
+  amountOre: number
+  privkey: string
+}
+
+export interface WithdrawResult {
+  quoteId: string
+  tail: string
+  amountOre: number
+  submitted: boolean
+}
+
+const SEED_STORAGE_KEY = "giftcard-coco-seed-v1"
+
+let cocoInstance: Promise<Manager> | null = null
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+}
+
+function fromHex(hex: string): Uint8Array {
+  const arr = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < hex.length; i += 2) {
+    arr[i / 2] = Number.parseInt(hex.slice(i, i + 2), 16)
+  }
+  return arr
+}
+
+function loadSeed(): Uint8Array {
+  const stored = window.localStorage.getItem(SEED_STORAGE_KEY)
+  if (stored && stored.length === 128) {
+    return fromHex(stored)
+  }
+  const seed = new Uint8Array(64)
+  crypto.getRandomValues(seed)
+  window.localStorage.setItem(SEED_STORAGE_KEY, toHex(seed))
+  return seed
+}
+
+export function getCoco(): Promise<Manager> {
+  if (cocoInstance === null) {
+    cocoInstance = (async () => {
+      const repo = new IndexedDbRepositories({ name: "giftcard-coco-wallet" })
+      const coco = await initializeCoco({
+        repo,
+        seedGetter: () => Promise.resolve(loadSeed()),
+      })
+      coco.registerMeltMethod("branch", new MeltBranchHandler())
+      coco.registerMintMethod("branch", new MintBranchHandler(coco.keyRingService))
+      await coco.mint.addMint(MINT_URL(), { trusted: true })
+      return coco
+    })()
+  }
+  return cocoInstance
+}
+
+export async function getWallet(): Promise<Manager> {
+  return getCoco()
+}
+
+export async function getBalanceOre(): Promise<number> {
+  const coco = await getCoco()
+  const balances = await coco.wallet.balances.byUnit({ mintUrls: [MINT_URL()] })
+  const nok = balances[UNIT]
+  return Number(nok?.spendable.toBigInt() ?? 0n)
+}
+
+export async function getHistory(limit = 15): Promise<HistoryRow[]> {
+  const coco = await getCoco()
+  const entries = await coco.history.getPaginatedHistory(0, limit)
+  return entries.map(mapHistoryEntry).filter((row): row is HistoryRow => row !== null)
+}
+
+function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
+  const createdAt = entry.createdAt
+  if (entry.type === "mint") {
+    return {
+      type: "deposit",
+      amount_ore: Number(entry.amount.toBigInt()),
+      description: "Deposit",
+      created_at: createdAt,
+    }
+  }
+  if (entry.type === "melt") {
+    return {
+      type: "withdraw",
+      amount_ore: Number(entry.amount.toBigInt()),
+      description: "Withdraw",
+      created_at: createdAt,
+    }
+  }
+  return null
+}
+
+export async function createDepositQuote(amountKr: number): Promise<DepositQuote> {
+  const coco = await getCoco()
+  const amountOre = Math.round(amountKr * 100)
+
+  const quote = await coco.quotes.mint.create({
+    mintUrl: MINT_URL(),
+    method: "branch",
+    amount: amountOre,
+    unit: UNIT,
+    description: "Wallet deposit",
+    locked: true,
+  })
+
+  const operation = await coco.ops.mint.prepare({ quote, amount: amountOre })
+  void coco.ops.mint.execute(operation.id).catch((err: unknown) => {
+    console.warn("mint execute background:", err)
+  })
+
+  return {
+    quoteId: quote.quoteId,
+    tail: quote.quoteId.slice(-6).toUpperCase(),
+    amountOre,
+    privkey: "",
+  }
+}
+
+export async function pollAndMint(
+  quoteId: string,
+  _amountOre: number,
+  _privkey: string,
+): Promise<boolean> {
+  const coco = await getCoco()
+  const operations = await coco.ops.mint.listByQuote({
+    mintUrl: MINT_URL(),
+    quoteId,
+  })
+  const operation = operations[0]
+  if (!operation) return false
+  if (operation.state === "finalized" || operation.state === "failed") return true
+
+  const refreshed = await coco.ops.mint.refresh(operation.id)
+  return refreshed.state === "finalized" || refreshed.state === "failed"
+}
+
+export async function createWithdraw(amountKr: number, recipient: string): Promise<WithdrawResult> {
+  const coco = await getCoco()
+  const amountOre = Math.round(amountKr * 100)
+
+  const quote = await coco.quotes.melt.create({
+    mintUrl: MINT_URL(),
+    method: "branch",
+    methodData: { amount: Amount.from(amountOre), description: recipient },
+    unit: UNIT,
+  })
+
+  const prepared = await coco.ops.melt.prepare({ quote })
+  void coco.ops.melt.execute(prepared.id).catch((err: unknown) => {
+    console.warn("melt execute background:", err)
+  })
+
+  return {
+    quoteId: quote.quoteId,
+    tail: quote.quoteId.slice(-6).toUpperCase(),
+    amountOre,
+    submitted: true,
+  }
+}
+
+export async function pollWithdraw(quoteId: string): Promise<string | null> {
+  const coco = await getCoco()
+  const operation = await coco.ops.melt.getByQuote({
+    mintUrl: MINT_URL(),
+    quoteId,
+  })
+  if (!operation) return null
+  if (operation.state === "finalized") {
+    return readPreimage(operation)
+  }
+  if (operation.state === "failed" || operation.state === "rolled_back") {
+    return "FAILED"
+  }
+
+  const refreshed = await coco.ops.melt.refresh(operation.id)
+  if (refreshed.state === "finalized") {
+    return readPreimage(refreshed)
+  }
+  return null
+}
+
+function readPreimage(operation: unknown): string {
+  const finalized = operation as { finalizedData?: { preimage?: string } }
+  return String(finalized.finalizedData?.preimage ?? "PAID")
+}
+
+export async function isWalletInitialized(): Promise<boolean> {
+  return window.localStorage.getItem(SEED_STORAGE_KEY) !== null
+}
