@@ -1,6 +1,6 @@
 import { Wallet } from "@cashu/cashu-ts"
 import Dexie, { type EntityTable } from "dexie"
-import { randomBytes } from "crypto"
+
 
 interface StoredProof {
   id: string
@@ -10,7 +10,8 @@ interface StoredProof {
   keyset_id: string
   reserved: boolean
   created_at: number
-}
+  raw?: string
+    }
 
 interface StoredSeed {
   id: string
@@ -47,17 +48,37 @@ db.version(1).stores({
   pending: "id, quote_id, created_at",
 })
 
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+}
+
+function fromHex(hex: string): Uint8Array {
+  const arr = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < hex.length; i += 2) {
+    arr[i / 2] = parseInt(hex.slice(i, i + 2), 16)
+  }
+  return arr
+}
+
+function randomBytes(length: number): Uint8Array {
+  const arr = new Uint8Array(length)
+  crypto.getRandomValues(arr)
+  return arr
+}
+
 function loadSeed(): Uint8Array {
-  return new Uint8Array(randomBytes(64))
+  return randomBytes(64)
 }
 
 async function getStoredSeed(): Promise<Uint8Array> {
   const existing = await db.seeds.get("main")
   if (existing) {
-    return new Uint8Array(Buffer.from(existing.value, "hex"))
+    return fromHex(existing.value)
   }
   const seed = loadSeed()
-  await db.seeds.put({ id: "main", value: Buffer.from(seed).toString("hex") })
+  await db.seeds.put({ id: "main", value: toHex(seed) })
   return seed
 }
 
@@ -72,26 +93,29 @@ export async function getWallet(): Promise<Wallet> {
 }
 
 export async function getBalanceOre(): Promise<number> {
-  const unspent = await db.proofs.where("reserved").equals(0).toArray()
-  return unspent.reduce((sum, p) => sum + Number(p.amount), 0)
+  const all = await db.proofs.toArray()
+  return all.filter((p) => !p.reserved).reduce((sum, p) => sum + Number(p.amount), 0)
 }
 
 export async function getUnspentProofs(): Promise<StoredProof[]> {
-  return db.proofs.where("reserved").equals(0).toArray()
+  const all = await db.proofs.toArray()
+  return all.filter((p) => !p.reserved)
 }
 
 export async function addProofs(proofs: unknown[]): Promise<number> {
   const now = Date.now()
   const records = proofs.map((p, i) => {
     const proof = p as Record<string, unknown>
+    const amountNum = Number(String(proof.amount ?? 0)) || 0
     return {
       id: `${now}-${i}-${Math.random().toString(36).slice(2, 8)}`,
-      amount: Number(String(proof.amount ?? 0)),
+      amount: amountNum,
       secret: String(proof.secret ?? ""),
       C: String(proof.C ?? ""),
       keyset_id: String(proof.id ?? ""),
       reserved: false,
       created_at: now,
+      raw: JSON.stringify(proof),
     }
   })
   await db.proofs.bulkAdd(records)
@@ -136,8 +160,8 @@ export async function generateKeypair(): Promise<{
   const { secp256k1 } = await import("@noble/curves/secp256k1.js")
   const pub = secp256k1.getPublicKey(new Uint8Array(priv), true)
   return {
-    pubkeyHex: Buffer.from(pub).toString("hex"),
-    privHex: priv.toString("hex"),
+    pubkeyHex: toHex(pub),
+    privHex: toHex(priv),
   }
 }
 
@@ -193,6 +217,16 @@ export interface WithdrawResult {
   submitted: boolean
 }
 
+function findExactSubset(proofs: StoredProof[], target: number): StoredProof[] | null {
+  const n = proofs.length
+  for (let mask = 1; mask < 1 << n; mask++) {
+    let sum = 0
+    for (let i = 0; i < n; i++) if (mask & (1 << i)) sum += proofs[i].amount
+    if (sum === target) return proofs.filter((_, i) => mask & (1 << i))
+  }
+  return null
+}
+
 export async function createWithdraw(
   amountKr: number,
   recipient: string,
@@ -207,19 +241,44 @@ export async function createWithdraw(
     amount: amountOre,
   })
 
+  const fee = 0 // pecan branch method has no fee; add dynamic fee when supported
+  const need = amountOre + fee
   const unspent = await getUnspentProofs()
-  const proofArgs = unspent.map((p) => ({
-    amount: p.amount,
-    secret: p.secret,
-    C: p.C,
-    id: p.keyset_id,
-  }))
+
+  // Try exact subset first (avoids needing change)
+  const subset = findExactSubset(unspent, need)
+
+  // Fall back to all proofs if they exactly cover the need
+  const selected = subset || (unspent.reduce((s, p) => s + p.amount, 0) === need ? unspent : null)
+
+  if (!selected) {
+    throw new Error(
+      `Need exactly ${need} øre for this withdraw. Current proofs don't have an exact subset. Try withdrawing your full balance.`,
+    )
+  }
+
+  // Use raw JSON (preserves cashu-ts types) or reconstruct from stored fields
+  const proofArgs = selected.map((p) => {
+    if (p.raw) {
+      try {
+        return JSON.parse(p.raw)
+      } catch {
+        // fall through to reconstruction
+      }
+    }
+    return { amount: p.amount, secret: p.secret, C: p.C, id: p.keyset_id }
+  })
 
   let submitted = false
   try {
     await wallet.meltProofs("branch", quote, proofArgs)
     submitted = true
-  } catch {
+    // Mark submitted proofs as reserved
+    for (const p of selected) {
+      await db.proofs.put({ ...p, reserved: true })
+    }
+  } catch (e) {
+    console.warn("meltProofs failed:", e)
     submitted = false
   }
 

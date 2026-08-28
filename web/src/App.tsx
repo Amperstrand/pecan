@@ -21,7 +21,7 @@ function App() {
     <TooltipProvider>
       {pathname === "/login" ? (
         <LoginPage />
-      ) : pathname.startsWith("/wallet") ? (
+      ) : pathname.endsWith("/wallet") ? (
         <WalletPage />
       ) : (
         <SnapshotProvider
