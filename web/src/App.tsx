@@ -41,7 +41,7 @@ function App() {
           )}
         >
           <PasswordGate>
-            <AppShell>{pathname.startsWith("/teller") ? <TellerPage /> : <ConsolePage />}</AppShell>
+            <AppShell>{pathname.includes("/teller") ? <TellerPage /> : <ConsolePage />}</AppShell>
           </PasswordGate>
         </SnapshotProvider>
       )}
