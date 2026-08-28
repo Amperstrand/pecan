@@ -12,6 +12,7 @@ import { PasswordGate } from "@/components/password-gate"
 import { ConsolePage } from "@/pages/console"
 import { LoginPage } from "@/pages/login"
 import { TellerPage } from "@/pages/teller"
+import { WalletPage } from "@/pages/wallet"
 
 function App() {
   const pathname = usePathname()
@@ -20,6 +21,8 @@ function App() {
     <TooltipProvider>
       {pathname === "/login" ? (
         <LoginPage />
+      ) : pathname.startsWith("/wallet") ? (
+        <WalletPage />
       ) : (
         <SnapshotProvider
           fallback={<LoadingScreen />}
