@@ -81,11 +81,49 @@ export async function waitForDepositFormReset(
  * Pays a lightning invoice from the lab's signet CLN node (simulated rail —
  * no real money moves). Returns the payment preimage.
  */
+export function payLightningInvoiceFrom(node: string, invoice: string): string {
+  let out: string
+  try {
+    out = execSync(
+      `ssh root@46.224.104.12 "docker exec ${node} lightning-cli --network=signet pay ${invoice}"`,
+      { timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString()
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
+    throw new Error(`lightning pay via ${node} failed: ${stderr.slice(0, 300)}`)
+  }
+  const match = out.match(/"payment_preimage":\s*"([0-9a-f]+)"/)
+  if (!match) throw new Error(`payment did not complete: ${out.slice(0, 300)}`)
+  return match[1]
+}
+
+/** Pays from a second signet node — proves routability beyond the primary. */
+export function payLightningInvoiceFromHub(invoice: string): string {
+  return payLightningInvoiceFrom("cln-hub-signet", invoice)
+}
+
+/** Sends on-chain sats to a deposit address from the hub node's wallet. */
+export function sendOnchainToAddress(address: string, sat: number): string {
+  let out: string
+  try {
+    out = execSync(
+      `ssh root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
+      { timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString()
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
+    throw new Error(`onchain withdraw failed: ${stderr.slice(0, 300)}`)
+  }
+  const match = out.match(/"txid":\s*"([0-9a-f]+)"/)
+  if (!match) throw new Error(`withdraw produced no txid: ${out.slice(0, 300)}`)
+  return match[1]
+}
+
 export function payLightningInvoice(invoice: string): string {
   let out: string
   try {
     out = execSync(
-      `ssh root@46.224.104.12 "docker exec cln-swap-signet lightning-cli --network=signet pay ${invoice}"`,
+      `ssh root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet pay ${invoice}"`,
       { timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] },
     ).toString()
   } catch (err) {

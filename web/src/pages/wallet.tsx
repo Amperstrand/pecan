@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import QRCode from "qrcode"
 import { ArrowDown, ArrowUp, Loader2, Wallet as WalletIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -41,11 +42,25 @@ type WithdrawState =
   | { phase: "done"; preimage: string }
   | { phase: "error"; message: string }
 
+function QrCodeImg({ text, alt }: { text: string; alt: string }) {
+  const [src, setSrc] = useState<string | null>(null)
+  useEffect(() => {
+    QRCode.toDataURL(text, { margin: 1, width: 220 })
+      .then(setSrc)
+      .catch(() => setSrc(null))
+  }, [text])
+  if (!src) return null
+  // White pad behind the QR: scanners struggle with dark-mode backgrounds.
+  return (
+    <img src={src} alt={alt} width={220} height={220} className="rounded-md bg-white p-2" />
+  )
+}
+
 export function WalletPage() {
   const [balance, setBalance] = useState<number | null>(null)
   const [history, setHistory] = useState<HistoryRow[]>([])
   const [depositAmount, setDepositAmount] = useState("")
-  const [depositMethod, setDepositMethod] = useState<"branch" | "ln">("branch")
+  const [depositMethod, setDepositMethod] = useState<"branch" | "ln" | "btc">("branch")
   const [withdrawAmount, setWithdrawAmount] = useState("")
   const [withdrawRecipient, setWithdrawRecipient] = useState("")
   const [depositState, setDepositState] = useState<DepositState>({ phase: "idle" })
@@ -160,7 +175,7 @@ export function WalletPage() {
         <CardContent className="grid gap-3">
           {depositState.phase === "idle" || depositState.phase === "done" ? (
             <>
-              <div className="grid grid-cols-2 gap-1.5 rounded-lg bg-muted p-1 text-sm">
+              <div className="grid grid-cols-3 gap-1.5 rounded-lg bg-muted p-1 text-sm">
                 <button
                   type="button"
                   onClick={() => setDepositMethod("branch")}
@@ -175,7 +190,19 @@ export function WalletPage() {
                 >
                   Lightning
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setDepositMethod("btc")}
+                  className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "btc" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
+                >
+                  On-chain
+                </button>
               </div>
+              {depositMethod === "btc" && (
+                <p className="text-xs text-muted-foreground">
+                  Minimum 50 kr — on-chain deposits pay for dust and chain fees.
+                </p>
+              )}
               <div className="grid gap-1.5">
                 <Label htmlFor="dep-amt">Amount (kr)</Label>
                 <Input
@@ -194,7 +221,9 @@ export function WalletPage() {
                   ? "✓ Deposited"
                   : depositMethod === "ln"
                     ? "Create lightning invoice"
-                    : "Create deposit quote"}
+                    : depositMethod === "btc"
+                      ? "Create on-chain address"
+                      : "Create deposit quote"}
               </Button>
             </>
           ) : depositState.phase === "creating" ? (
@@ -205,8 +234,11 @@ export function WalletPage() {
             depositState.quote.method === "ln" ? (
               <div className="grid gap-3 text-center">
                 <p className="text-sm text-muted-foreground">
-                  Pay this lightning invoice:
+                  Pay this lightning invoice (signet):
                 </p>
+                <div className="flex justify-center">
+                  <QrCodeImg text={depositState.quote.request} alt="Lightning invoice QR" />
+                </div>
                 <p className="max-h-24 overflow-y-auto break-all rounded-md bg-muted p-2 font-mono text-xs select-all">
                   {depositState.quote.request}
                 </p>
@@ -216,6 +248,32 @@ export function WalletPage() {
                   onClick={() => navigator.clipboard.writeText(depositState.quote.request)}
                 >
                   Copy invoice
+                </Button>
+                <p className="text-sm text-muted-foreground">
+                  {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
+                </p>
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Polling for payment
+                </div>
+              </div>
+            ) : depositState.quote.method === "btc" ? (
+              <div className="grid gap-3 text-center">
+                <p className="text-sm text-muted-foreground">
+                  Send {depositState.quote.expectedSat ?? "…"} sat (signet) to:
+                </p>
+                <div className="flex justify-center">
+                  <QrCodeImg text={depositState.quote.request} alt="Bitcoin address QR" />
+                </div>
+                <p className="break-all rounded-md bg-muted p-2 font-mono text-xs select-all">
+                  {depositState.quote.request}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => navigator.clipboard.writeText(depositState.quote.request)}
+                >
+                  Copy address
                 </Button>
                 <p className="text-sm text-muted-foreground">
                   {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…

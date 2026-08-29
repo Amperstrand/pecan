@@ -22,6 +22,7 @@ mod checks;
 mod clients;
 mod config;
 mod ln;
+mod onchain;
 mod sessions;
 mod state;
 mod users;
@@ -275,36 +276,69 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Optional lightning-minting rail alongside the teller rail: real CLN
-    // bolt11 invoices, NOK/BTC converted in-process (cdk has no price
-    // service) with a markup. One processor advertises both methods.
-    let ln_rail = match std::env::var("CDK_BRANCH_PROCESSOR_LN") {
-        Ok(v) if v == "true" || v == "1" => {
-            let socket = std::env::var("CDK_BRANCH_PROCESSOR_CLN_SOCKET")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/run/lightning-rpc"));
-            let markup: f64 = std::env::var("CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(10.0);
-            let rate_url = std::env::var("CDK_BRANCH_PROCESSOR_LN_RATE_URL")
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "https://api.yadio.io/rate/BTC/NOK".into());
-            let rail = ln::LnRail::start(
-                socket.clone(),
-                markup,
-                rate_url,
-                branch.event_sender(),
-            );
-            tracing::info!(
-                "ln rail enabled (cln socket {}, markup {markup}%)",
-                socket.display()
-            );
-            Some(rail)
-        }
-        _ => None,
+    // Optional rails alongside the teller rail: lightning (bolt11 invoices)
+    // and onchain (per-quote bech32 addresses), both on the CLN node, both
+    // converting NOK<->sat in-process (cdk has no price service) with a
+    // markup. One processor advertises every enabled method.
+    let ln_env_on = std::env::var("CDK_BRANCH_PROCESSOR_LN")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let onchain_env_on = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let cln_client = if ln_env_on || onchain_env_on {
+        let socket = std::env::var("CDK_BRANCH_PROCESSOR_CLN_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/run/lightning-rpc"));
+        Some(onchain::cln_client(socket))
+    } else {
+        None
+    };
+    let markup: f64 = std::env::var("CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(10.0);
+    let rate_url = std::env::var("CDK_BRANCH_PROCESSOR_LN_RATE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "https://api.yadio.io/rate/BTC/NOK".into());
+
+    let ln_rail = if ln_env_on {
+        let rail = ln::LnRail::start_with_client(
+            cln_client.clone().expect("ln enabled implies client"),
+            markup,
+            rate_url.clone(),
+            branch.event_sender(),
+        );
+        tracing::info!("ln rail enabled (markup {markup}%)");
+        Some(rail)
+    } else {
+        None
+    };
+    let onchain_rail = if onchain_env_on {
+        let confirmations: u32 = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(1);
+        let esplora = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "https://mempool.space/signet/api".into());
+        let rail = onchain::OnchainRail::start(
+            cln_client.expect("onchain enabled implies client"),
+            Arc::new(ln::Fx::new(rate_url, markup)),
+            confirmations,
+            esplora,
+            branch.event_sender(),
+        );
+        tracing::info!(
+            "onchain rail enabled (settlement after {confirmations} confirmation(s))"
+        );
+        Some(rail)
+    } else {
+        None
     };
 
     let backend = Arc::new(BranchBackend::new(
@@ -312,6 +346,7 @@ async fn main() -> Result<()> {
         unit,
         app_config.method.clone(),
         ln_rail,
+        onchain_rail,
     ));
     let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
         .map_err(|e| anyhow!("payment processor server init: {e}"))?;

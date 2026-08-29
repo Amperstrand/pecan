@@ -7,6 +7,7 @@ import {
   readBalance,
   readTellerCode,
   readWalletDb,
+  sendOnchainToAddress,
   trackWalletErrors,
   waitForDepositFormReset,
   waitForOpState,
@@ -100,6 +101,37 @@ test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", ()
 
     const db = await readWalletDb(page)
     expect(db.spendableSum).toBeGreaterThanOrEqual((before + 1) * 100)
+  })
+
+  test("onchain deposit: address → signet tx from hub node → auto-claim", async () => {
+    const page = sharedPage!
+    await page.goto(WALLET)
+
+    const before = await readBalance(page)
+
+    await page.getByRole("button", { name: "On-chain", exact: true }).click()
+    await page.getByPlaceholder("5.00").fill("50")
+    await page.getByRole("button", { name: "Create on-chain address" }).click()
+
+    const addressBox = page.locator("p.font-mono:has-text(\"tb1\")")
+    await addressBox.waitFor({ state: "visible", timeout: 30_000 })
+    const address = (await addressBox.textContent())?.trim() ?? ""
+    expect(address.startsWith("tb1")).toBeTruthy()
+
+    const sendCaption = await page
+      .getByText(/Send \d+ sat \(signet\)/)
+      .textContent()
+    const expectedSat = Number(sendCaption?.match(/\d+/)?.[0] ?? 0)
+    expect(expectedSat).toBeGreaterThan(1000)
+
+    const txid = sendOnchainToAddress(address, expectedSat)
+    expect(txid).toHaveLength(64)
+
+    // Zero-conf settlement config: the poller needs one listfunds sweep
+    // (every 5s) to see the mempool output.
+    await waitForBalance(page, before + 50, 120_000)
+    await waitForDepositFormReset(page, "Create on-chain address")
+    expectNoWalletErrors(walletErrors)
   })
 
   test("withdraw: melt → teller payout → finalized, proofs released", async () => {

@@ -36,7 +36,11 @@ use tokio_stream::StreamExt;
 
 use crate::config::MELT_TICKET_TTL_SECS;
 use crate::ln::LnRail;
+use crate::onchain::OnchainRail;
 use crate::state::{BranchState, Ticket};
+
+/// Onchain deposits carry real chain weight; keep them well above dust.
+const MIN_ONCHAIN_ORE: u64 = 5_000;
 
 /// Single-unit payment processor for one attached mint; routes mint quotes
 /// per method: the teller rail (`branch`) and, when configured, the
@@ -49,6 +53,8 @@ pub struct BranchBackend {
     method: String,
     /// Lightning-minting rail; `None` unless CDK_BRANCH_PROCESSOR_LN=true.
     ln: Option<Arc<LnRail>>,
+    /// Onchain-minting rail; `None` unless CDK_BRANCH_PROCESSOR_ONCHAIN=true.
+    onchain: Option<Arc<OnchainRail>>,
     stream_active: AtomicBool,
     /// Unix seconds of the first `wait_payment_event` attach since this
     /// process started; 0 = never. Never cleared on client disconnect — it
@@ -74,12 +80,14 @@ impl BranchBackend {
         unit: Option<CurrencyUnit>,
         method: String,
         ln: Option<Arc<LnRail>>,
+        onchain: Option<Arc<OnchainRail>>,
     ) -> Self {
         Self {
             state,
             unit: RwLock::new(unit),
             method,
             ln,
+            onchain,
             stream_active: AtomicBool::new(false),
             stream_attached_at: AtomicU64::new(0),
             last_settings_at: AtomicU64::new(0),
@@ -133,11 +141,25 @@ impl BranchBackend {
         Ok(())
     }
 
-    /// True when the quote asks for the lightning rail: either the (future,
-    /// PR #2275) method field says so, or today's wallet sets `rail: "ln"`
-    /// in the request's flattened extra fields.
-    fn wants_ln(opts: &cdk_common::payment::CustomIncomingPaymentOptions) -> bool {
-        opts.method.trim() == "ln" || extra_requests_ln(opts.extra_json.as_deref())
+    /// Which rail a quote asks for: the (future, PR #2275) method field, or
+    /// today's `rail` tag in the flattened extra fields. Default: teller.
+    fn rail_of(opts: &cdk_common::payment::CustomIncomingPaymentOptions) -> &'static str {
+        match opts.method.trim() {
+            "ln" => return "ln",
+            "btc" => return "btc",
+            _ => {}
+        }
+        match opts.extra_json.as_deref() {
+            Some(extra) => match serde_json::from_str::<serde_json::Value>(extra) {
+                Ok(v) => match v.get("rail").and_then(|r| r.as_str()) {
+                    Some("ln") => "ln",
+                    Some("btc") => "btc",
+                    _ => "branch",
+                },
+                Err(_) => "branch",
+            },
+            None => "branch",
+        }
     }
 
     /// Lightning rail: create a real CLN invoice for the quote. The bolt11
@@ -184,6 +206,57 @@ impl BranchBackend {
             extra_json: None,
         })
     }
+
+    /// Onchain rail: fresh bech32 address per quote. The response's
+    /// flattened extra carries `expected_sat` so the wallet can render the
+    /// exact amount to send. Settlement needs the expected sats on-chain
+    /// (plus confirmations per config).
+    async fn onchain_create(
+        &self,
+        opts: cdk_common::payment::CustomIncomingPaymentOptions,
+    ) -> Result<CreateIncomingPaymentResponse, Error> {
+        let amount = opts
+            .amount
+            .as_ref()
+            .ok_or_else(|| Error::Custom("an amount is required".into()))?;
+        self.check_unit(amount.unit())?;
+        if amount.value() < MIN_ONCHAIN_ORE {
+            return Err(Error::Custom(format!(
+                "onchain deposits must be at least {} {} (dust + chain fees); use lightning                  or the teller for smaller amounts",
+                MIN_ONCHAIN_ORE / 100,
+                amount.unit(),
+            )));
+        }
+        // Same NUT-20 lock policy as the other rails.
+        if opts.pubkey.is_none() {
+            return Err(Error::Custom(
+                "onchain mint quotes must be locked to a wallet key (NUT-20): create the \
+                 quote with a pubkey"
+                    .into(),
+            ));
+        }
+        let rail = self
+            .onchain
+            .as_ref()
+            .expect("caller checked the rail is enabled");
+        let quote_id = opts.quote_id.to_string();
+        let (address, expected_sat) = match rail
+            .new_address(&quote_id, amount.value(), amount.unit())
+            .await
+        {
+            Ok(created) => created,
+            Err(e) => {
+                tracing::warn!("onchain address creation failed for {quote_id}: {e}");
+                return Err(e);
+            }
+        };
+        Ok(CreateIncomingPaymentResponse {
+            request_lookup_id: PaymentIdentifier::CustomId(quote_id),
+            request: address,
+            expiry: opts.unix_expiry,
+            extra_json: Some(serde_json::json!({"expected_sat": expected_sat})),
+        })
+    }
 }
 
 #[async_trait]
@@ -207,6 +280,9 @@ impl MintPayment for BranchBackend {
         custom.insert(self.method.clone(), "{}".to_string());
         if self.ln.is_some() {
             custom.insert("ln".to_string(), "{}".to_string());
+        }
+        if self.onchain.is_some() {
+            custom.insert("btc".to_string(), "{}".to_string());
         }
         Ok(SettingsResponse {
             // The stock boot handshake compares this against the mint's
@@ -233,13 +309,24 @@ impl MintPayment for BranchBackend {
                 // request's flattened extra fields (`{"rail":"ln"}`) — the
                 // proto's documented pass-through for method-specific data.
                 // Absent tag or empty method = the teller rail (back-compat).
-                if Self::wants_ln(&opts) {
-                    return match &self.ln {
-                        Some(_) => self.ln_create(*opts).await,
-                        None => Err(Error::Custom(
-                            "ln rail is not enabled on this processor".into(),
-                        )),
-                    };
+                match Self::rail_of(&opts) {
+                    "ln" => {
+                        return match &self.ln {
+                            Some(_) => self.ln_create(*opts).await,
+                            None => {
+                                Err(Error::Custom("ln rail is not enabled on this processor".into()))
+                            }
+                        };
+                    }
+                    "btc" => {
+                        return match &self.onchain {
+                            Some(_) => self.onchain_create(*opts).await,
+                            None => Err(Error::Custom(
+                                "onchain rail is not enabled on this processor".into(),
+                            )),
+                        };
+                    }
+                    _ => {}
                 }
                 let amount = opts
                     .amount
@@ -298,8 +385,10 @@ impl MintPayment for BranchBackend {
         self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
-                // One-way mint: the ln rail never melts.
-                if opts.method.trim() == "ln" {
+                // One-way mint: the ln and onchain rails never melt.
+                if matches!(opts.method.trim(), "ln" | "btc")
+                    || extra_names_rail(opts.extra_json.as_deref())
+                {
                     return Err(Error::UnsupportedPaymentOption);
                 }
                 // The wallet declares the payout amount in the melt quote
@@ -355,8 +444,10 @@ impl MintPayment for BranchBackend {
         self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
-                // One-way mint: the ln rail never melts.
-                if opts.method.trim() == "ln" {
+                // One-way mint: the ln and onchain rails never melt.
+                if matches!(opts.method.trim(), "ln" | "btc")
+                    || extra_names_rail(opts.extra_json.as_deref())
+                {
                     return Err(Error::UnsupportedPaymentOption);
                 }
                 // The wallet has locked its proofs at the mint; flip the ticket
@@ -433,18 +524,24 @@ impl MintPayment for BranchBackend {
         if let PaymentIdentifier::CustomId(id) = payment_identifier {
             if !id.starts_with("MINT-") && !id.starts_with("MELT-") {
                 if let Some(rail) = &self.ln {
-                    return Ok(rail
-                        .paid_amount(id)
-                        .await
-                        .map(|(ore, unit)| {
-                            vec![WaitPaymentResponse {
-                                payment_identifier: PaymentIdentifier::CustomId(id.clone()),
-                                payment_amount: Amount::new(ore, unit),
-                                payment_id: id.clone(),
-                            }]
-                        })
-                        .unwrap_or_default());
+                    if let Some((ore, unit)) = rail.paid_amount(id).await {
+                        return Ok(vec![WaitPaymentResponse {
+                            payment_identifier: PaymentIdentifier::CustomId(id.clone()),
+                            payment_amount: Amount::new(ore, unit),
+                            payment_id: id.clone(),
+                        }]);
+                    }
                 }
+                if let Some(rail) = &self.onchain {
+                    if let Some((ore, unit)) = rail.paid_amount(id).await {
+                        return Ok(vec![WaitPaymentResponse {
+                            payment_identifier: PaymentIdentifier::CustomId(id.clone()),
+                            payment_amount: Amount::new(ore, unit),
+                            payment_id: id.clone(),
+                        }]);
+                    }
+                }
+                return Ok(Vec::new());
             }
         }
         Ok(self.state.lookup_incoming(payment_identifier).await)
@@ -463,13 +560,12 @@ impl MintPayment for BranchBackend {
     }
 }
 
-/// The wallet's rail tag rides in the flattened extra fields (`{"rail":"ln"}`)
-/// because the payment-processor proto cannot carry the method name yet
-/// (upstream PR #2275). Absent or unparseable extra means the teller rail.
-fn extra_requests_ln(extra_json: Option<&str>) -> bool {
+/// True when the flattened extra fields tag a non-teller rail (melt refusal).
+fn extra_names_rail(extra_json: Option<&str>) -> bool {
     extra_json
         .and_then(|extra| serde_json::from_str::<serde_json::Value>(extra).ok())
-        .is_some_and(|extra| extra.get("rail") == Some(&serde_json::json!("ln")))
+        .and_then(|v| v.get("rail").and_then(|r| r.as_str()).map(str::to_string))
+        .is_some_and(|rail| rail == "ln" || rail == "btc")
 }
 
 fn unix_now() -> u64 {
@@ -482,19 +578,38 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::extra_requests_ln;
+    use super::{extra_names_rail, BranchBackend};
+    use cdk_common::payment::CustomIncomingPaymentOptions;
+
+    fn opts(method: &str, extra: Option<&str>) -> CustomIncomingPaymentOptions {
+        CustomIncomingPaymentOptions {
+            method: method.to_string(),
+            description: None,
+            amount: None,
+            unix_expiry: None,
+            extra_json: extra.map(str::to_string),
+            quote_id: "00000000-0000-7000-8000-000000000000".parse().unwrap(),
+            pubkey: None,
+        }
+    }
 
     #[test]
-    fn rail_tag_routes_only_on_ln() {
-        assert!(extra_requests_ln(Some(r#"{"rail":"ln"}"#)));
-        assert!(extra_requests_ln(Some(
-            r#"{"rail":"ln","note":"anything else flattened in"}"#
-        )));
-        assert!(!extra_requests_ln(Some(r#"{"rail":"branch"}"#)));
-        assert!(!extra_requests_ln(None));
-        // Malformed extra never routes to lightning — the teller rail is
-        // the safe default.
-        assert!(!extra_requests_ln(Some("not json")));
-        assert!(!extra_requests_ln(Some(r#"{"other":true}"#)));
+    fn rail_routing_by_method_and_tag() {
+        assert_eq!(BranchBackend::rail_of(&opts("ln", None)), "ln");
+        assert_eq!(BranchBackend::rail_of(&opts("btc", None)), "btc");
+        assert_eq!(BranchBackend::rail_of(&opts("", Some(r#"{"rail":"ln"}"#))), "ln");
+        assert_eq!(BranchBackend::rail_of(&opts("", Some(r#"{"rail":"btc"}"#))), "btc");
+        // Default and malformed input route to the teller rail.
+        assert_eq!(BranchBackend::rail_of(&opts("", None)), "branch");
+        assert_eq!(BranchBackend::rail_of(&opts("", Some("not json"))), "branch");
+        assert_eq!(BranchBackend::rail_of(&opts("", Some(r#"{"other":1}"#))), "branch");
+    }
+
+    #[test]
+    fn melt_refusal_covers_both_non_teller_rails() {
+        assert!(extra_names_rail(Some(r#"{"rail":"ln"}"#)));
+        assert!(extra_names_rail(Some(r#"{"rail":"btc"}"#)));
+        assert!(!extra_names_rail(Some(r#"{"rail":"branch"}"#)));
+        assert!(!extra_names_rail(None));
     }
 }

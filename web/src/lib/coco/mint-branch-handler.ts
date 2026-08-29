@@ -28,7 +28,7 @@ interface BranchKeyRing {
   getMintQuoteKeyPair(publicKeyHex: string): Promise<Keypair | null>
 }
 
-export class MintBranchHandler<M extends "branch" | "ln"> implements MintMethodHandler<M> {
+export class MintBranchHandler<M extends "branch" | "ln" | "btc"> implements MintMethodHandler<M> {
   constructor(private readonly method: M, private readonly keyRing: BranchKeyRing) {}
 
   async createQuote(ctx: CreateMintQuoteContext<M>): Promise<MintQuote<M>> {
@@ -47,7 +47,7 @@ export class MintBranchHandler<M extends "branch" | "ln"> implements MintMethodH
       // (upstream PR #2275 in flight), so the mint drops it; flattened extra
       // fields are the documented pass-through and reach the processor,
       // which routes the rail on this tag.
-      ...(this.method === "ln" ? { rail: "ln" } : {}),
+      ...(this.method !== "branch" ? { rail: this.method } : {}),
     })
     if (lockPubkey !== undefined && remote.pubkey !== lockPubkey) {
       throw new Error("Mint returned a quote without the requested NUT-20 lock")
@@ -233,7 +233,11 @@ export class MintBranchHandler<M extends "branch" | "ln"> implements MintMethodH
       amountIssued,
       state: deriveBolt11MintQuoteState(amountPaid, amountIssued),
       remoteUpdatedAt: remote.updated_at,
-      quoteData: { amount: Amount.from(remote.amount ?? 0), request: remote.request },
+      quoteData: {
+        amount: Amount.from(remote.amount ?? 0),
+        request: remote.request,
+        ...(remote.expected_sat !== undefined ? { expected_sat: remote.expected_sat } : {}),
+      },
       createdAt: now,
       updatedAt: now,
     } as MintQuote<M>

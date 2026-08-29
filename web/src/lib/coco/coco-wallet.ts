@@ -19,9 +19,11 @@ export interface DepositQuote {
   method: DepositMethod
   quoteId: string
   tail: string
-  /** branch: the MINT- ticket id the teller matches on; ln: the bolt11 invoice. */
+  /** branch: the MINT- ticket id; ln: the bolt11 invoice; btc: the address. */
   request: string
   amountOre: number
+  /** btc: the sats the payer must send, from the processor via extra. */
+  expectedSat?: number
 }
 
 export interface WithdrawResult {
@@ -71,6 +73,7 @@ export function getCoco(): Promise<Manager> {
       coco.registerMeltMethod("branch", new MeltBranchHandler())
       coco.registerMintMethod("branch", new MintBranchHandler("branch", coco.keyRingService))
       coco.registerMintMethod("ln", new MintBranchHandler("ln", coco.keyRingService))
+      coco.registerMintMethod("btc", new MintBranchHandler("btc", coco.keyRingService))
       await coco.mint.addMint(MINT_URL(), { trusted: true })
       return coco
     })()
@@ -136,12 +139,16 @@ export async function createDepositQuote(
     console.warn("mint execute background:", err)
   })
 
+  const expectedSat = (
+    quote as { quoteData?: { expected_sat?: number } }
+  ).quoteData?.expected_sat
   return {
     method,
     quoteId: quote.quoteId,
     tail: quote.quoteId.slice(-6).toUpperCase(),
     request: quote.request,
     amountOre,
+    ...(expectedSat !== undefined ? { expectedSat } : {}),
   }
 }
 

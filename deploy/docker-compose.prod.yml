@@ -32,6 +32,11 @@ services:
       CDK_BRANCH_PROCESSOR_LN: "true"
       CDK_BRANCH_PROCESSOR_CLN_SOCKET: "/run/pecan-cln/signet/lightning-rpc"
       CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT: "10"
+      # Onchain-minting rail: per-quote bech32 addresses on the same node.
+      # 0 confirmations settles on mempool visibility — simulated-mint
+      # tradeoff (docs/lightning-mint.md); production wants >= 1.
+      CDK_BRANCH_PROCESSOR_ONCHAIN: "true"
+      CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "0"
     logging:
       driver: json-file
       options:
@@ -42,5 +47,5 @@ services:
       - /opt/pecan-config:/var/lib/pecan/config
       # The CLN node's lightning dir (socket re-appears here on node restart;
       # mounting the socket file itself would break). invoice RPC needs write.
-      - /opt/inr2-swapnet/cln-clboss-data:/run/pecan-cln
+      - /opt/inr2-swapnet/cln-swap-data:/run/pecan-cln
     restart: unless-stopped

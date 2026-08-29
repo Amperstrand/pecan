@@ -1,4 +1,4 @@
-# Two-rail minting: teller + lightning
+# Three-rail minting: teller + lightning + onchain
 
 giftcard.nok mints NOK ecash over two payment rails, both served by ONE
 pecan processor over the single gRPC connection cdk-mintd allows
@@ -20,12 +20,13 @@ wallet ──POST /v1/mint/quote/{branch|ln}──▶ cdk-mintd ──gRPC Creat
 
 ## Rails
 
-| | `branch` | `ln` |
-|---|---|---|
-| Mint in | Teller code (quote-id tail) at the counter | Real bolt11 invoice (signet) |
-| Melt out | Teller payout (`mark-paid` after cash) | **Refused** — one-way mint |
-| Conversion | none (nok = nok) | NOK/BTC public rate + markup, in pecan |
-| Settlement | Operator marks paid in the console | CLN invoice paid → poller emits `PaymentReceived` |
+| | `branch` | `ln` | `btc` |
+|---|---|---|---|
+| Mint in | Teller code (quote-id tail) at the counter | Real bolt11 invoice (signet) | Per-quote bech32 address |
+| Melt out | Teller payout (`mark-paid` after cash) | **Refused** — one-way mint | **Refused** — one-way mint |
+| Conversion | none (nok = nok) | NOK/BTC public rate + markup, in pecan | same rate+markup; `expected_sat` in the quote extras |
+| Settlement | Operator marks paid in the console | invoice poller → `PaymentReceived` | esplora utxo poller → `PaymentReceived` |
+| Minimum | 1 kr | 1 kr | 50 kr (dust + chain fees) |
 
 **One-way by construction**: `get_payment_quote`/`make_payment` reject
 method `ln` (`Error::UnsupportedPaymentOption`), so NUT-05 never completes
@@ -90,6 +91,21 @@ The socket itself needs write access for `invoice` calls; mount the
 node's lightning dir (the socket re-appears in it on node restart —
 mounting the socket FILE would break across restarts).
 
-The mint needs one restart after enabling the rail — it reads the
-processor's `get_settings` (which now advertises both methods) at boot.
+The mint needs one restart after enabling the rails — it reads the
+processor's `get_settings` (which advertises every enabled method) at boot.
 `mint.toml` does not change.
+
+## Onchain detection notes
+
+The lab nodes run CLN in esplora chain mode, which does NOT surface mempool
+outputs through `listfunds` — so the btc rail detects payments through a
+public esplora directly (`mempool.space/signet/api` by default,
+`CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL` to override). Addresses still
+belong to the node's wallet; only detection is explorer-based. With
+`ONCHAIN_CONFIRMATIONS=0` the deposit settles as soon as esplora's mempool
+shows the utxo; `=1` waits for a block. Underpayments never settle
+(quote expires); overpayments settle the quoted NOK and tip the mint.
+
+The CLN socket client holds ONE persistent connection (a connect-per-call
+pattern aggravated an RPC-read crash on a lab node) and skips the blank
+lines CLN frames responses with.

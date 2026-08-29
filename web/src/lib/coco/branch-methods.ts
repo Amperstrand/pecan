@@ -15,6 +15,8 @@ export interface BranchMeltQuoteResponse extends MeltQuoteBaseResponse {
 
 export interface BranchMintQuoteResponse extends MintQuoteBaseResponse {
   amount?: AmountLike
+  /** onchain rail: the sats the payer must send (flattened extra field). */
+  expected_sat?: number
 }
 
 declare module "@cashu/coco-core/operations/melt" {
@@ -53,11 +55,22 @@ declare module "@cashu/coco-core/operations/mint" {
       remoteState: "UNPAID" | "PAID" | "ISSUED"
       quote: BranchMintQuoteResponse
     }
+    btc: {
+      methodData: Record<string, never>
+      createQuoteData: {
+        amount: UnitAmount
+        description?: string
+        locked?: boolean
+      }
+      quoteData: { amount: Amount; request: string; expected_sat?: number }
+      remoteState: "UNPAID" | "PAID" | "ISSUED"
+      quote: BranchMintQuoteResponse
+    }
   }
 }
 
 export const BRANCH_METHOD = "branch" as const
 export const LN_METHOD = "ln" as const
-export type DepositMethod = "branch" | "ln"
+export type DepositMethod = "branch" | "ln" | "btc"
 export const MINT_URL = (): string => window.location.origin
 export const UNIT = "nok"

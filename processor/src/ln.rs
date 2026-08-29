@@ -45,22 +45,31 @@ pub fn nok_ore_to_sat(ore: u64, nok_per_btc: f64, markup_percent: f64) -> u64 {
     (sat - 1e-6).ceil() as u64
 }
 
-struct RateCache {
+pub(crate) struct Fx {
     url: String,
     http: reqwest::Client,
+    markup_percent: f64,
     nok_per_btc: std::sync::RwLock<Option<(f64, u64)>>,
 }
 
-impl RateCache {
-    fn new(url: String) -> Self {
+impl Fx {
+    pub(crate) fn new(url: String, markup_percent: f64) -> Self {
         Self {
             url,
+            markup_percent,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("reqwest client"),
             nok_per_btc: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Quote-time sat expectation for a NOK øre amount (used by rails that
+    /// display/verify an expected payment, like onchain addresses).
+    pub(crate) async fn quote_sat(&self, ore: u64) -> Result<u64, Error> {
+        let rate = self.get().await?;
+        Ok(nok_ore_to_sat(ore, rate, self.markup_percent))
     }
 
     async fn fetch(&self) -> Option<f64> {
@@ -114,42 +123,42 @@ impl RateCache {
     }
 }
 
-/// Minimal JSON-RPC client over the CLN `lightning-rpc` unix socket.
-struct ClnClient {
+/// JSON-RPC client over the CLN `lightning-rpc` unix socket. Holds ONE
+/// persistent connection between calls and reconnects on error — a
+/// connect-per-call pattern hammers the node with socket churn.
+pub(crate) struct ClnClient {
     socket: PathBuf,
     next_id: std::sync::Mutex<u64>,
-    lock: tokio::sync::Mutex<()>,
+    /// The parked connection; taken out per call, returned on success.
+    conn: tokio::sync::Mutex<Option<tokio::net::UnixStream>>,
 }
 
 impl ClnClient {
-    fn new(socket: PathBuf) -> Self {
+    pub(crate) fn new(socket: PathBuf) -> Self {
         Self {
             socket,
             next_id: std::sync::Mutex::new(0),
-            lock: tokio::sync::Mutex::new(()),
+            conn: tokio::sync::Mutex::new(None),
         }
     }
 
-    async fn call<T: serde::de::DeserializeOwned>(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<T, Error> {
-        // Serialize whole request/response exchanges: the socket is a
-        // stream and interleaved reads would scramble responses.
-        let _guard = self.lock.lock().await;
-        let id = {
-            let mut n = self.next_id.lock().expect("id lock");
-            *n += 1;
-            *n
-        };
-        let req = serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params, "id": id});
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        let mut stream = tokio::net::UnixStream::connect(&self.socket)
+    async fn connect(&self) -> Result<tokio::net::UnixStream, Error> {
+        tokio::net::UnixStream::connect(&self.socket)
             .await
-            .map_err(|e| Error::Custom(format!("connect {}: {e}", self.socket.display())))?;
-        let line = serde_json::to_string(&req)
-            .map_err(|e| Error::Custom(format!("encode rpc: {e}")))?;
+            .map_err(|e| Error::Custom(format!("connect {}: {e}", self.socket.display())))
+    }
+
+    /// One round-trip on the given stream; returns (result, stream) so a
+    /// healthy connection can be parked again.
+    async fn round_trip<T: serde::de::DeserializeOwned>(
+        &self,
+        stream: &mut tokio::net::UnixStream,
+        req: &serde_json::Value,
+        method: &str,
+    ) -> Result<T, Error> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let line =
+            serde_json::to_string(req).map_err(|e| Error::Custom(format!("encode rpc: {e}")))?;
         stream
             .write_all(line.as_bytes())
             .await
@@ -158,13 +167,30 @@ impl ClnClient {
             .write_all(b"\n")
             .await
             .map_err(|e| Error::Custom(format!("write rpc: {e}")))?;
-        let mut reader = tokio::io::BufReader::new(stream);
-        let mut buf = String::new();
-        reader
-            .read_line(&mut buf)
-            .await
-            .map_err(|e| Error::Custom(format!("read rpc: {e}")))?;
-        let parsed: serde_json::Value = serde_json::from_str(&buf)
+        // Read line-by-line, byte at a time (keeps the stream borrowable —
+        // BufReader would consume it), skipping the blank lines CLN frames
+        // responses with. First non-empty line is the JSON-RPC answer.
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            use tokio::io::AsyncReadExt;
+            let n = stream
+                .read(&mut byte)
+                .await
+                .map_err(|e| Error::Custom(format!("read rpc: {e}")))?;
+            if n == 0 {
+                return Err(Error::Custom("read rpc: end of stream".into()));
+            }
+            if byte[0] == b'\n' {
+                if buf.iter().any(|b: &u8| !b.is_ascii_whitespace()) {
+                    break;
+                }
+                buf.clear();
+                continue;
+            }
+            buf.push(byte[0]);
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&buf)
             .map_err(|e| Error::Custom(format!("parse rpc: {e}")))?;
         if let Some(err) = parsed.get("error").filter(|e| !e.is_null()) {
             return Err(Error::Custom(format!("cln {method}: {err}")));
@@ -172,6 +198,43 @@ impl ClnClient {
         serde_json::from_value(parsed["result"].clone())
             .map_err(|e| Error::Custom(format!("decode {method} result: {e}")))
     }
+
+    pub(crate) async fn call<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, Error> {
+        // One request in flight at a time: a stream socket scrambles
+        // interleaved reads, and the parked-connection dance needs it.
+        let mut guard = self.conn.lock().await;
+        let id = {
+            let mut n = self.next_id.lock().expect("id lock");
+            *n += 1;
+            *n
+        };
+        let req =
+            serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params, "id": id});
+        let mut stream = match guard.take() {
+            Some(s) => s,
+            None => self.connect().await?,
+        };
+        match self.round_trip::<T>(&mut stream, &req, method).await {
+            Ok(v) => {
+                *guard = Some(stream);
+                Ok(v)
+            }
+            Err(e) => {
+                drop(stream);
+                let mut fresh = self.connect().await?;
+                let result = self.round_trip::<T>(&mut fresh, &req, method).await;
+                if result.is_ok() {
+                    *guard = Some(fresh);
+                }
+                result.map_err(|retry_err| Error::Custom(format!("{e}; retry: {retry_err}")))
+            }
+        }
+    }
+
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -190,8 +253,7 @@ struct InvoiceRecord {
 
 pub struct LnRail {
     cln: Arc<ClnClient>,
-    rate: Arc<RateCache>,
-    markup_percent: f64,
+    fx: Arc<Fx>,
     invoices: Arc<tokio::sync::RwLock<HashMap<String, InvoiceRecord>>>,
     events: broadcast::Sender<Event>,
 }
@@ -215,19 +277,19 @@ struct ListedInvoicesEntry {
 }
 
 impl LnRail {
-    /// Starts the rail and its settlement poller. `events` is the processor's
-    /// shared channel: invoice settlements are announced as
-    /// `Event::PaymentReceived` with the bare quote id as the lookup id.
-    pub fn start(
-        cln_socket: PathBuf,
+    /// Starts the rail and its settlement poller on a shared socket client.
+    /// `events` is the processor's shared channel: invoice settlements are
+    /// announced as `Event::PaymentReceived` with the bare quote id as the
+    /// lookup id.
+    pub fn start_with_client(
+        cln: Arc<ClnClient>,
         markup_percent: f64,
         rate_url: String,
         events: broadcast::Sender<Event>,
     ) -> Arc<Self> {
         let rail = Arc::new(Self {
-            cln: Arc::new(ClnClient::new(cln_socket)),
-            rate: Arc::new(RateCache::new(rate_url)),
-            markup_percent,
+            cln,
+            fx: Arc::new(Fx::new(rate_url, markup_percent)),
             invoices: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             events,
         });
@@ -304,8 +366,7 @@ impl LnRail {
         unit: &CurrencyUnit,
         description: Option<String>,
     ) -> Result<(String, Option<u64>), Error> {
-        let rate = self.rate.get().await?;
-        let sat = nok_ore_to_sat(amount_ore, rate, self.markup_percent);
+        let sat = self.fx.quote_sat(amount_ore).await?;
         let invoice: InvoiceResult = self
             .cln
             .call(
@@ -327,11 +388,7 @@ impl LnRail {
                 state: InvoiceState::Open,
             },
         );
-        tracing::info!(
-            "ln invoice {quote_id} for {amount_ore} øre ({sat} sat, rate {rate:.0}, \
-             markup {}%)",
-            self.markup_percent
-        );
+        tracing::info!("ln invoice {quote_id} for {amount_ore} øre ({sat} sat)");
         Ok((invoice.bolt11, invoice.expires_at))
     }
 
