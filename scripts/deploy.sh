@@ -13,6 +13,9 @@ cd "$(dirname "$0")/.."
 echo "==> rsync source to ${SERVER}:${REMOTE_DIR}"
 rsync -az --exclude node_modules --exclude target --exclude .git --exclude dist ./ "$SERVER:$REMOTE_DIR/"
 
+echo "==> rsync prod compose to /opt/pecan"
+rsync -az deploy/docker-compose.prod.yml "$SERVER:$COMPOSE_DIR/docker-compose.prod.yml"
+
 echo "==> prune builder cache (disk headroom) and build image"
 ssh "$SERVER" "docker builder prune -af >/dev/null 2>&1 || true; cd $REMOTE_DIR && DOCKER_BUILDKIT=1 docker build -t pecan:nok . 2>&1 | tail -1"
 

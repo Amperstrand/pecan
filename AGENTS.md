@@ -14,12 +14,21 @@ MUST end up as a Playwright test under `web/e2e/` (helpers in
 MUST end up as a script under `scripts/`. Future sessions (and CI) re-run
 these without spending LLM tokens on browser driving.
 
-- Browser wallet tests: `cd web && npx playwright test` (targets prod; admin
-  login + teller match-and-settle happen through the real HTTP API).
+- Browser wallet tests: `scripts/e2e.sh` (fetches the generated admin
+  password from the server and runs Playwright against prod; teller
+  match-and-settle happen through the real HTTP API). The processor
+  generates a RANDOM admin password on first boot and logs it once —
+  `docker logs pecan-pecan-1 | grep 'generated random admin password'`.
 - Unit tests: `cd web && npm test` (vitest). Fast inner loop — handler
   payload shapes, error mappings, and pure utils are pinned here; run these
   BEFORE deploying to iterate on logic without the e2e cycle.
-- Deploy: `scripts/deploy.sh` (rsync → docker build → compose up → verify).
+- Deploy: `scripts/deploy.sh` (rsync source + deploy/docker-compose.prod.yml
+  → docker build → compose up → verify). Fresh-Deploy behavior: empty
+  /opt/pecan-config → random admin password (see above) + headless
+  re-attachment to the mint via the INITIAL_* env vars in the compose. The
+  mint (own compose at /opt/giftcard-mint) needs `cdk-mintd config init
+  --file mint.toml` after its sqlite is wiped, and crash-loops until the
+  processor is listening — start pecan first.
 - Re-vendor the coco fork: `scripts/vendor-coco.sh [version]`.
 - Spec-quote drift: `scripts/spec-quote-check.sh` (greatspectations). Where a
   NUT requirement is implemented, embed the verbatim spec line as a

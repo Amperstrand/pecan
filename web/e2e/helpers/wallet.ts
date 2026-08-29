@@ -5,9 +5,16 @@ import { expect, type Page } from "@playwright/test"
 // ---------------------------------------------------------------------------
 
 export async function apiLogin(page: Page): Promise<void> {
+  const password = process.env.PECAN_ADMIN_PASSWORD
+  if (!password) {
+    throw new Error(
+      "PECAN_ADMIN_PASSWORD is not set — fetch the generated admin password " +
+        "(scripts/e2e.sh does this) before running the suite",
+    )
+  }
   const resp = await page.request.post(`/api/login`, {
-    headers: { "Content-Type": "application/json" },
-    data: { username: "admin", password: "admin" },
+    headers: { 'Content-Type': 'application/json' },
+    data: { username: 'admin', password },
   })
   if (resp.status() !== 200) throw new Error(`admin login failed: ${resp.status()}`)
 }
