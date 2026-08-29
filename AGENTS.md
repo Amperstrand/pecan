@@ -16,6 +16,9 @@ these without spending LLM tokens on browser driving.
 
 - Browser wallet tests: `cd web && npx playwright test` (targets prod; admin
   login + teller match-and-settle happen through the real HTTP API).
+- Unit tests: `cd web && npm test` (vitest). Fast inner loop — handler
+  payload shapes, error mappings, and pure utils are pinned here; run these
+  BEFORE deploying to iterate on logic without the e2e cycle.
 - Deploy: `scripts/deploy.sh` (rsync → docker build → compose up → verify).
 - Re-vendor the coco fork: `scripts/vendor-coco.sh [version]`.
 - Spec-quote drift: `scripts/spec-quote-check.sh` (greatspectations). Where a

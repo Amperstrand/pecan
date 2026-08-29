@@ -16,6 +16,7 @@ import { Separator } from "@/components/ui/separator"
 
 import {
   type DepositQuote,
+  type HistoryRow,
   createDepositQuote,
   createWithdraw,
   getBalanceOre,
@@ -25,15 +26,6 @@ import {
   resumePendingOperations,
 } from "@/lib/coco/coco-wallet"
 import { getCoco } from "@/lib/coco/coco-wallet"
-
-interface HistoryRow {
-  id?: number
-  type: "deposit" | "withdraw"
-  amount_ore: number
-  description: string
-  created_at: number
-  pending?: boolean
-}
 
 type DepositState =
   | { phase: "idle" }
@@ -91,7 +83,7 @@ export function WalletPage() {
       setDepositState({ phase: "pending", quote })
 
       pollRef.current = setInterval(async () => {
-        const done = await pollAndMint(quote.quoteId, quote.amountOre, quote.privkey)
+        const done = await pollAndMint(quote.quoteId)
         if (done) {
           clearInterval(pollRef.current!)
           pollRef.current = null

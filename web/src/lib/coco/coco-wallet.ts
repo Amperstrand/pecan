@@ -19,7 +19,6 @@ export interface DepositQuote {
   quoteId: string
   tail: string
   amountOre: number
-  privkey: string
 }
 
 export interface WithdrawResult {
@@ -33,13 +32,13 @@ const SEED_STORAGE_KEY = "giftcard-coco-seed-v1"
 
 let cocoInstance: Promise<Manager> | null = null
 
-function toHex(bytes: Uint8Array): string {
+export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("")
 }
 
-function fromHex(hex: string): Uint8Array {
+export function fromHex(hex: string): Uint8Array {
   const arr = new Uint8Array(hex.length / 2)
   for (let i = 0; i < hex.length; i += 2) {
     arr[i / 2] = Number.parseInt(hex.slice(i, i + 2), 16)
@@ -75,10 +74,6 @@ export function getCoco(): Promise<Manager> {
   return cocoInstance
 }
 
-export async function getWallet(): Promise<Manager> {
-  return getCoco()
-}
-
 export async function getBalanceOre(): Promise<number> {
   const coco = await getCoco()
   const balances = await coco.wallet.balances.byUnit({ mintUrls: [MINT_URL()] })
@@ -92,7 +87,7 @@ export async function getHistory(limit = 15): Promise<HistoryRow[]> {
   return entries.map(mapHistoryEntry).filter((row): row is HistoryRow => row !== null)
 }
 
-function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
+export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
   const createdAt = entry.createdAt
   if (entry.type === "mint") {
     if (entry.state === "failed") return null
@@ -138,15 +133,10 @@ export async function createDepositQuote(amountKr: number): Promise<DepositQuote
     quoteId: quote.quoteId,
     tail: quote.quoteId.slice(-6).toUpperCase(),
     amountOre,
-    privkey: "",
   }
 }
 
-export async function pollAndMint(
-  quoteId: string,
-  _amountOre: number,
-  _privkey: string,
-): Promise<boolean> {
+export async function pollAndMint(quoteId: string): Promise<boolean> {
   const coco = await getCoco()
   const operations = await coco.ops.mint.listByQuote({
     mintUrl: MINT_URL(),
