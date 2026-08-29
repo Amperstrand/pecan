@@ -3,6 +3,8 @@ import { initializeCoco, type HistoryEntry, type Manager } from "@cashu/coco-cor
 import { IndexedDbRepositories } from "@cashu/coco-indexeddb"
 
 import { MINT_URL, UNIT, type DepositMethod } from "./branch-methods"
+
+export type { DepositMethod }
 import { MeltBranchHandler } from "./melt-branch-handler"
 import { MintBranchHandler } from "./mint-branch-handler"
 

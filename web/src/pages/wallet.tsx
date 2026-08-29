@@ -17,6 +17,7 @@ import { Separator } from "@/components/ui/separator"
 
 import {
   type DepositQuote,
+  type DepositMethod,
   type HistoryRow,
   createDepositQuote,
   createWithdraw,
@@ -32,8 +33,15 @@ type DepositState =
   | { phase: "idle" }
   | { phase: "creating" }
   | { phase: "pending"; quote: DepositQuote }
-  | { phase: "done" }
+  | { phase: "done"; receipt?: DepositReceipt }
   | { phase: "error"; message: string }
+
+interface DepositReceipt {
+  method: DepositMethod
+  amountOre: number
+  sat?: number
+  address?: string
+}
 
 type WithdrawState =
   | { phase: "idle" }
@@ -69,7 +77,6 @@ function OnchainStatus({ address }: { address: string }) {
     let cancelled = false
     const poll = async () => {
       try {
-        // Same-origin proxy through the processor: no external CSP needed.
         const res = await fetch(`/api/onchain-status/${address}`)
         if (!res.ok) return
         const data: {
@@ -98,7 +105,7 @@ function OnchainStatus({ address }: { address: string }) {
           explorer: data.explorer,
         })
       } catch {
-        // esplora unreachable; the mint's own poller still settles the quote
+        // processor unreachable; the mint's own poller still settles
       }
     }
     void poll()
@@ -111,46 +118,112 @@ function OnchainStatus({ address }: { address: string }) {
 
   if (!status) {
     return (
-      <p className="text-xs text-muted-foreground">
-        Waiting for transaction…
-      </p>
+      <div className="grid gap-1.5 rounded-md bg-muted p-3 text-center">
+        <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3 animate-spin" />
+          Waiting for transaction…
+        </div>
+        <p className="text-[10px] text-muted-foreground">
+          Safe to close this page — your deposit will be credited automatically
+        </p>
+      </div>
     )
   }
 
   const required = status.required
   const enough = status.confirmations >= required
+  const steps = ["Detected", `${required} conf`, "Credited"]
+  const currentStep = !status.confirmed ? 0 : enough ? 2 : 1
+
   return (
-    <div className="grid gap-1 rounded-md bg-muted p-2 text-center text-xs">
-      {status.confirmed || status.receivedSat > 0 ? (
-        <>
+    <div className="grid gap-2 rounded-md bg-muted p-3">
+      {/* Progress steps */}
+      <div className="flex items-center justify-between">
+        {steps.map((label, i) => (
+          <div key={label} className="flex items-center">
+            <div
+              className={`flex size-5 items-center justify-center rounded-full text-[9px] font-bold transition-colors ${
+                i < currentStep
+                  ? "bg-green-600 text-white"
+                  : i === currentStep
+                    ? status.confirmed && enough
+                      ? "bg-green-600 text-white"
+                      : "bg-amber-500 text-white"
+                    : "bg-muted-foreground/20 text-muted-foreground"
+              }`}
+            >
+              {i < currentStep || (i === currentStep && enough) ? "✓" : i + 1}
+            </div>
+            {i < steps.length - 1 && (
+              <div
+                className={`mx-1 h-px w-6 transition-colors sm:w-10 ${
+                  i < currentStep ? "bg-green-600" : "bg-muted-foreground/20"
+                }`}
+              />
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center justify-between text-[10px]">
+        {steps.map((label, i) => (
           <span
-            className={`font-medium ${enough ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}`}
+            key={label}
+            className={
+              i === currentStep
+                ? "font-medium text-foreground"
+                : "text-muted-foreground"
+            }
           >
-            {!status.confirmed && "● "}
-            {status.confirmed
-              ? `${enough ? "✓" : ""} ${status.confirmations} of ${required} confirmation${required === 1 ? "" : "s"}`
-              : "Transaction seen in mempool"}
+            {label}
           </span>
-          {!status.confirmed && (
+        ))}
+      </div>
+
+      {/* Detail line */}
+      <div className="text-center text-xs">
+        {!status.confirmed ? (
+          <>
+            <span className="font-medium text-amber-600 dark:text-amber-400">
+              Payment detected in mempool
+            </span>
             <span className="text-muted-foreground">
-              0 of {required} confirmation{required === 1 ? "" : "s"}
+              {" "}· 0 of {required} confirmation{required === 1 ? "" : "s"}
+            </span>
+          </>
+        ) : enough ? (
+          <span className="font-medium text-green-600 dark:text-green-400">
+            Confirmed — crediting your wallet…
+          </span>
+        ) : (
+          <span className="font-medium text-amber-600 dark:text-amber-400">
+            {status.confirmations} of {required} confirmation
+            {required === 1 ? "" : "s"}
+          </span>
+        )}
+      </div>
+      <div className="text-center text-[10px] text-muted-foreground">
+        {status.receivedSat.toLocaleString()} sat received · Bitcoin Signet
+        (test network)
+      </div>
+
+      {/* Over/under payment warnings */}
+      {status.receivedSat > 0 && (
+        <div className="text-center text-[10px]">
+          {status.confirmations >= required && status.receivedSat > 0 && (
+            <span className="text-muted-foreground">
+              Any sats above the quoted amount are kept as network fee
             </span>
           )}
-          <div className="text-[10px] text-muted-foreground">
-            {enough
-              ? "Settling — claiming your ecash…"
-              : `Received ${status.receivedSat.toLocaleString()} sat · ${status.confirmed ? `${required - status.confirmations} more confirmation${required - status.confirmations === 1 ? "" : "s"} needed` : "next signet block confirms"}`}
-          </div>
-        </>
-      ) : (
-        <span className="text-muted-foreground">Waiting for transaction…</span>
+        </div>
       )}
+
+      {/* Explorer link */}
       {status.explorer && (
         <a
           href={`${status.explorer}/address/${address}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-[10px] underline text-muted-foreground hover:text-foreground"
+          className="text-center text-[10px] underline text-muted-foreground hover:text-foreground"
         >
           View on block explorer ↗
         </a>
@@ -276,7 +349,41 @@ export function WalletPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
-          {depositState.phase === "idle" || depositState.phase === "done" ? (
+          {depositState.phase === "done" && depositState.receipt ? (
+            <div className="grid gap-3 rounded-lg border border-green-200 bg-green-50 p-4 text-center dark:border-green-900 dark:bg-green-950">
+              <div className="text-2xl">✓</div>
+              <p className="font-medium text-green-700 dark:text-green-300">
+                Deposit confirmed
+              </p>
+              <p className="text-lg font-bold">
+                +{(depositState.receipt.amountOre / 100).toFixed(2)} kr
+              </p>
+              <div className="text-xs text-muted-foreground">
+                {depositState.receipt.method === "btc" && depositState.receipt.sat && (
+                  <p>{depositState.receipt.sat.toLocaleString()} sat on-chain</p>
+                )}
+                {depositState.receipt.method === "ln" && <p>Lightning payment</p>}
+                {depositState.receipt.method === "branch" && <p>Teller settlement</p>}
+              </div>
+              {depositState.receipt.method === "btc" && depositState.receipt.address && (
+                <a
+                  href={`https://mempool.space/signet/address/${depositState.receipt.address}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[10px] underline text-muted-foreground hover:text-foreground"
+                >
+                  View on block explorer ↗
+                </a>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setDepositState({ phase: "idle" })}
+              >
+                New deposit
+              </Button>
+            </div>
+          ) : depositState.phase === "idle" || depositState.phase === "done" ? (
             <>
               <div className="grid grid-cols-3 gap-1.5 rounded-lg bg-muted p-1 text-sm">
                 <button
