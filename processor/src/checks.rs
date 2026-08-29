@@ -652,7 +652,7 @@ pub async fn run_self_test(
                 ),
                 Some(_) => {
                     if let Err(e) = branch
-                        .mark_failed(&ticket_id, Some(SELF_TEST_NOTE.to_string()))
+                        .mark_failed(&ticket_id, Some(SELF_TEST_NOTE.to_string()), "self-test")
                         .await
                     {
                         tracing::warn!("could not void self-test ticket {ticket_id}: {e:#}");
@@ -706,7 +706,7 @@ pub async fn run_self_test(
                     ),
                     Some(_) => {
                         if let Err(e) = branch
-                            .mark_failed(&ticket_id, Some(SELF_TEST_NOTE.to_string()))
+                            .mark_failed(&ticket_id, Some(SELF_TEST_NOTE.to_string()), "self-test")
                             .await
                         {
                             tracing::warn!("could not void self-test ticket {ticket_id}: {e:#}");

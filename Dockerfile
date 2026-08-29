@@ -18,11 +18,10 @@ COPY web/vendor ./vendor
 # Integrity gate for the vendored coco fork tarballs: a replaced tgz needs no
 # install script — its prebuilt dist/ bundles straight into the served wallet.
 RUN cd vendor && sha256sum -c --strict SHA256SUMS
-# The lockfile is generated on macOS; its optional-dep records miss the linux
-# rolldown native binding (npm/cli#4828), so drop it and resolve fresh.
-# Supply-chain TODO: generate the lockfile on linux and use `npm ci` — fresh
-# resolution lets caret ranges drift between builds (11/29 deps observed).
-RUN --mount=type=cache,target=/root/.npm rm -f package-lock.json && npm install
+# The lockfile is generated on linux (scripts/gen-web-lockfile.sh, run when
+# dependencies change) because macOS npm drops the linux rolldown bindings
+# (npm/cli#4828). `npm ci` pins the tree: no registry drift between builds.
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY web ./
 RUN npm run build
 

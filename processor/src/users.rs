@@ -60,6 +60,11 @@ pub struct UserRecord {
     /// Cleared the first time the user sets their own password.
     #[serde(default)]
     pub must_change_password: bool,
+    /// `"admin"` gates user/settings management; `None` is a plain teller
+    /// who can only match and settle tickets. The seeded account is admin;
+    /// pre-role installs migrate the `admin` username to admin.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Snapshot-safe projection: never carries the hash.
@@ -67,6 +72,7 @@ pub struct UserRecord {
 pub struct PublicUser {
     pub username: String,
     pub created_at: u64,
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -128,7 +134,7 @@ impl UserStore {
             }
         }
 
-        let (users, seeded) = match users {
+        let (mut users, seeded) = match users {
             Some(users) => {
                 if initial_password.is_some() {
                     tracing::info!(
@@ -218,11 +224,20 @@ impl UserStore {
                         password_hash: hash,
                         created_at: unix_now(),
                         must_change_password,
+                        role: Some("admin".into()),
                     },
                 );
                 (users, true)
             }
         };
+
+        // Pre-role installs: the seeded `admin` account predates the role
+        // field; grant it admin so an upgrade never locks out management.
+        if let Some(admin) = users.get_mut(DEMO_USERNAME) {
+            if admin.role.is_none() {
+                admin.role = Some("admin".into());
+            }
+        }
 
         let demo_password_active = users
             .get(DEMO_USERNAME)
@@ -275,8 +290,18 @@ impl UserStore {
             .map(|user| PublicUser {
                 username: user.username.clone(),
                 created_at: user.created_at,
+                role: user.role.clone(),
             })
             .collect()
+    }
+
+    pub async fn is_admin(&self, username: &str) -> bool {
+        self.inner
+            .users
+            .read()
+            .await
+            .get(&normalize_username(username))
+            .is_some_and(|user| user.role.as_deref() == Some("admin"))
     }
 
     pub async fn demo_password_active(&self) -> bool {
@@ -308,6 +333,7 @@ impl UserStore {
             password_hash: hash_password(password),
             created_at: unix_now(),
             must_change_password: false,
+            role: None,
         };
         {
             let mut users = self.inner.users.write().await;
@@ -320,6 +346,7 @@ impl UserStore {
         Ok(PublicUser {
             username: record.username,
             created_at: record.created_at,
+            role: record.role,
         })
     }
 
@@ -429,27 +456,54 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "cdk-branch-users-{name}-{}.json",
+        // Unique directory per test: loads with no initial password write
+        // initial-admin-password.txt next to users.json, and parallel tests
+        // sharing one temp dir would race on that file.
+        let dir = std::env::temp_dir().join(format!(
+            "cdk-branch-users-{name}-{}",
             uuid::Uuid::new_v4()
-        ))
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir.join("users.json")
     }
 
     #[tokio::test]
-    async fn seeds_demo_admin_and_flags_it() {
+    async fn seeds_random_admin_and_persists() {
         let path = temp_path("seed");
+        let secret_path = path.parent().unwrap().join("initial-admin-password.txt");
         let store = UserStore::load(path.clone(), None, None).await.expect("load");
-        assert!(store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
+        // First boot without INITIAL_ADMIN_PASSWORD: a random credential the
+        // demo password must NOT match, persisted to a 0600 file.
+        assert!(!store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
         assert!(!store.verify(DEMO_USERNAME, "wrong").await);
         assert!(!store.verify("nobody", DEMO_PASSWORD).await);
-        assert!(store.demo_password_active().await);
-        assert_eq!(store.list().await.len(), 1);
+        assert!(!store.demo_password_active().await);
+        assert!(!store.must_change_password(DEMO_USERNAME).await);
+        let users = store.list().await;
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, DEMO_USERNAME);
+        assert_eq!(users[0].role.as_deref(), Some("admin"));
+        assert!(store.is_admin(DEMO_USERNAME).await);
+        let secret = tokio::fs::read_to_string(&secret_path).await.expect("secret file");
+        assert!(store.verify(DEMO_USERNAME, secret.trim()).await);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = tokio::fs::metadata(&secret_path)
+                .await
+                .expect("secret metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         // Reload uses the persisted file, not reseeding.
         let reloaded = UserStore::load(path.clone(), None, None)
             .await
             .expect("reload");
-        assert!(reloaded.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
+        assert!(reloaded.verify(DEMO_USERNAME, secret.trim()).await);
+        assert_eq!(reloaded.list().await.len(), 1);
         let _ = tokio::fs::remove_file(&path).await;
+        let _ = tokio::fs::remove_file(&secret_path).await;
     }
 
     #[tokio::test]
@@ -527,17 +581,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn password_change_clears_demo_flag() {
+    async fn password_change_updates_credential_and_keeps_role() {
         let path = temp_path("password");
         let store = UserStore::load(path.clone(), None, None).await.expect("load");
-        assert!(store.demo_password_active().await);
         assert!(store.set_password("admin", "weak", "weak").await.is_err());
         store
             .set_password("admin", "Str0ng-pass-9!", "Str0ng-pass-9!")
             .await
             .expect("change");
         assert!(!store.demo_password_active().await);
+        assert!(!store.verify("admin", DEMO_PASSWORD).await);
         assert!(store.verify("admin", "Str0ng-pass-9!").await);
+        assert!(store.is_admin("admin").await);
         let _ = tokio::fs::remove_file(&path).await;
     }
 
@@ -546,7 +601,10 @@ mod tests {
         let path = temp_path("quarantine");
         tokio::fs::write(&path, b"{ not json").await.expect("write");
         let store = UserStore::load(path.clone(), None, None).await.expect("load");
-        assert!(store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
+        let users = store.list().await;
+        assert_eq!(users.len(), 1, "reseeds a single admin after quarantine");
+        assert_eq!(users[0].role.as_deref(), Some("admin"));
+        assert!(!store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
         let stem = path
             .file_stem()
             .and_then(|n| n.to_str())
@@ -567,7 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_password_seeds_admin_without_demo_flag() {
+    async fn initial_password_seeds_admin_without_forced_change() {
         let path = temp_path("initial");
         let store = UserStore::load(path.clone(), None, Some("installer-secret".into()))
             .await
@@ -575,19 +633,36 @@ mod tests {
         assert!(store.verify(DEMO_USERNAME, "installer-secret").await);
         assert!(!store.verify(DEMO_USERNAME, DEMO_PASSWORD).await);
         assert!(!store.demo_password_active().await);
-        assert!(store.must_change_password(DEMO_USERNAME).await);
+        // The deployer explicitly chose this password: no forced change.
+        assert!(!store.must_change_password(DEMO_USERNAME).await);
+        assert!(store.is_admin(DEMO_USERNAME).await);
         let _ = tokio::fs::remove_file(&path).await;
     }
 
     #[tokio::test]
     async fn forced_change_survives_reload_and_clears_on_set_password() {
         let path = temp_path("must-change");
-        let store = UserStore::load(path.clone(), None, Some("installer-secret".into()))
+        // Seed the flag directly: no current boot path sets it, but the
+        // mechanism (persisted flag gates the console until cleared) must
+        // survive restarts for accounts provisioned with it.
+        let file = UsersFile {
+            version: 1,
+            users: [(
+                DEMO_USERNAME.to_string(),
+                UserRecord {
+                    username: DEMO_USERNAME.to_string(),
+                    password_hash: hash_password("Provisioned-1!"),
+                    created_at: unix_now(),
+                    must_change_password: true,
+                    role: Some("admin".into()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap())
             .await
-            .expect("load");
-        drop(store);
-        // The flag is persisted, not recomputed: a restart before the first
-        // sign-in must still force the change.
+            .expect("write");
         let reloaded = UserStore::load(path.clone(), None, None).await.expect("reload");
         assert!(reloaded.must_change_password(DEMO_USERNAME).await);
         reloaded

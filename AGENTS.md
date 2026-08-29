@@ -54,8 +54,13 @@ these without spending LLM tokens on browser driving.
 
 ## Gotchas
 
-- `Dockerfile` runs `rm -f package-lock.json && npm install` on purpose:
-  the macOS lockfile lacks the linux rolldown native binding (npm/cli#4828).
+- `web/package-lock.json` is LINUX-generated (`scripts/gen-web-lockfile.sh`,
+  run it whenever web/package.json or web/vendor changes): macOS npm drops
+  the linux rolldown bindings (npm/cli#4828) and `npm ci` in the Docker
+  build would fail. After local `npm install`, restore the committed
+  lockfile (`git checkout web/package-lock.json`) before committing.
+- Console roles: `admin` sees the Mint/Access tabs; plain tellers only
+  match/settle. New users are tellers; the seeded account is admin.
 - Custom NUT-05 melt requests to cdk-axum MUST include `method` and
   `request` fields in the body or the mint answers 400 "Invalid payment
   method" (see `melt-branch-handler.ts`).

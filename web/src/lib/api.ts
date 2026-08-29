@@ -118,11 +118,12 @@ export interface CirculationPoint {
 export interface UserEntry {
   username: string
   created_at: number
+  role?: string | null
 }
 
 export interface AppSnapshot {
   now: number
-  session: { username: string; must_change_password: boolean }
+  session: { username: string; must_change_password: boolean; role?: string | null }
   users: UserEntry[]
   demo_password_active: boolean
   password_min_length: number

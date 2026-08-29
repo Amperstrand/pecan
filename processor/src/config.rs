@@ -650,10 +650,16 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     let tmp = path.with_extension("tmp");
     tokio::fs::write(&tmp, bytes)
         .await
         .with_context(|| format!("write {}", tmp.display()))?;
+    // State files carry password hashes and live session ids: 0600 before
+    // the rename lands them at the destination, never group/world-readable.
+    tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+        .await
+        .with_context(|| format!("chmod 600 {}", tmp.display()))?;
     tokio::fs::rename(&tmp, path)
         .await
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
