@@ -2,7 +2,7 @@ import { Amount } from "@cashu/cashu-ts"
 import { initializeCoco, type HistoryEntry, type Manager } from "@cashu/coco-core"
 import { IndexedDbRepositories } from "@cashu/coco-indexeddb"
 
-import { MINT_URL, UNIT } from "./branch-methods"
+import { MINT_URL, UNIT, type DepositMethod } from "./branch-methods"
 import { MeltBranchHandler } from "./melt-branch-handler"
 import { MintBranchHandler } from "./mint-branch-handler"
 
@@ -16,8 +16,11 @@ export interface HistoryRow {
 }
 
 export interface DepositQuote {
+  method: DepositMethod
   quoteId: string
   tail: string
+  /** branch: the MINT- ticket id the teller matches on; ln: the bolt11 invoice. */
+  request: string
   amountOre: number
 }
 
@@ -66,7 +69,8 @@ export function getCoco(): Promise<Manager> {
         seedGetter: () => Promise.resolve(loadSeed()),
       })
       coco.registerMeltMethod("branch", new MeltBranchHandler())
-      coco.registerMintMethod("branch", new MintBranchHandler(coco.keyRingService))
+      coco.registerMintMethod("branch", new MintBranchHandler("branch", coco.keyRingService))
+      coco.registerMintMethod("ln", new MintBranchHandler("ln", coco.keyRingService))
       await coco.mint.addMint(MINT_URL(), { trusted: true })
       return coco
     })()
@@ -111,13 +115,16 @@ export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
   return null
 }
 
-export async function createDepositQuote(amountKr: number): Promise<DepositQuote> {
+export async function createDepositQuote(
+  amountKr: number,
+  method: DepositMethod = "branch",
+): Promise<DepositQuote> {
   const coco = await getCoco()
   const amountOre = Math.round(amountKr * 100)
 
   const quote = await coco.quotes.mint.create({
     mintUrl: MINT_URL(),
-    method: "branch",
+    method,
     amount: amountOre,
     unit: UNIT,
     description: "Wallet deposit",
@@ -130,8 +137,10 @@ export async function createDepositQuote(amountKr: number): Promise<DepositQuote
   })
 
   return {
+    method,
     quoteId: quote.quoteId,
     tail: quote.quoteId.slice(-6).toUpperCase(),
+    request: quote.request,
     amountOre,
   }
 }

@@ -19,6 +19,7 @@
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -34,15 +35,20 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::config::MELT_TICKET_TTL_SECS;
+use crate::ln::LnRail;
 use crate::state::{BranchState, Ticket};
 
-/// Single-method, single-unit payment backend for one attached mint.
+/// Single-unit payment processor for one attached mint; routes mint quotes
+/// per method: the teller rail (`branch`) and, when configured, the
+/// lightning rail (`ln`). Melt quotes exist for `branch` only.
 pub struct BranchBackend {
     state: BranchState,
     /// The one unit this install serves. `None` until the operator completes
     /// setup in the console; updated live (no restart) when setup changes.
     unit: RwLock<Option<CurrencyUnit>>,
     method: String,
+    /// Lightning-minting rail; `None` unless CDK_BRANCH_PROCESSOR_LN=true.
+    ln: Option<Arc<LnRail>>,
     stream_active: AtomicBool,
     /// Unix seconds of the first `wait_payment_event` attach since this
     /// process started; 0 = never. Never cleared on client disconnect — it
@@ -63,11 +69,17 @@ impl std::fmt::Debug for BranchBackend {
 }
 
 impl BranchBackend {
-    pub fn new(state: BranchState, unit: Option<CurrencyUnit>, method: String) -> Self {
+    pub fn new(
+        state: BranchState,
+        unit: Option<CurrencyUnit>,
+        method: String,
+        ln: Option<Arc<LnRail>>,
+    ) -> Self {
         Self {
             state,
             unit: RwLock::new(unit),
             method,
+            ln,
             stream_active: AtomicBool::new(false),
             stream_attached_at: AtomicU64::new(0),
             last_settings_at: AtomicU64::new(0),
@@ -120,6 +132,58 @@ impl BranchBackend {
         }
         Ok(())
     }
+
+    /// True when the quote asks for the lightning rail: either the (future,
+    /// PR #2275) method field says so, or today's wallet sets `rail: "ln"`
+    /// in the request's flattened extra fields.
+    fn wants_ln(opts: &cdk_common::payment::CustomIncomingPaymentOptions) -> bool {
+        opts.method.trim() == "ln" || extra_requests_ln(opts.extra_json.as_deref())
+    }
+
+    /// Lightning rail: create a real CLN invoice for the quote. The bolt11
+    /// string is the `request` the wallet renders; settlement is announced
+    /// by the rail's poller over the shared event channel.
+    async fn ln_create(
+        &self,
+        opts: cdk_common::payment::CustomIncomingPaymentOptions,
+    ) -> Result<CreateIncomingPaymentResponse, Error> {
+        let amount = opts
+            .amount
+            .as_ref()
+            .ok_or_else(|| Error::Custom("an amount is required".into()))?;
+        self.check_unit(amount.unit())?;
+        if amount.value() == 0 {
+            return Err(Error::Custom("amount must be greater than zero".into()));
+        }
+        // Same NUT-20 lock policy as the teller rail: the lock is what stops
+        // a quote-id eavesdropper from front-running after the invoice is
+        // paid.
+        if opts.pubkey.is_none() {
+            return Err(Error::Custom(
+                "ln mint quotes must be locked to a wallet key (NUT-20): create the quote \
+                 with a pubkey"
+                    .into(),
+            ));
+        }
+        let rail = self.ln.as_ref().expect("caller checked the rail is enabled");
+        let quote_id = opts.quote_id.to_string();
+        let (bolt11, expires_at) = match rail
+            .create_invoice(&quote_id, amount.value(), amount.unit(), opts.description.clone())
+            .await
+        {
+            Ok(created) => created,
+            Err(e) => {
+                tracing::warn!("ln invoice creation failed for {quote_id}: {e}");
+                return Err(e);
+            }
+        };
+        Ok(CreateIncomingPaymentResponse {
+            request_lookup_id: PaymentIdentifier::CustomId(quote_id),
+            request: bolt11,
+            expiry: expires_at.or(opts.unix_expiry),
+            extra_json: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -141,6 +205,9 @@ impl MintPayment for BranchBackend {
         let unit = self.configured_unit()?;
         let mut custom = std::collections::HashMap::new();
         custom.insert(self.method.clone(), "{}".to_string());
+        if self.ln.is_some() {
+            custom.insert("ln".to_string(), "{}".to_string());
+        }
         Ok(SettingsResponse {
             // The stock boot handshake compares this against the mint's
             // `[[payment_backend]] unit` (strict, modulo sat/msat) — one unit
@@ -160,9 +227,20 @@ impl MintPayment for BranchBackend {
     ) -> Result<CreateIncomingPaymentResponse, Self::Err> {
         match options {
             IncomingPaymentOptions::Custom(opts) => {
-                // The proto still omits the method name (server-side sets "").
-                // Whatever method the mint advertises that points at us IS our
-                // method — see `get_settings` where we declare it.
+                // The gRPC proto cannot carry the method name yet (field 5 is
+                // reserved for the in-flight upstream PR #2275), so the mint
+                // drops it. Until then the wallet tags the rail in the
+                // request's flattened extra fields (`{"rail":"ln"}`) — the
+                // proto's documented pass-through for method-specific data.
+                // Absent tag or empty method = the teller rail (back-compat).
+                if Self::wants_ln(&opts) {
+                    return match &self.ln {
+                        Some(_) => self.ln_create(*opts).await,
+                        None => Err(Error::Custom(
+                            "ln rail is not enabled on this processor".into(),
+                        )),
+                    };
+                }
                 let amount = opts
                     .amount
                     .as_ref()
@@ -220,6 +298,10 @@ impl MintPayment for BranchBackend {
         self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
+                // One-way mint: the ln rail never melts.
+                if opts.method.trim() == "ln" {
+                    return Err(Error::UnsupportedPaymentOption);
+                }
                 // The wallet declares the payout amount in the melt quote
                 // request's `amount` field; the mint requires proofs covering
                 // exactly what we echo back, so misdeclaring cannot profit.
@@ -273,6 +355,10 @@ impl MintPayment for BranchBackend {
         self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
+                // One-way mint: the ln rail never melts.
+                if opts.method.trim() == "ln" {
+                    return Err(Error::UnsupportedPaymentOption);
+                }
                 // The wallet has locked its proofs at the mint; flip the ticket
                 // to Pending so the operator may dispense cash. The quote id is
                 // the correlation key set during get_payment_quote.
@@ -342,6 +428,25 @@ impl MintPayment for BranchBackend {
         &self,
         payment_identifier: &PaymentIdentifier,
     ) -> Result<Vec<WaitPaymentResponse>, Self::Err> {
+        // Ticket ids carry MINT-/MELT- prefixes; the ln rail keys its
+        // invoices by the bare quote id.
+        if let PaymentIdentifier::CustomId(id) = payment_identifier {
+            if !id.starts_with("MINT-") && !id.starts_with("MELT-") {
+                if let Some(rail) = &self.ln {
+                    return Ok(rail
+                        .paid_amount(id)
+                        .await
+                        .map(|(ore, unit)| {
+                            vec![WaitPaymentResponse {
+                                payment_identifier: PaymentIdentifier::CustomId(id.clone()),
+                                payment_amount: Amount::new(ore, unit),
+                                payment_id: id.clone(),
+                            }]
+                        })
+                        .unwrap_or_default());
+                }
+            }
+        }
         Ok(self.state.lookup_incoming(payment_identifier).await)
     }
 
@@ -358,10 +463,38 @@ impl MintPayment for BranchBackend {
     }
 }
 
+/// The wallet's rail tag rides in the flattened extra fields (`{"rail":"ln"}`)
+/// because the payment-processor proto cannot carry the method name yet
+/// (upstream PR #2275). Absent or unparseable extra means the teller rail.
+fn extra_requests_ln(extra_json: Option<&str>) -> bool {
+    extra_json
+        .and_then(|extra| serde_json::from_str::<serde_json::Value>(extra).ok())
+        .is_some_and(|extra| extra.get("rail") == Some(&serde_json::json!("ln")))
+}
+
 fn unix_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extra_requests_ln;
+
+    #[test]
+    fn rail_tag_routes_only_on_ln() {
+        assert!(extra_requests_ln(Some(r#"{"rail":"ln"}"#)));
+        assert!(extra_requests_ln(Some(
+            r#"{"rail":"ln","note":"anything else flattened in"}"#
+        )));
+        assert!(!extra_requests_ln(Some(r#"{"rail":"branch"}"#)));
+        assert!(!extra_requests_ln(None));
+        // Malformed extra never routes to lightning — the teller rail is
+        // the safe default.
+        assert!(!extra_requests_ln(Some("not json")));
+        assert!(!extra_requests_ln(Some(r#"{"other":true}"#)));
+    }
 }

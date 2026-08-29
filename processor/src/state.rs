@@ -568,6 +568,12 @@ impl BranchState {
         self.inner.event_tx.subscribe()
     }
 
+    /// Sender half for rails that settle outside the ticket store (e.g. the
+    /// ln rail's invoice poller announces PaymentReceived here).
+    pub fn event_sender(&self) -> broadcast::Sender<Event> {
+        self.inner.event_tx.clone()
+    }
+
     pub fn subscribe_ui_changes(&self) -> broadcast::Receiver<()> {
         self.inner.ui_changed_tx.subscribe()
     }

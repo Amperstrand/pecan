@@ -28,15 +28,15 @@ function remoteResponse(over: Partial<BranchMintQuoteResponse> = {}): BranchMint
   } as BranchMintQuoteResponse
 }
 
-function mintCtx(
-  createMintQuote: CreateMintQuoteContext<"branch">["wallet"]["createMintQuote"],
-  createQuoteData: CreateMintQuoteContext<"branch">["createQuoteData"],
-): CreateMintQuoteContext<"branch"> {
+function mintCtx<M extends "branch" | "ln">(
+  createMintQuote: CreateMintQuoteContext<M>["wallet"]["createMintQuote"],
+  createQuoteData: CreateMintQuoteContext<M>["createQuoteData"],
+): CreateMintQuoteContext<M> {
   return {
     mintUrl: "https://mint.example",
     createQuoteData,
     wallet: { createMintQuote },
-  } as unknown as CreateMintQuoteContext<"branch">
+  } as unknown as CreateMintQuoteContext<M>
 }
 
 function lockedKeyRing() {
@@ -54,7 +54,7 @@ describe("MintBranchHandler.createQuote", () => {
     )
     const keyRing = lockedKeyRing()
 
-    const quote = await new MintBranchHandler(keyRing).createQuote(
+    const quote = await new MintBranchHandler("branch", keyRing).createQuote(
       mintCtx(createMintQuote, {
         amount: { amount: Amount.from(500), unit: "nok" },
         description: "Wallet deposit",
@@ -77,7 +77,7 @@ describe("MintBranchHandler.createQuote", () => {
       async (_method: string, _payload: Record<string, unknown>): Promise<never> =>
         remoteResponse({ pubkey: undefined }) as never,
     )
-    await new MintBranchHandler(lockedKeyRing()).createQuote(
+    await new MintBranchHandler("branch", lockedKeyRing()).createQuote(
       mintCtx(createMintQuote, {
         amount: { amount: Amount.from(500), unit: "nok" },
       }),
@@ -86,13 +86,33 @@ describe("MintBranchHandler.createQuote", () => {
     expect(createMintQuote.mock.calls[0][1]).not.toHaveProperty("pubkey")
   })
 
+  it("tags ln quotes with the rail marker the processor routes on", async () => {
+    const createMintQuote = vi.fn(
+      async (_method: string, _payload: Record<string, unknown>): Promise<never> =>
+        remoteResponse() as never,
+    )
+    await new MintBranchHandler("ln", lockedKeyRing()).createQuote(
+      mintCtx(createMintQuote, {
+        amount: { amount: Amount.from(500), unit: "nok" },
+        locked: true,
+      }),
+    )
+
+    expect(createMintQuote).toHaveBeenCalledWith("ln", {
+      amount: Amount.from(500),
+      unit: "nok",
+      pubkey: LOCK_PUBKEY,
+      rail: "ln",
+    })
+  })
+
   it("rejects a mint response that dropped the requested NUT-20 lock", async () => {
     const createMintQuote = vi.fn(
       async (_method: string, _payload: Record<string, unknown>): Promise<never> =>
         remoteResponse({ pubkey: undefined }) as never,
     )
     await expect(
-      new MintBranchHandler(lockedKeyRing()).createQuote(
+      new MintBranchHandler("branch", lockedKeyRing()).createQuote(
         mintCtx(createMintQuote, {
           amount: { amount: Amount.from(500), unit: "nok" },
           locked: true,
@@ -106,7 +126,7 @@ describe("MintBranchHandler.createQuote", () => {
       async (_method: string, _payload: Record<string, unknown>): Promise<never> =>
         remoteResponse() as never,
     )
-    const quote: MintQuote<"branch"> = await new MintBranchHandler(lockedKeyRing()).createQuote(
+    const quote: MintQuote<"branch"> = await new MintBranchHandler("branch", lockedKeyRing()).createQuote(
       mintCtx(createMintQuote, {
         amount: { amount: Amount.from(500), unit: "nok" },
         locked: true,

@@ -42,9 +42,22 @@ declare module "@cashu/coco-core/operations/mint" {
       remoteState: "UNPAID" | "PAID" | "ISSUED"
       quote: BranchMintQuoteResponse
     }
+    ln: {
+      methodData: Record<string, never>
+      createQuoteData: {
+        amount: UnitAmount
+        description?: string
+        locked?: boolean
+      }
+      quoteData: { amount: Amount; request: string }
+      remoteState: "UNPAID" | "PAID" | "ISSUED"
+      quote: BranchMintQuoteResponse
+    }
   }
 }
 
 export const BRANCH_METHOD = "branch" as const
+export const LN_METHOD = "ln" as const
+export type DepositMethod = "branch" | "ln"
 export const MINT_URL = (): string => window.location.origin
 export const UNIT = "nok"

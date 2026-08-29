@@ -3,6 +3,7 @@ import {
   apiLogin,
   expectNoWalletErrors,
   matchAndSettle,
+  payLightningInvoice,
   readBalance,
   readTellerCode,
   readWalletDb,
@@ -71,6 +72,34 @@ test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", ()
     const db = await readWalletDb(page)
     expect(db.proofCount).toBeGreaterThan(0)
     expect(db.spendableSum).toBeGreaterThanOrEqual((before + DEPOSIT_KR) * 100)
+  })
+
+  test("lightning deposit: invoice → paid by signet node → auto-claim", async () => {
+    const page = sharedPage!
+    await page.goto(WALLET)
+
+    const before = await readBalance(page)
+
+    await page.getByRole("button", { name: "Lightning", exact: true }).click()
+    await page.getByPlaceholder("5.00").fill("1")
+    await page.getByRole("button", { name: "Create lightning invoice" }).click()
+
+    const invoiceBox = page.locator(
+      'p.font-mono:has-text("lntbs")',
+    )
+    await invoiceBox.waitFor({ state: "visible", timeout: 30_000 })
+    const invoice = (await invoiceBox.textContent())?.trim() ?? ""
+    expect(invoice.startsWith("lntbs")).toBeTruthy()
+
+    const preimage = payLightningInvoice(invoice)
+    expect(preimage).toHaveLength(64)
+
+    await waitForBalance(page, before + 1, 60_000)
+    await waitForDepositFormReset(page, "Create lightning invoice")
+    expectNoWalletErrors(walletErrors)
+
+    const db = await readWalletDb(page)
+    expect(db.spendableSum).toBeGreaterThanOrEqual((before + 1) * 100)
   })
 
   test("withdraw: melt → teller payout → finalized, proofs released", async () => {

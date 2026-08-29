@@ -21,6 +21,7 @@ mod backends;
 mod checks;
 mod clients;
 mod config;
+mod ln;
 mod sessions;
 mod state;
 mod users;
@@ -274,10 +275,43 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Optional lightning-minting rail alongside the teller rail: real CLN
+    // bolt11 invoices, NOK/BTC converted in-process (cdk has no price
+    // service) with a markup. One processor advertises both methods.
+    let ln_rail = match std::env::var("CDK_BRANCH_PROCESSOR_LN") {
+        Ok(v) if v == "true" || v == "1" => {
+            let socket = std::env::var("CDK_BRANCH_PROCESSOR_CLN_SOCKET")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/run/lightning-rpc"));
+            let markup: f64 = std::env::var("CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(10.0);
+            let rate_url = std::env::var("CDK_BRANCH_PROCESSOR_LN_RATE_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "https://api.yadio.io/rate/BTC/NOK".into());
+            let rail = ln::LnRail::start(
+                socket.clone(),
+                markup,
+                rate_url,
+                branch.event_sender(),
+            );
+            tracing::info!(
+                "ln rail enabled (cln socket {}, markup {markup}%)",
+                socket.display()
+            );
+            Some(rail)
+        }
+        _ => None,
+    };
+
     let backend = Arc::new(BranchBackend::new(
         branch.clone(),
         unit,
         app_config.method.clone(),
+        ln_rail,
     ));
     let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
         .map_err(|e| anyhow!("payment processor server init: {e}"))?;

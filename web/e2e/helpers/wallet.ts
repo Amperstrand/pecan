@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process"
 import { expect, type Page } from "@playwright/test"
 
 // ---------------------------------------------------------------------------
@@ -67,10 +68,33 @@ export async function readTellerCode(page: Page): Promise<string> {
   return text
 }
 
-export async function waitForDepositFormReset(page: Page): Promise<void> {
+export async function waitForDepositFormReset(
+  page: Page,
+  buttonName = "Create deposit quote",
+): Promise<void> {
   await page
-    .getByRole("button", { name: "Create deposit quote" })
+    .getByRole("button", { name: buttonName })
     .waitFor({ state: "visible", timeout: 45_000 })
+}
+
+/**
+ * Pays a lightning invoice from the lab's signet CLN node (simulated rail —
+ * no real money moves). Returns the payment preimage.
+ */
+export function payLightningInvoice(invoice: string): string {
+  let out: string
+  try {
+    out = execSync(
+      `ssh root@46.224.104.12 "docker exec cln-swap-signet lightning-cli --network=signet pay ${invoice}"`,
+      { timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString()
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
+    throw new Error(`lightning pay failed: ${stderr.slice(0, 300)}`)
+  }
+  const match = out.match(/"payment_preimage":\s*"([0-9a-f]+)"/)
+  if (!match) throw new Error(`payment did not complete: ${out.slice(0, 300)}`)
+  return match[1]
 }
 
 // ---------------------------------------------------------------------------

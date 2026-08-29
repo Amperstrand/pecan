@@ -45,6 +45,7 @@ export function WalletPage() {
   const [balance, setBalance] = useState<number | null>(null)
   const [history, setHistory] = useState<HistoryRow[]>([])
   const [depositAmount, setDepositAmount] = useState("")
+  const [depositMethod, setDepositMethod] = useState<"branch" | "ln">("branch")
   const [withdrawAmount, setWithdrawAmount] = useState("")
   const [withdrawRecipient, setWithdrawRecipient] = useState("")
   const [depositState, setDepositState] = useState<DepositState>({ phase: "idle" })
@@ -79,7 +80,7 @@ export function WalletPage() {
     if (!amount || amount < 1 || amount > 1000) return
     setDepositState({ phase: "creating" })
     try {
-      const quote = await createDepositQuote(amount)
+      const quote = await createDepositQuote(amount, depositMethod)
       setDepositState({ phase: "pending", quote })
 
       pollRef.current = setInterval(async () => {
@@ -153,12 +154,28 @@ export function WalletPage() {
             <ArrowDown className="size-4" /> Deposit
           </CardTitle>
           <CardDescription>
-            Create a quote, give the code to the teller, receive ecash.
+            Mint ecash at the counter (teller) or over lightning.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
           {depositState.phase === "idle" || depositState.phase === "done" ? (
             <>
+              <div className="grid grid-cols-2 gap-1.5 rounded-lg bg-muted p-1 text-sm">
+                <button
+                  type="button"
+                  onClick={() => setDepositMethod("branch")}
+                  className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "branch" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
+                >
+                  Teller
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDepositMethod("ln")}
+                  className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "ln" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
+                >
+                  Lightning
+                </button>
+              </div>
               <div className="grid gap-1.5">
                 <Label htmlFor="dep-amt">Amount (kr)</Label>
                 <Input
@@ -173,7 +190,11 @@ export function WalletPage() {
                 />
               </div>
               <Button onClick={startDeposit} disabled={!depositAmount}>
-                {depositState.phase === "done" ? "✓ Deposited" : "Create deposit quote"}
+                {depositState.phase === "done"
+                  ? "✓ Deposited"
+                  : depositMethod === "ln"
+                    ? "Create lightning invoice"
+                    : "Create deposit quote"}
               </Button>
             </>
           ) : depositState.phase === "creating" ? (
@@ -181,21 +202,46 @@ export function WalletPage() {
               <Loader2 className="size-4 animate-spin" /> Creating quote…
             </div>
           ) : depositState.phase === "pending" ? (
-            <div className="grid gap-3 text-center">
-              <p className="text-sm text-muted-foreground">
-                Give this code to the teller:
-              </p>
-              <p className="font-mono text-3xl font-bold tracking-widest select-all">
-                {depositState.quote.tail}
-              </p>
-              <p className="text-sm text-muted-foreground">
-                {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
-              </p>
-              <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="size-3 animate-spin" />
-                Polling for payment
+            depositState.quote.method === "ln" ? (
+              <div className="grid gap-3 text-center">
+                <p className="text-sm text-muted-foreground">
+                  Pay this lightning invoice:
+                </p>
+                <p className="max-h-24 overflow-y-auto break-all rounded-md bg-muted p-2 font-mono text-xs select-all">
+                  {depositState.quote.request}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => navigator.clipboard.writeText(depositState.quote.request)}
+                >
+                  Copy invoice
+                </Button>
+                <p className="text-sm text-muted-foreground">
+                  {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
+                </p>
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Polling for payment
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="grid gap-3 text-center">
+                <p className="text-sm text-muted-foreground">
+                  Give this code to the teller:
+                </p>
+                <p className="font-mono text-3xl font-bold tracking-widest select-all">
+                  {depositState.quote.tail}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
+                </p>
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Polling for payment
+                </div>
+              </div>
+            )
           ) : (
             <p className="text-sm text-destructive">{depositState.message}</p>
           )}

@@ -22,6 +22,11 @@ ssh "$SERVER" "docker builder prune -af >/dev/null 2>&1 || true; cd $REMOTE_DIR 
 echo "==> recreate containers"
 ssh "$SERVER" "cd $COMPOSE_DIR && docker compose -f docker-compose.prod.yml up -d --force-recreate 2>&1 | tail -1"
 
+# The mint reads the processor's get_settings (rails, units) only at boot and
+# holds a gRPC connection; recreating pecan orphans that state — restart it
+# or quotes fail with "Invalid payment method".
+ssh "$SERVER" "docker restart giftcard-mint-mintd-1 >/dev/null 2>&1 && echo 'mint restarted' || echo 'WARN: mint restart failed — run it manually'"
+
 sleep 4
 BUNDLE=$(curl -s "$URL/console/wallet" | grep -o 'index-[^"]*\.js' | head -1)
 if [ -z "$BUNDLE" ]; then

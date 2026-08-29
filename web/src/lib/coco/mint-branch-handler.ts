@@ -28,42 +28,47 @@ interface BranchKeyRing {
   getMintQuoteKeyPair(publicKeyHex: string): Promise<Keypair | null>
 }
 
-export class MintBranchHandler implements MintMethodHandler<"branch"> {
-  constructor(private readonly keyRing: BranchKeyRing) {}
+export class MintBranchHandler<M extends "branch" | "ln"> implements MintMethodHandler<M> {
+  constructor(private readonly method: M, private readonly keyRing: BranchKeyRing) {}
 
-  async createQuote(ctx: CreateMintQuoteContext<"branch">): Promise<MintQuote<"branch">> {
+  async createQuote(ctx: CreateMintQuoteContext<M>): Promise<MintQuote<M>> {
     // NUT #4: `amount`, `description` and `pubkey` are common optional fields; method-specific NUTs make them required or ignore them as needed (e.g. NUT-23 requires `amount`, NUT-20 defines `pubkey`).
     // NUT #20: > **Privacy:** To prevent the mint from being able to link multiple mint quotes, wallets **SHOULD** generate a unique public key for each mint quote request.
     const { amount, description, locked } = ctx.createQuoteData
     const keypair = locked === true ? await this.keyRing.generateMintQuoteKeyPair() : null
     const lockPubkey = keypair !== null ? keypair.publicKeyHex : undefined
 
-    const remote = await ctx.wallet.createMintQuote<BranchMintQuoteResponse>("branch", {
+    const remote = await ctx.wallet.createMintQuote<BranchMintQuoteResponse>(this.method, {
       amount: amount.amount,
       unit: amount.unit,
       ...(description !== undefined ? { description } : {}),
       ...(lockPubkey !== undefined ? { pubkey: lockPubkey } : {}),
+      // The payment-processor gRPC proto cannot carry the method name yet
+      // (upstream PR #2275 in flight), so the mint drops it; flattened extra
+      // fields are the documented pass-through and reach the processor,
+      // which routes the rail on this tag.
+      ...(this.method === "ln" ? { rail: "ln" } : {}),
     })
     if (lockPubkey !== undefined && remote.pubkey !== lockPubkey) {
-      throw new Error("Mint returned a branch quote without the requested NUT-20 lock")
+      throw new Error("Mint returned a quote without the requested NUT-20 lock")
     }
     return this.toCanonical(ctx.mintUrl, remote, amount.unit)
   }
 
   async fetchRemoteQuote(
-    ctx: FetchRemoteMintQuoteContext<"branch">,
-  ): Promise<MintQuote<"branch">> {
+    ctx: FetchRemoteMintQuoteContext<M>,
+  ): Promise<MintQuote<M>> {
     const remote = await ctx.mintAdapter.checkMintQuote(
       ctx.quote.mintUrl,
-      "branch",
+      this.method,
       ctx.quote.quoteId,
     )
     return this.toCanonical(ctx.quote.mintUrl, remote, ctx.quote.unit)
   }
 
   async prepare(
-    ctx: PrepareContext<"branch">,
-  ): Promise<PendingMintOperation<"branch"> & { method: "branch"; methodData: Record<string, never> }> {
+    ctx: PrepareContext<M>,
+  ): Promise<PendingMintOperation<M> & { method: M; methodData: Record<string, never> }> {
     const quote = ctx.importedQuote
     if (!quote) {
       throw new Error(`Mint quote ${ctx.operation.quoteId ?? "(missing)"} was not provided`)
@@ -98,12 +103,12 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
     }
   }
 
-  async execute(ctx: ExecuteContext<"branch">): Promise<MintExecutionResult> {
+  async execute(ctx: ExecuteContext<M>): Promise<MintExecutionResult> {
     const outputData = deserializeOutputData(ctx.operation.outputData)
     const signingOptions = await this.getSigningOptions(ctx.operation.pubkey)
     try {
       const proofs = await ctx.wallet.mintProofs(
-        "branch",
+        this.method,
         ctx.operation.amount,
         { quote: ctx.operation.quoteId },
         signingOptions,
@@ -118,11 +123,11 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
     }
   }
 
-  async recoverExecuting(ctx: RecoverExecutingContext<"branch">): Promise<RecoverExecutingResult> {
+  async recoverExecuting(ctx: RecoverExecutingContext<M>): Promise<RecoverExecutingResult> {
     const { mintUrl, quoteId } = ctx.operation
     let remote: BranchMintQuoteResponse
     try {
-      remote = await ctx.mintAdapter.checkMintQuote(mintUrl, "branch", quoteId)
+      remote = await ctx.mintAdapter.checkMintQuote(mintUrl, this.method, quoteId)
     } catch (error) {
       return {
         status: "PENDING",
@@ -154,7 +159,7 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
       const outputData = deserializeOutputData(ctx.operation.outputData)
       try {
         const proofs = await ctx.wallet.mintProofs(
-          "branch",
+          this.method,
           ctx.operation.amount,
           { quote: quoteId },
           signingOptions,
@@ -180,11 +185,11 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
   }
 
   async checkPending(
-    ctx: PendingContext<"branch">,
-  ): Promise<PendingMintObservationResult<"branch">> {
+    ctx: PendingContext<M>,
+  ): Promise<PendingMintObservationResult<M>> {
     const remote = await ctx.mintAdapter.checkMintQuote(
       ctx.operation.mintUrl,
-      "branch",
+      this.method,
       ctx.operation.quoteId,
     )
     return {
@@ -209,13 +214,13 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
     mintUrl: string,
     remote: BranchMintQuoteResponse,
     unit: string,
-  ): MintQuote<"branch"> {
+  ): MintQuote<M> {
     const now = Date.now()
     const amountPaid = Amount.from(remote.amount_paid)
     const amountIssued = Amount.from(remote.amount_issued)
     return {
       mintUrl,
-      method: "branch",
+      method: this.method,
       quoteId: remote.quote,
       quote: remote.quote,
       request: remote.request,
@@ -231,6 +236,6 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
       quoteData: { amount: Amount.from(remote.amount ?? 0), request: remote.request },
       createdAt: now,
       updatedAt: now,
-    }
+    } as MintQuote<M>
   }
 }

@@ -3,8 +3,18 @@
 Cashu mint at https://giftcard.cashu.exchange (inr2, 46.224.104.12) running:
 `giftcard-mint-mintd-1` (cdk-mintd 0.18.0-rc.0, :8089), `pecan-pecan-1`
 (Rust teller/processor + embedded web dist, :50054/:9091), `pecan-sandbox-1`,
-caddy :443. Payment method is the custom `branch` method (manual teller
-settlement); unit `nok`; amounts in øre internally.
+caddy :443. Unit `nok`; amounts in øre internally.
+
+Two minting rails, ONE processor (cdk-mintd allows a single gRPC processor;
+methods come from its get_settings): `branch` (teller code at the counter)
+and `ln` (real bolt11 invoice on the signet CLN node `cln-clboss-signet`,
+NOK→sat converted in pecan from a public rate + 10% markup). Melting is
+teller-only — the mint is one-way by construction. The payment-processor
+proto cannot carry the method name yet (upstream PR #2275), so the wallet
+tags the rail in the flattened extra fields (`{"rail":"ln"}`) and the
+processor routes on it. See docs/lightning-mint.md. NOTE: the mint must be
+restarted after any pecan recreate (deploy.sh does this) or quotes fail
+with "Invalid payment method".
 
 ## Rule: persist verification as automated tests and tooling
 
