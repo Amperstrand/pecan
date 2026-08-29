@@ -17,7 +17,7 @@ services:
     command: ["cdk-branch-processor"]
     network_mode: host
     environment:
-      RUST_LOG: "debug,cdk_payment_processor=trace"
+      RUST_LOG: "info,cdk_payment_processor=info"
       CDK_BRANCH_PROCESSOR_WORK_DIR: /var/lib/cdk-branch-processor
       CDK_BRANCH_PROCESSOR_CONFIG_DIR: /var/lib/pecan/config
       CDK_BRANCH_PROCESSOR_GRPC_ADDR: "127.0.0.1"
@@ -27,6 +27,11 @@ services:
       CDK_BRANCH_PROCESSOR_INITIAL_UNIT: "nok"
       CDK_BRANCH_PROCESSOR_INITIAL_MINT_URL: "http://127.0.0.1:8089"
       CDK_BRANCH_PROCESSOR_INITIAL_ADVERTISED_GRPC: "127.0.0.1:50054"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /opt/pecan-data:/var/lib/cdk-branch-processor
       - /opt/pecan-config:/var/lib/pecan/config

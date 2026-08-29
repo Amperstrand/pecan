@@ -175,10 +175,35 @@ impl UserStore {
                             .take(20)
                             .map(char::from)
                             .collect();
-                        tracing::warn!(
-                            "no password configured — generated random admin password: {}",
-                            random
-                        );
+                        // Persist the credential on the config volume instead of
+                        // stdout logs: container log lines do not survive
+                        // `compose up --force-recreate`, and docker logs are
+                        // readable by the whole docker group (CWE-532).
+                        let secret_path = path
+                            .parent()
+                            .map(|dir| dir.join("initial-admin-password.txt"))
+                            .context("users.json path has no parent directory")?;
+                        let written = std::fs::write(&secret_path, format!("{random}\n"))
+                            .and_then(|()| {
+                                use std::os::unix::fs::PermissionsExt;
+                                std::fs::set_permissions(
+                                    &secret_path,
+                                    std::fs::Permissions::from_mode(0o600),
+                                )
+                            });
+                        match written {
+                            Ok(()) => tracing::warn!(
+                                "no password configured — generated random admin password; \
+                                 saved to {} (mode 0600). Delete the file after first login.",
+                                secret_path.display()
+                            ),
+                            Err(err) => tracing::warn!(
+                                "no password configured — generated random admin password: \
+                                 {random} (could not persist to {}: {err}; this line is the \
+                                 only record — logs do not survive container recreation)",
+                                secret_path.display()
+                            ),
+                        }
                         tracing::info!(
                             "set CDK_BRANCH_PROCESSOR_INITIAL_ADMIN_PASSWORD to override"
                         );

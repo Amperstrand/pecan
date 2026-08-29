@@ -11,6 +11,7 @@
 //! without a restart.
 
 use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -640,15 +641,67 @@ fn circulation_points(tickets: &[Ticket]) -> Vec<CirculationPoint> {
         .collect()
 }
 
+/// Failed-login throttle. Without it /api/login is a public, unthrottled
+/// online brute-force surface (10k-wordlist ≈ minutes at measured rates);
+/// the KDF cost slows both sides but never stops an attacker.
+const LOGIN_WINDOW_SECS: u64 = 60;
+const LOGIN_MAX_FAILURES: usize = 10;
+static LOGIN_FAILURES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, VecDeque<std::time::Instant>>>,
+> = std::sync::OnceLock::new();
+
+/// Keyed by X-Forwarded-For — set by the fronting proxy; the processor binds
+/// loopback in production, so the header cannot be spoofed remotely.
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next_back())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn login_throttle_allows(key: &str) -> bool {
+    let lock = LOGIN_FAILURES.get_or_init(Default::default);
+    let mut map = lock.lock().unwrap();
+    let window = std::time::Duration::from_secs(LOGIN_WINDOW_SECS);
+    let now = std::time::Instant::now();
+    let hits = map
+        .entry(key.to_string())
+        .or_default()
+        .iter()
+        .filter(|t| now.duration_since(**t) < window)
+        .count();
+    hits < LOGIN_MAX_FAILURES
+}
+
+fn login_throttle_record(key: &str) {
+    let lock = LOGIN_FAILURES.get_or_init(Default::default);
+    let mut map = lock.lock().unwrap();
+    map.entry(key.to_string()).or_default().push_back(std::time::Instant::now());
+}
+
+fn login_throttle_clear(key: &str) {
+    if let Some(lock) = LOGIN_FAILURES.get() {
+        lock.lock().unwrap().remove(key);
+    }
+}
+
 async fn api_login(
     State(state): State<WebState>,
     headers: HeaderMap,
     Json(form): Json<LoginForm>,
 ) -> Response {
     let username = form.username.trim().to_ascii_lowercase();
+    let throttle_key = format!("{}|{}", client_ip(&headers), username);
+    if !login_throttle_allows(&throttle_key) {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "too many failed attempts; wait a minute");
+    }
     if !state.users.verify(&username, &form.password).await {
+        login_throttle_record(&throttle_key);
         return api_error(StatusCode::UNAUTHORIZED, "incorrect username or password");
     }
+    login_throttle_clear(&throttle_key);
     let sid = uuid::Uuid::new_v4().to_string();
     state.sessions.insert(&sid, &username).await;
     let mut resp = Json(LoginResponse {
@@ -1327,6 +1380,26 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-proto", value.parse().unwrap());
         headers
+    }
+
+    #[test]
+    fn login_throttle_blocks_after_max_failures_and_recovers_on_success() {
+        let key = "test-ip|admin";
+        for _ in 0..LOGIN_MAX_FAILURES {
+            assert!(login_throttle_allows(key), "within the limit");
+            login_throttle_record(key);
+        }
+        assert!(!login_throttle_allows(key), "11th attempt is throttled");
+        login_throttle_clear(key);
+        assert!(login_throttle_allows(key), "successful login resets the window");
+    }
+
+    #[test]
+    fn client_ip_uses_last_forwarded_entry() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "spoofed, real-client".parse().unwrap());
+        assert_eq!(client_ip(&headers), "real-client");
+        assert_eq!(client_ip(&HeaderMap::new()), "unknown");
     }
 
     #[test]

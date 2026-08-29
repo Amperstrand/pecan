@@ -26,6 +26,7 @@ echo "==> vendor into pecan/web"
 rm -f "$PECAN_DIR/web/vendor"/cashu-coco-*.tgz
 cp "$PACK_DIR"/cashu-coco-core-"$VERSION".tgz "$PACK_DIR"/cashu-coco-indexeddb-"$VERSION".tgz \
   "$PECAN_DIR/web/vendor/"
+(cd "$PECAN_DIR/web/vendor" && shasum -a 256 cashu-coco-core-"$VERSION".tgz cashu-coco-indexeddb-"$VERSION".tgz > SHA256SUMS)
 python3 - "$PECAN_DIR" "$VERSION" <<'EOF'
 import json, re, sys
 pecan, version = sys.argv[1], sys.argv[2]

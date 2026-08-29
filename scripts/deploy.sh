@@ -17,7 +17,7 @@ echo "==> rsync prod compose to /opt/pecan"
 rsync -az deploy/docker-compose.prod.yml "$SERVER:$COMPOSE_DIR/docker-compose.prod.yml"
 
 echo "==> prune builder cache (disk headroom) and build image"
-ssh "$SERVER" "docker builder prune -af >/dev/null 2>&1 || true; cd $REMOTE_DIR && DOCKER_BUILDKIT=1 docker build -t pecan:nok . 2>&1 | tail -1"
+ssh "$SERVER" "docker builder prune -af >/dev/null 2>&1 || true; cd $REMOTE_DIR && DOCKER_BUILDKIT=1 docker build -t pecan:nok . > /tmp/pecan-build.log 2>&1; status=\$?; tail -3 /tmp/pecan-build.log; if [ \$status -ne 0 ]; then echo '!! docker build failed — full log: /tmp/pecan-build.log on server' >&2; exit 1; fi"
 
 echo "==> recreate containers"
 ssh "$SERVER" "cd $COMPOSE_DIR && docker compose -f docker-compose.prod.yml up -d --force-recreate 2>&1 | tail -1"

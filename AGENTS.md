@@ -17,8 +17,9 @@ these without spending LLM tokens on browser driving.
 - Browser wallet tests: `scripts/e2e.sh` (fetches the generated admin
   password from the server and runs Playwright against prod; teller
   match-and-settle happen through the real HTTP API). The processor
-  generates a RANDOM admin password on first boot and logs it once —
-  `docker logs pecan-pecan-1 | grep 'generated random admin password'`.
+  generates a RANDOM admin password on first boot and persists it to
+  /opt/pecan-config/initial-admin-password.txt (0600; delete after first
+  login). /api/login is throttled: 10 failures per (IP, username) per 60s.
 - Unit tests: `cd web && npm test` (vitest). Fast inner loop — handler
   payload shapes, error mappings, and pure utils are pinned here; run these
   BEFORE deploying to iterate on logic without the e2e cycle.
