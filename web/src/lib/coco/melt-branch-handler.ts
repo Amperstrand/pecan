@@ -30,6 +30,7 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
     // cdk-axum's custom melt handler requires `method` and `request` in the
     // body (MeltQuoteCustomRequest); `request` carries the recipient memo the
     // teller sees, mirroring the classic wallet's payload shape.
+    // NUT #5: For a custom `{method}`, the wallet sends a request following the common melt quote request format (see [General Flow](#general-flow)). The `request` field is the method-specific payment target (e.g., a bank account identifier, an on-chain address, a payment processor reference). `unit` is the unit the wallet would like to pay with.
     return ctx.wallet.createMeltQuote<BranchMeltQuoteResponse>("branch", {
       method: "branch",
       request: ctx.methodData.description ?? "",

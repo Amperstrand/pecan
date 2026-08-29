@@ -18,6 +18,10 @@ these without spending LLM tokens on browser driving.
   login + teller match-and-settle happen through the real HTTP API).
 - Deploy: `scripts/deploy.sh` (rsync → docker build → compose up → verify).
 - Re-vendor the coco fork: `scripts/vendor-coco.sh [version]`.
+- Spec-quote drift: `scripts/spec-quote-check.sh` (greatspectations). Where a
+  NUT requirement is implemented, embed the verbatim spec line as a
+  `// NUT #<id>: ...` comment — the check fails when the NUTs change under
+  us. Prereqs + marker syntax: see the script header.
 - Before shipping wallet changes: run the spec green, then deploy.
 
 ## Layout

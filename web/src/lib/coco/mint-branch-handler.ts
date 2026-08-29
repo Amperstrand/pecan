@@ -32,6 +32,8 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
   constructor(private readonly keyRing: BranchKeyRing) {}
 
   async createQuote(ctx: CreateMintQuoteContext<"branch">): Promise<MintQuote<"branch">> {
+    // NUT #4: `amount`, `description` and `pubkey` are common optional fields; method-specific NUTs make them required or ignore them as needed (e.g. NUT-23 requires `amount`, NUT-20 defines `pubkey`).
+    // NUT #20: > **Privacy:** To prevent the mint from being able to link multiple mint quotes, wallets **SHOULD** generate a unique public key for each mint quote request.
     const { amount, description, locked } = ctx.createQuoteData
     const keypair = locked === true ? await this.keyRing.generateMintQuoteKeyPair() : null
     const lockPubkey = keypair !== null ? keypair.publicKeyHex : undefined
@@ -194,6 +196,7 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
   private async getSigningOptions(
     pubkey: string | undefined,
   ): Promise<{ privkey: string } | undefined> {
+    // NUT #20: `pubkey` is the compressed secp256k1 public key (33 bytes, hex-encoded) that will be required for signature verification during the minting operation. The mint will only mint ecash after receiving a valid signature from the corresponding private key in the subsequent `PostMintRequest`.
     if (pubkey === undefined) return undefined
     const key = await this.keyRing.getMintQuoteKeyPair(pubkey)
     if (!key) {
