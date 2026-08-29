@@ -22,6 +22,7 @@ import {
   getHistory,
   pollAndMint,
   pollWithdraw,
+  resumePendingOperations,
 } from "@/lib/coco/coco-wallet"
 import { getCoco } from "@/lib/coco/coco-wallet"
 
@@ -69,7 +70,13 @@ export function WalletPage() {
   }, [])
 
   useEffect(() => {
-    getCoco().then(() => refresh()).catch(() => {}).finally(() => refresh())
+    getCoco()
+      .then(() => {
+        refresh()
+        return resumePendingOperations(() => void refresh())
+      })
+      .catch(() => {})
+      .finally(() => refresh())
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }

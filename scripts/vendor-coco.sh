@@ -26,7 +26,7 @@ echo "==> vendor into pecan/web"
 rm -f "$PECAN_DIR/web/vendor"/cashu-coco-*.tgz
 cp "$PACK_DIR"/cashu-coco-core-"$VERSION".tgz "$PACK_DIR"/cashu-coco-indexeddb-"$VERSION".tgz \
   "$PECAN_DIR/web/vendor/"
-PREV=$(ls "$PECAN_DIR/web/vendor" | head -0; python3 - "$PECAN_DIR" "$VERSION" <<'EOF'
+python3 - "$PECAN_DIR" "$VERSION" <<'EOF'
 import json, re, sys
 pecan, version = sys.argv[1], sys.argv[2]
 pkg_path = f"{pecan}/web/package.json"
@@ -34,9 +34,8 @@ pkg = json.load(open(pkg_path))
 for dep in ("@cashu/coco-core", "@cashu/coco-indexeddb"):
     pkg["dependencies"][dep] = re.sub(r"\d+\.\d+\.\d+", version, pkg["dependencies"][dep])
 json.dump(pkg, open(pkg_path, "w"), indent=2)
-print("package.json refs updated")
+print("package.json refs updated to", version)
 EOF
-)
 
 cd "$PECAN_DIR/web"
 rm -rf node_modules/@cashu/coco-core node_modules/@cashu/coco-indexeddb

@@ -101,6 +101,38 @@ test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", ()
     expect(db.spendableSum).toBeLessThan(before * 100)
   })
 
+  test("withdraw survives reload while payout pending (durable saga)", async () => {
+    const page = sharedPage!
+    await page.goto(WALLET)
+    await apiLogin(page)
+
+    const start = await readBalance(page)
+
+    await page.getByPlaceholder("5.00").fill(String(DEPOSIT_KR))
+    await page.getByRole("button", { name: "Create deposit quote" }).click()
+    const depositCode = await readTellerCode(page)
+    await matchAndSettle(page, depositCode, "E2E reload-saga funding")
+    await waitForBalance(page, start + DEPOSIT_KR)
+
+    await page.getByPlaceholder("Phone or reference").fill("e2e-reload")
+    await page.getByPlaceholder("1.00").fill(String(DEPOSIT_KR))
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const code = await readTellerCode(page)
+    await expect(page.getByText("Waiting for payout")).toBeVisible()
+
+    // Kill the page mid-saga: any poller/UI state is gone; only the durable
+    // operation row + coco's boot-recovery watcher can finish the withdraw.
+    await page.reload()
+    await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
+
+    const ticket = await matchAndSettle(page, code, "E2E payout after reload")
+    expect(ticket.status).toBe("paid")
+
+    await waitForOpState(page, "melt", code, "finalized", 90_000)
+    await waitForBalance(page, start, 90_000)
+    expectNoWalletErrors(walletErrors)
+  })
+
   test("self-custody state persists across reload", async () => {
     const page = sharedPage!
     const before = await readBalance(page)
