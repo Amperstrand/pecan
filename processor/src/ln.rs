@@ -237,14 +237,14 @@ impl ClnClient {
 
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum InvoiceState {
     Open,
     Paid,
     Expired,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct InvoiceRecord {
     amount_ore: u64,
     unit: CurrencyUnit,
@@ -255,6 +255,7 @@ pub struct LnRail {
     cln: Arc<ClnClient>,
     fx: Arc<Fx>,
     invoices: Arc<tokio::sync::RwLock<HashMap<String, InvoiceRecord>>>,
+    store: Option<std::path::PathBuf>,
     events: broadcast::Sender<Event>,
 }
 
@@ -280,17 +281,21 @@ impl LnRail {
     /// Starts the rail and its settlement poller on a shared socket client.
     /// `events` is the processor's shared channel: invoice settlements are
     /// announced as `Event::PaymentReceived` with the bare quote id as the
-    /// lookup id.
-    pub fn start_with_client(
+    /// lookup id. `store` persists open records across processor restarts
+    /// (an in-memory-only rail orphans every open invoice on redeploy).
+    pub async fn start_with_client(
         cln: Arc<ClnClient>,
         markup_percent: f64,
         rate_url: String,
+        store: Option<std::path::PathBuf>,
         events: broadcast::Sender<Event>,
     ) -> Arc<Self> {
+        let invoices = Arc::new(tokio::sync::RwLock::new(load_store(&store).await));
         let rail = Arc::new(Self {
             cln,
             fx: Arc::new(Fx::new(rate_url, markup_percent)),
-            invoices: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            invoices,
+            store,
             events,
         });
         rail.spawn_poller();
@@ -300,6 +305,7 @@ impl LnRail {
     fn spawn_poller(&self) {
         let cln = self.cln.clone();
         let invoices = self.invoices.clone();
+        let store = self.store.clone();
         let events = self.events.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
@@ -336,7 +342,9 @@ impl LnRail {
                         match guard.get_mut(&quote_id) {
                             Some(rec) if rec.state == InvoiceState::Open => {
                                 rec.state = new_state.clone();
-                                (rec.amount_ore, rec.unit.clone())
+                                let out = (rec.amount_ore, rec.unit.clone());
+                                persist(&store, &guard).await;
+                                out
                             }
                             _ => continue,
                         }
@@ -380,7 +388,8 @@ impl LnRail {
                 }),
             )
             .await?;
-        self.invoices.write().await.insert(
+        let mut invoices = self.invoices.write().await;
+        invoices.insert(
             quote_id.to_string(),
             InvoiceRecord {
                 amount_ore,
@@ -388,6 +397,7 @@ impl LnRail {
                 state: InvoiceState::Open,
             },
         );
+        persist(&self.store, &invoices).await;
         tracing::info!("ln invoice {quote_id} for {amount_ore} øre ({sat} sat)");
         Ok((invoice.bolt11, invoice.expires_at))
     }
@@ -397,6 +407,35 @@ impl LnRail {
         let invoices = self.invoices.read().await;
         let rec = invoices.get(quote_id)?;
         (rec.state == InvoiceState::Paid).then_some((rec.amount_ore, rec.unit.clone()))
+    }
+}
+
+/// Records on disk survive processor restarts; anything older than a day is
+/// dead weight (mint quotes expire long before that).
+async fn load_store(store: &Option<std::path::PathBuf>) -> HashMap<String, InvoiceRecord> {
+    let Some(path) = store else { return HashMap::new() };
+    match tokio::fs::read(path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ln rail store unreadable ({}), starting empty", e);
+            HashMap::new()
+        }),
+        Err(_) => HashMap::new(),
+    }
+}
+
+async fn persist(
+    store: &Option<std::path::PathBuf>,
+    invoices: &HashMap<String, InvoiceRecord>,
+) {
+    let Some(path) = store else { return };
+    let trimmed: HashMap<_, _> = invoices
+        .iter()
+        .filter(|(_, r)| r.state != InvoiceState::Expired)
+        .collect();
+    if let Ok(bytes) = serde_json::to_vec(&trimmed) {
+        if let Err(e) = tokio::fs::write(path, bytes).await {
+            tracing::warn!("ln rail store write failed: {e}");
+        }
     }
 }
 

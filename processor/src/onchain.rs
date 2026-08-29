@@ -32,13 +32,13 @@ use crate::ln::{ClnClient, Fx};
 const POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_ESPLORA_URL: &str = "https://mempool.space/signet/api";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum AddressState {
     Watching,
     Settled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct AddressRecord {
     address: String,
     expected_sat: u64,
@@ -56,6 +56,7 @@ pub struct OnchainRail {
     esplora: String,
     http: reqwest::Client,
     addresses: Arc<tokio::sync::RwLock<HashMap<String, AddressRecord>>>,
+    store: Option<std::path::PathBuf>,
     events: broadcast::Sender<Event>,
 }
 
@@ -77,13 +78,15 @@ struct AddressUtxoStatus {
 }
 
 impl OnchainRail {
-    pub fn start(
+    pub async fn start(
         cln: Arc<ClnClient>,
         fx: Arc<Fx>,
         confirmations: u32,
         esplora: String,
+        store: Option<std::path::PathBuf>,
         events: broadcast::Sender<Event>,
     ) -> Arc<Self> {
+        let addresses = Arc::new(tokio::sync::RwLock::new(load_store(&store).await));
         let rail = Arc::new(Self {
             cln,
             fx,
@@ -93,7 +96,8 @@ impl OnchainRail {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("reqwest client"),
-            addresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            addresses,
+            store,
             events,
         });
         rail.spawn_poller();
@@ -104,6 +108,7 @@ impl OnchainRail {
         let http = self.http.clone();
         let esplora = self.esplora.clone();
         let addresses = self.addresses.clone();
+        let store = self.store.clone();
         let events = self.events.clone();
         let required = self.confirmations;
         tokio::spawn(async move {
@@ -174,6 +179,7 @@ impl OnchainRail {
                             if enough && confirmed && rec.state == AddressState::Watching {
                                 rec.state = AddressState::Settled;
                                 settled = Some((rec.amount_ore, rec.unit.clone()));
+                                persist(&store, &guard).await;
                             }
                         }
                     }
@@ -203,7 +209,8 @@ impl OnchainRail {
             .cln
             .call("newaddr", serde_json::json!({"addresstype": "bech32"}))
             .await?;
-        self.addresses.write().await.insert(
+        let mut addresses = self.addresses.write().await;
+        addresses.insert(
             quote_id.to_string(),
             AddressRecord {
                 address: addr.bech32.clone(),
@@ -215,6 +222,7 @@ impl OnchainRail {
                 state: AddressState::Watching,
             },
         );
+        persist(&self.store, &addresses).await;
         tracing::info!(
             "onchain address {quote_id} for {amount_ore} øre (expect {expected_sat} sat \
              to {})",
@@ -234,4 +242,31 @@ impl OnchainRail {
 /// Re-exported so main can build one shared socket client for both rails.
 pub fn cln_client(socket: PathBuf) -> Arc<ClnClient> {
     Arc::new(ClnClient::new(socket))
+}
+
+async fn load_store(store: &Option<std::path::PathBuf>) -> HashMap<String, AddressRecord> {
+    let Some(path) = store else { return HashMap::new() };
+    match tokio::fs::read(path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("onchain rail store unreadable ({}), starting empty", e);
+            HashMap::new()
+        }),
+        Err(_) => HashMap::new(),
+    }
+}
+
+async fn persist(
+    store: &Option<std::path::PathBuf>,
+    addresses: &HashMap<String, AddressRecord>,
+) {
+    let Some(path) = store else { return };
+    let trimmed: HashMap<_, _> = addresses
+        .iter()
+        .filter(|(_, r)| r.state != AddressState::Settled)
+        .collect();
+    if let Ok(bytes) = serde_json::to_vec(&trimmed) {
+        if let Err(e) = tokio::fs::write(path, bytes).await {
+            tracing::warn!("onchain rail store write failed: {e}");
+        }
+    }
 }

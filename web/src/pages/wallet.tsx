@@ -56,6 +56,109 @@ function QrCodeImg({ text, alt }: { text: string; alt: string }) {
   )
 }
 
+function OnchainStatus({ address }: { address: string }) {
+  const [status, setStatus] = useState<{
+    receivedSat: number
+    confirmations: number
+    confirmed: boolean
+    required: number
+    explorer: string
+  } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      try {
+        // Same-origin proxy through the processor: no external CSP needed.
+        const res = await fetch(`/api/onchain-status/${address}`)
+        if (!res.ok) return
+        const data: {
+          tip: number
+          utxos: Array<{
+            value: number
+            status: { confirmed: boolean; block_height?: number }
+          }>
+          required_confirmations: number
+          explorer: string
+        } = await res.json()
+        if (cancelled || data.utxos.length === 0) return
+        const receivedSat = data.utxos.reduce((s, u) => s + u.value, 0)
+        const confirmed = data.utxos.some((u) => u.status.confirmed)
+        const maxBlock = Math.max(
+          ...data.utxos.map((u) => u.status.block_height ?? 0),
+        )
+        const confirmations = confirmed && data.tip > 0 && maxBlock > 0
+          ? data.tip - maxBlock + 1
+          : 0
+        setStatus({
+          receivedSat,
+          confirmations,
+          confirmed,
+          required: data.required_confirmations,
+          explorer: data.explorer,
+        })
+      } catch {
+        // esplora unreachable; the mint's own poller still settles the quote
+      }
+    }
+    void poll()
+    const id = setInterval(poll, 10_000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [address])
+
+  if (!status) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Waiting for transaction…
+      </p>
+    )
+  }
+
+  const required = status.required
+  const enough = status.confirmations >= required
+  return (
+    <div className="grid gap-1 rounded-md bg-muted p-2 text-center text-xs">
+      {status.confirmed || status.receivedSat > 0 ? (
+        <>
+          <span
+            className={`font-medium ${enough ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}`}
+          >
+            {!status.confirmed && "● "}
+            {status.confirmed
+              ? `${enough ? "✓" : ""} ${status.confirmations} of ${required} confirmation${required === 1 ? "" : "s"}`
+              : "Transaction seen in mempool"}
+          </span>
+          {!status.confirmed && (
+            <span className="text-muted-foreground">
+              0 of {required} confirmation{required === 1 ? "" : "s"}
+            </span>
+          )}
+          <div className="text-[10px] text-muted-foreground">
+            {enough
+              ? "Settling — claiming your ecash…"
+              : `Received ${status.receivedSat.toLocaleString()} sat · ${status.confirmed ? `${required - status.confirmations} more confirmation${required - status.confirmations === 1 ? "" : "s"} needed` : "next signet block confirms"}`}
+          </div>
+        </>
+      ) : (
+        <span className="text-muted-foreground">Waiting for transaction…</span>
+      )}
+      {status.explorer && (
+        <a
+          href={`${status.explorer}/address/${address}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[10px] underline text-muted-foreground hover:text-foreground"
+        >
+          View on block explorer ↗
+        </a>
+      )}
+    </div>
+  )
+}
+
 export function WalletPage() {
   const [balance, setBalance] = useState<number | null>(null)
   const [history, setHistory] = useState<HistoryRow[]>([])
@@ -278,6 +381,7 @@ export function WalletPage() {
                 <p className="text-sm text-muted-foreground">
                   {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
                 </p>
+                <OnchainStatus address={depositState.quote.request} />
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
                   Polling for payment

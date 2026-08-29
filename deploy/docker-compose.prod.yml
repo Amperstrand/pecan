@@ -33,10 +33,10 @@ services:
       CDK_BRANCH_PROCESSOR_CLN_SOCKET: "/run/pecan-cln/signet/lightning-rpc"
       CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT: "10"
       # Onchain-minting rail: per-quote bech32 addresses on the same node.
-      # 0 confirmations settles on mempool visibility — simulated-mint
-      # tradeoff (docs/lightning-mint.md); production wants >= 1.
+      # 1 confirmation = settle when esplora reports the block (signet
+      # blocks arrive every ~5 min). 0 = mempool settlement.
       CDK_BRANCH_PROCESSOR_ONCHAIN: "true"
-      CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "0"
+      CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "1"
     logging:
       driver: json-file
       options:

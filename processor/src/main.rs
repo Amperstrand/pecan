@@ -309,8 +309,10 @@ async fn main() -> Result<()> {
             cln_client.clone().expect("ln enabled implies client"),
             markup,
             rate_url.clone(),
+            Some(work_dir.join("ln-rail-store.json")),
             branch.event_sender(),
-        );
+        )
+        .await;
         tracing::info!("ln rail enabled (markup {markup}%)");
         Some(rail)
     } else {
@@ -331,8 +333,10 @@ async fn main() -> Result<()> {
             Arc::new(ln::Fx::new(rate_url, markup)),
             confirmations,
             esplora,
+            Some(work_dir.join("onchain-rail-store.json")),
             branch.event_sender(),
-        );
+        )
+        .await;
         tracing::info!(
             "onchain rail enabled (settlement after {confirmations} confirmation(s))"
         );

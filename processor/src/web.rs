@@ -111,6 +111,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/tickets/{id}/mark-failed", post(api_mark_failed))
         .route("/api/settings/attachment", post(api_set_attachment))
         .route("/api/mint/self-test", post(api_self_test))
+        .route("/api/onchain-status/{address}", get(api_onchain_status))
         .route("/api/users", post(api_users_create))
         .route("/api/users/{username}", delete(api_users_delete))
         .route(
@@ -197,7 +198,7 @@ fn font_response(bytes: &'static [u8]) -> Response {
 /// (used heavily by the UI kit) stay allowed, which CSP governs separately
 /// from inline <style> elements.
 const SPA_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-                       img-src 'self' data:; font-src 'self'; connect-src 'self'; \
+                       img-src 'self' data:; font-src 'self'; connect-src 'self' https://mempool.space/signet/api; \
                        base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
 async fn spa_page() -> Response {
@@ -789,6 +790,53 @@ struct MatchQuoteForm {
 /// or the full quote id from a scanner) to the one open quote it identifies.
 /// The full ticket is revealed only here — the open-quote list stays redacted
 /// so the code must come from the customer.
+/// Proxies esplora address-utxo data so the wallet's onchain status
+/// display stays same-origin (the CSP blocks external fetches, and this
+/// avoids teaching the browser about our chain backend). No session
+/// needed: the bech32 address is a fresh per-quote secret — knowing it is
+/// the proof you created the deposit.
+async fn api_onchain_status(
+    State(state): State<WebState>,
+    AxumPath(address): AxumPath<String>,
+) -> Response {
+    if !address.starts_with("tb1") || address.len() > 100 {
+        return api_error(StatusCode::BAD_REQUEST, "not a bech32 address");
+    }
+    let esplora = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL")
+        .unwrap_or_else(|_| "https://mempool.space/signet/api".into());
+    let tip_url = format!("{esplora}/blocks/tip/height");
+    let utxo_url = format!("{esplora}/address/{address}/utxo");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("reqwest client");
+    let (tip, utxos) = match tokio::join!(
+        client.get(&tip_url).send(),
+        client.get(&utxo_url).send()
+    ) {
+        (Ok(t), Ok(u)) => (
+            t.text().await.unwrap_or_default().trim().to_string(),
+            u.text().await.unwrap_or_default(),
+        ),
+        _ => {
+            return api_error(StatusCode::BAD_GATEWAY, "esplora unreachable");
+        }
+    };
+    let required: u32 = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
+    let esplora_base = esplora.trim_end_matches("/api");
+    let body = format!(
+        r#"{{"tip":{tip},"utxos":{utxos},"required_confirmations":{required},"explorer":"{esplora_base}"}}"#
+    );
+    (
+        [("content-type", "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 async fn api_match_quote(
     State(state): State<WebState>,
     headers: HeaderMap,
