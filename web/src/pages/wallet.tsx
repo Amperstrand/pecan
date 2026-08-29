@@ -31,6 +31,7 @@ interface HistoryRow {
   amount_ore: number
   description: string
   created_at: number
+  pending?: boolean
 }
 
 type DepositState =
@@ -93,6 +94,7 @@ export function WalletPage() {
         }
       }, 3000)
     } catch (e) {
+      console.error("deposit failed:", e)
       setDepositState({ phase: "error", message: String(e) })
     }
   }
@@ -119,6 +121,7 @@ export function WalletPage() {
 
       return () => clearInterval(interval)
     } catch (e) {
+      console.error("withdraw failed:", e)
       setWithdrawState({ phase: "error", message: String(e) })
     }
   }
@@ -286,9 +289,14 @@ export function WalletPage() {
                     ) : (
                       <ArrowUp className="size-3" />
                     )}
-                    <span className="text-muted-foreground">{h.description}</span>
+                    <span className="text-muted-foreground">
+                      {h.description}
+                      {h.pending ? " (pending)" : ""}
+                    </span>
                   </span>
-                  <span className="font-mono tabular-nums">
+                  <span
+                    className={`font-mono tabular-nums ${h.pending ? "text-muted-foreground" : ""}`}
+                  >
                     {h.type === "deposit" ? "+" : "−"}
                     {(h.amount_ore / 100).toFixed(2)} kr
                   </span>

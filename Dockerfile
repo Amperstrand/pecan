@@ -15,7 +15,9 @@ FROM node:22-bookworm-slim AS web-builder
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 COPY web/vendor ./vendor
-RUN --mount=type=cache,target=/root/.npm npm ci
+# The lockfile is generated on macOS; its optional-dep records miss the linux
+# rolldown native binding (npm/cli#4828), so drop it and resolve fresh.
+RUN --mount=type=cache,target=/root/.npm rm -f package-lock.json && npm install
 COPY web ./
 RUN npm run build
 

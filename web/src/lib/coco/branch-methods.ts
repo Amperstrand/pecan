@@ -38,7 +38,7 @@ declare module "@cashu/coco-core/operations/mint" {
         description?: string
         locked?: boolean
       }
-      quoteData: { request: string }
+      quoteData: { amount: Amount; request: string }
       remoteState: "UNPAID" | "PAID" | "ISSUED"
       quote: BranchMintQuoteResponse
     }

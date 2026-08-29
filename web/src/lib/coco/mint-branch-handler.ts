@@ -225,7 +225,7 @@ export class MintBranchHandler implements MintMethodHandler<"branch"> {
       amountIssued,
       state: deriveBolt11MintQuoteState(amountPaid, amountIssued),
       remoteUpdatedAt: remote.updated_at,
-      quoteData: { request: remote.request },
+      quoteData: { amount: Amount.from(remote.amount ?? 0), request: remote.request },
       createdAt: now,
       updatedAt: now,
     }

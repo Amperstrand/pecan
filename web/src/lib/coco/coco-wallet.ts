@@ -12,6 +12,7 @@ export interface HistoryRow {
   amount_ore: number
   description: string
   created_at: number
+  pending?: boolean
 }
 
 export interface DepositQuote {
@@ -94,11 +95,13 @@ export async function getHistory(limit = 15): Promise<HistoryRow[]> {
 function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
   const createdAt = entry.createdAt
   if (entry.type === "mint") {
+    if (entry.state === "failed") return null
     return {
       type: "deposit",
       amount_ore: Number(entry.amount.toBigInt()),
       description: "Deposit",
       created_at: createdAt,
+      pending: entry.state !== "finalized",
     }
   }
   if (entry.type === "melt") {
@@ -107,6 +110,7 @@ function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
       amount_ore: Number(entry.amount.toBigInt()),
       description: "Withdraw",
       created_at: createdAt,
+      pending: entry.state !== "finalized",
     }
   }
   return null
@@ -152,8 +156,14 @@ export async function pollAndMint(
   if (!operation) return false
   if (operation.state === "finalized" || operation.state === "failed") return true
 
-  const refreshed = await coco.ops.mint.refresh(operation.id)
-  return refreshed.state === "finalized" || refreshed.state === "failed"
+  try {
+    const refreshed = await coco.ops.mint.refresh(operation.id)
+    return refreshed.state === "finalized" || refreshed.state === "failed"
+  } catch {
+    // Lock contention with the background watcher or transient poll failure;
+    // the watcher drives the operation to completion either way.
+    return false
+  }
 }
 
 export async function createWithdraw(amountKr: number, recipient: string): Promise<WithdrawResult> {
@@ -194,9 +204,14 @@ export async function pollWithdraw(quoteId: string): Promise<string | null> {
     return "FAILED"
   }
 
-  const refreshed = await coco.ops.melt.refresh(operation.id)
-  if (refreshed.state === "finalized") {
-    return readPreimage(refreshed)
+  try {
+    const refreshed = await coco.ops.melt.refresh(operation.id)
+    if (refreshed.state === "finalized") {
+      return readPreimage(refreshed)
+    }
+  } catch {
+    // Lock contention with the background watcher or transient poll failure;
+    // the watcher drives the operation to completion either way.
   }
   return null
 }

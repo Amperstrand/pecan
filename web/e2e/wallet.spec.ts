@@ -1,151 +1,128 @@
 import { test, expect, type Page } from "@playwright/test"
+import {
+  apiLogin,
+  expectNoWalletErrors,
+  matchAndSettle,
+  readBalance,
+  readTellerCode,
+  readWalletDb,
+  trackWalletErrors,
+  waitForDepositFormReset,
+  waitForOpState,
+} from "./helpers/wallet"
 
 const WALLET = "/console/wallet"
+const DEPOSIT_KR = 5
 
-async function apiLogin(page: Page): Promise<void> {
-  await page.request.post(`/api/login`, {
-    headers: { "Content-Type": "application/json" },
-    data: { username: "admin", password: "admin" },
-  })
-}
-
-async function matchAndSettle(page: Page, tellerCode: string, kind: string): Promise<{ status: string }> {
-  const matchResp = await page.request.post(`/api/quotes/match`, {
-    headers: { "Content-Type": "application/json" },
-    data: { code: tellerCode },
-  })
-  const match = await matchResp.json()
-  if (!match.id) throw new Error(`match failed for ${tellerCode}: ${JSON.stringify(match).slice(0, 200)}`)
-
-  const settleResp = await page.request.post(`/api/tickets/${match.id}/mark-paid`, {
-    headers: { "Content-Type": "application/json" },
-    data: { notes: `E2E ${kind}` },
-  })
-  return settleResp.json()
-}
-
-async function trySettleOutgoing(page: Page): Promise<boolean> {
-  // Use the match endpoint with the quote prefix (same as teller workflow)
-  const resp = await page.request.get(`/api/app`)
-  const data = await resp.json()
-  const quotes = data?.open_quotes || []
-  for (const q of quotes) {
-    if (q.kind === "outgoing") {
-      // Match by the prefix (first 15 chars = enough for unique match)
-      const matchResp = await page.request.post(`/api/quotes/match`, {
-        headers: { "Content-Type": "application/json" },
-        data: { code: q.prefix.slice(-6) },
-      })
-      const match = await matchResp.json()
-      if (match.id) {
-        const settleResp = await page.request.post(`/api/tickets/${match.id}/mark-paid`, {
-          headers: { "Content-Type": "application/json" },
-          data: { notes: "E2E payout" },
-        })
-        const result = await settleResp.json()
-        return result.status === "paid"
-      }
-    }
-  }
-  return false
+async function waitForBalance(page: Page, expectedKr: number, timeout = 45_000) {
+  await expect
+    .poll(async () => readBalance(page), { timeout })
+    .toBeCloseTo(expectedKr, 2)
 }
 
 let sharedPage: Page | null = null
+let walletErrors: string[] = []
 
 test.beforeAll(async ({ browser }) => {
   const context = await browser.newContext({ ignoreHTTPSErrors: true })
   sharedPage = await context.newPage()
+  walletErrors = trackWalletErrors(sharedPage)
 })
 
 test.afterAll(async () => {
+  expectNoWalletErrors(walletErrors)
   if (sharedPage) await sharedPage.close()
 })
 
-test.describe("Browser wallet E2E", () => {
+test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", () => {
   test.describe.configure({ mode: "serial" })
 
-  test("wallet page loads", async () => {
+  test("wallet page loads with zero console errors", async () => {
     const page = sharedPage!
     await page.goto(WALLET)
     await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
-    await expect(page.locator(".text-4xl")).toBeVisible()
+    await readBalance(page)
   })
 
-  test("deposit: create → teller match → settle → auto-claim", async () => {
+  test("deposit: quote → teller settle → auto-claim to proofs", async () => {
     const page = sharedPage!
     await page.goto(WALLET)
     await apiLogin(page)
 
-    const beforeText = await page.locator(".text-4xl").textContent()
-    const before = parseFloat(beforeText?.replace(/[^\d.]/g, "") || "0")
+    const before = await readBalance(page)
 
-    await page.getByPlaceholder("5.00").fill("5")
+    await page.getByPlaceholder("5.00").fill(String(DEPOSIT_KR))
     await page.getByRole("button", { name: "Create deposit quote" }).click()
 
-    await expect(page.locator(".font-mono.text-3xl")).toBeVisible({ timeout: 15_000 })
-    const tellerCode = await page.locator(".font-mono.text-3xl").textContent()
-    expect(tellerCode).toBeTruthy()
-    expect(tellerCode!.trim().length).toBeGreaterThanOrEqual(6)
-    console.log("  teller code:", tellerCode?.trim())
+    const code = await readTellerCode(page)
+    await expect(page.getByText("Polling for payment")).toBeVisible()
 
-    const result = await matchAndSettle(page, tellerCode!.trim(), "deposit")
-    expect(result.status).toBe("paid")
+    const ticket = await matchAndSettle(page, code, "E2E deposit")
+    expect(ticket.status).toBe("paid")
+    expect(ticket.kind).toBe("incoming")
+    expect(ticket.amount).toBe(DEPOSIT_KR * 100)
 
-    await expect(page.getByRole("button", { name: /✓ Deposited/ })).toBeVisible({ timeout: 30_000 })
+    await waitForBalance(page, before + DEPOSIT_KR)
 
-    const afterText = await page.locator(".text-4xl").textContent()
-    const after = parseFloat(afterText?.replace(/[^\d.]/g, "") || "0")
-    expect(after).toBeGreaterThan(before)
-    console.log(`  balance: ${before.toFixed(2)} → ${after.toFixed(2)} kr`)
+    await waitForDepositFormReset(page)
+    expectNoWalletErrors(walletErrors)
+
+    await waitForOpState(page, "mint", code, "finalized")
+    const db = await readWalletDb(page)
+    expect(db.proofCount).toBeGreaterThan(0)
+    expect(db.spendableSum).toBeGreaterThanOrEqual((before + DEPOSIT_KR) * 100)
   })
 
-  test("withdraw: create → teller match → settle → PAID", async () => {
+  test("withdraw: melt → teller payout → finalized, proofs released", async () => {
     const page = sharedPage!
     await page.goto(WALLET)
     await apiLogin(page)
 
-    const balanceText = await page.locator(".text-4xl").textContent()
-    const balance = parseFloat(balanceText?.replace(/[^\d.]/g, "") || "0")
-    expect(balance).toBeGreaterThan(0)
-    console.log(`  balance: ${balance.toFixed(2)} kr`)
+    const before = await readBalance(page)
+    test.skip(before < DEPOSIT_KR, "insufficient balance for withdraw test")
 
     await page.getByPlaceholder("Phone or reference").fill("e2e-recipient")
-    await page.getByPlaceholder("1.00").fill("1")
+    await page.getByPlaceholder("1.00").fill(String(DEPOSIT_KR))
     await page.getByRole("button", { name: "Send", exact: true }).click()
 
-    // The mint's async settlement timeout is ~30s — the teller code appears after
-    await page.waitForTimeout(35000)
-    const content = await page.content()
+    const code = await readTellerCode(page)
+    await expect(page.getByText("Waiting for payout")).toBeVisible()
 
-    if (content.includes("Give this code to the teller")) {
-      const tellerCode = await page.locator(".font-mono.text-3xl").textContent()
-      console.log("  withdraw code:", tellerCode?.trim())
+    const ticket = await matchAndSettle(page, code, "E2E payout")
+    expect(ticket.status).toBe("paid")
+    expect(ticket.kind).toBe("outgoing")
+    expect(ticket.amount).toBe(DEPOSIT_KR * 100)
 
-      const result = await matchAndSettle(page, tellerCode!.trim(), "payout")
-      expect(result.status).toBe("paid")
+    await waitForBalance(page, before - DEPOSIT_KR, 60_000)
+    expectNoWalletErrors(walletErrors)
 
-      await expect(page.getByRole("button", { name: /✓ Paid/ })).toBeVisible({ timeout: 60_000 })
-      console.log("  withdraw: PAID ✓")
-    } else if (content.includes("Need exactly")) {
-      console.log("  withdraw: exact subset not available — skipping")
-      test.skip(true, "exact subset not available")
-    } else {
-      console.log("  withdraw: checking for pending outgoing ticket…")
-      const settled = await trySettleOutgoing(page)
-      if (settled) {
-        await expect(page.getByRole("button", { name: /✓ Paid/ })).toBeVisible({ timeout: 60_000 })
-        console.log("  withdraw: PAID ✓")
-      } else {
-        throw new Error("withdraw: no teller code and no pending outgoing ticket")
-      }
-    }
+    await waitForOpState(page, "melt", code, "finalized")
+    const db = await readWalletDb(page)
+    expect(db.spendableSum).toBeLessThan(before * 100)
   })
 
-  test("history shows transactions", async () => {
+  test("self-custody state persists across reload", async () => {
     const page = sharedPage!
-    await page.goto(WALLET)
-    await page.waitForTimeout(3000)
-    const items = await page.locator(".flex.items-center.justify-between.py-1").all()
-    expect(items.length).toBeGreaterThanOrEqual(1)
+    const before = await readBalance(page)
+
+    await page.reload()
+    await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
+
+    const after = await readBalance(page)
+    expect(after).toBe(before)
+
+    const db = await readWalletDb(page)
+    expect(db.spendableSum).toBe(before * 100)
+    expectNoWalletErrors(walletErrors)
+  })
+
+  test("history shows finalized transactions without pending tags", async () => {
+    const page = sharedPage!
+    const history = page.locator("div.flex.items-center.justify-between.py-1")
+    await expect(history.first()).toBeVisible()
+    const rows = await history.allTextContents()
+    expect(rows.some((r) => r.includes("Deposit") && !r.includes("pending"))).toBeTruthy()
+    expect(rows.some((r) => r.includes("Withdraw"))).toBeTruthy()
+    expectNoWalletErrors(walletErrors)
   })
 })

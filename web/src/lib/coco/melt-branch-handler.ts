@@ -27,12 +27,14 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
   protected async createRemoteQuote(
     ctx: CreateMeltQuoteContext<"branch">,
   ): Promise<BranchMeltQuoteResponse> {
+    // cdk-axum's custom melt handler requires `method` and `request` in the
+    // body (MeltQuoteCustomRequest); `request` carries the recipient memo the
+    // teller sees, mirroring the classic wallet's payload shape.
     return ctx.wallet.createMeltQuote<BranchMeltQuoteResponse>("branch", {
+      method: "branch",
+      request: ctx.methodData.description ?? "",
       unit: ctx.unit,
       amount: ctx.methodData.amount,
-      ...(ctx.methodData.description !== undefined
-        ? { description: ctx.methodData.description }
-        : {}),
     })
   }
 

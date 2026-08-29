@@ -98,6 +98,7 @@ pub fn router(state: WebState) -> Router {
         .route("/teller", get(spa_page))
         .route("/login", get(spa_page))
         .route("/wallet", get(spa_page))
+        .route("/wallet-classic", get(spa_page))
         // Unauthenticated liveness probe for container healthchecks and the
         // installer's wait loop.
         .route("/healthz", get(healthz))
