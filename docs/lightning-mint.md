@@ -119,6 +119,49 @@ The CLN socket client holds ONE persistent connection (a connect-per-call
 pattern aggravated an RPC-read crash on a lab node) and skips the blank
 lines CLN frames responses with.
 
+## On-chain deposit addressing: alternatives considered
+
+The btc rail uses the classic **exchange deposit pattern in miniature**: per
+quote, `newaddr` on the swap node (node-custodial), a small JSON store
+mapping quote → (address, expected_sat), and an esplora watcher. The
+address is dual-persisted (the mint's `mint_quote.request` is the address),
+so the store is a watcher cache, not the system of record.
+
+**Deterministic derivation from the quote id** (`addr = P2TR(tweak(K_static,
+H(quote_id)))`, or xpub-path derivation) would eliminate the address field
+from the store — both sides derive the same address, correlation is free.
+It is the right shape *if* pecan ever manages its own on-chain keys. Today
+it is a bad trade: deposits land in the CLN wallet, and CLN has no
+watch-only key import — self-derived addresses would move key custody into
+pecan (hot keys, PSBT sweeps), a service that currently holds zero bitcoin
+keys. Deterministic ≠ stateless, too: the quote-time `expected_sat` (rate
+pin against the free-option problem) must be frozen per quote regardless,
+and exchange practice keeps allocation records even with pure derivation —
+determinism makes state *recoverable*, not unnecessary.
+
+**Silent Payments (BIP-352)** are the wrong tool here despite being the
+closest match to "client derives from a static server pubkey":
+
+- *Correlation*: BIP-352 carries no memo/label — payments to one `sp1`
+  address are distinguishable only by amount. Two concurrent quotes with
+  the same sat expectation become ambiguous. Per-quote derived addresses
+  (what we have) keep exact correlation.
+- *Payer compatibility*: payers are arbitrary external wallets; SP
+  **sending** support (Sparrow, Cake, BlueWallet, BitBox02, as of mid-2026)
+  is still a minority, and our lab's CLN payers have none.
+- *Detection*: receiving requires scanning every eligible taproot output
+  per block — Bitcoin Core ships nothing; Sparrow-style receiving needs an
+  SP-capable Electrum (Frigate) or BlindBit oracle; and server-side
+  scanning designs give up **mempool visibility**, which our 0-conf
+  settlement depends on.
+- *Privacy*: the one thing SP buys (no address reuse) we already have —
+  every quote gets a fresh address.
+
+The Lightning analogue of the static-pubkey idea — **BOLT-12 offers**
+(static offer string, payer derives the payment, receiver correlates by
+offer id) — is the right place to use this pattern if the ln rail adopts
+bolt12 (cdk already implements it).
+
 ## Melt saga (teller withdraws)
 
 Withdraws are a durable saga across wallet reloads. Four hard constraints

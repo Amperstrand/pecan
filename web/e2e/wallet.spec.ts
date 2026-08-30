@@ -27,8 +27,27 @@ let walletErrors: string[] = []
 
 test.beforeAll(async ({ browser }) => {
   const context = await browser.newContext({ ignoreHTTPSErrors: true })
+  await context.addInitScript(() => {
+    // mirror the wallet debug ring buffer into the console during e2e;
+    // console.debug does not trip the console-error gate
+    window.localStorage.setItem("pecan-debug", "1")
+  })
   sharedPage = await context.newPage()
   walletErrors = trackWalletErrors(sharedPage)
+})
+
+test.afterEach(async ({}, testInfo) => {
+  if (testInfo.status === testInfo.expectedStatus) return
+  if (!sharedPage) return
+  const log = await sharedPage
+    .evaluate(() =>
+      (window as { __pecanWalletLog?: () => unknown[] }).__pecanWalletLog?.() ?? [],
+    )
+    .catch(() => [])
+  await testInfo.attach("wallet-log", {
+    body: JSON.stringify(log, null, 2),
+    contentType: "application/json",
+  })
 })
 
 test.afterAll(async () => {
