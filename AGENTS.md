@@ -1,4 +1,4 @@
-# Pecan — NOK Cashu giftcard mint (pecan processor + coco 2 web wallet)
+# Pecan — EUR Cashu giftcard mint (pecan processor + coco 2 web wallet)
 
 ## Branch ownership
 
@@ -12,18 +12,22 @@ deployment state into main.
 Cashu mint at https://giftcard.cashu.exchange (inr2, 46.224.104.12) running:
 `giftcard-mint-mintd-1` (cdk-mintd 0.18.0-rc.0, :8089), `pecan-pecan-1`
 (Rust teller/processor + embedded web dist, :50054/:9091), `pecan-sandbox-1`,
-caddy :443. Unit `nok`; amounts in øre internally.
+caddy :443. Unit `eur`; amounts in cents internally, displayed as €.
 
-Two minting rails, ONE processor (cdk-mintd allows a single gRPC processor;
-methods come from its get_settings): `branch` (teller code at the counter)
-and `ln` (real bolt11 invoice on the signet CLN node `cln-clboss-signet`,
-NOK→sat converted in pecan from a public rate + 10% markup). Melting is
-teller-only — the mint is one-way by construction. The payment-processor
-proto cannot carry the method name yet (upstream PR #2275), so the wallet
-tags the rail in the flattened extra fields (`{"rail":"ln"}`) and the
-processor routes on it. See docs/lightning-mint.md. NOTE: the mint must be
-restarted after any pecan recreate (deploy.sh does this) or quotes fail
-with "Invalid payment method".
+THREE minting rails, ONE processor (cdk-mintd allows a single gRPC
+processor; methods come from its get_settings): `branch` (teller code at
+the counter), `ln` (real bolt11 invoice on the signet CLN node, EUR→sat
+converted in pecan from a public rate + 10% markup), and `btc` (per-quote
+bech32 address, esplora-watched, settles at
+`CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS` — **0 = mempool settlement on
+this signet deployment**; use ≥1, realistically ≥6, on any value-carrying
+network). Melting is teller-only — the mint is one-way by construction.
+The payment-processor proto cannot carry the method name yet (upstream PR
+#2275), so the wallet tags the rail in the flattened extra fields
+(`{"rail":"ln"}`) and the processor routes on it. See
+docs/lightning-mint.md — including the melt-saga design and its change-loss
+postmortem. NOTE: the mint must be restarted after any pecan recreate
+(deploy.sh does this) or quotes fail with "Invalid payment method".
 
 ## Rule: persist verification as automated tests and tooling
 
@@ -35,21 +39,32 @@ these without spending LLM tokens on browser driving.
 
 - Browser wallet tests: `scripts/e2e.sh` (fetches the generated admin
   password from the server and runs Playwright against prod; teller
-  match-and-settle happen through the real HTTP API). The processor
-  generates a RANDOM admin password on first boot and persists it to
+  match-and-settle happen through the real HTTP API, waiting for the
+  wallet's fund lock before paying out). With signet 0-conf the full suite
+  runs in ~1 min; the onchain test adapts its timeout to block cadence if
+  confirmations are ever required again. The processor generates a RANDOM
+  admin password on first boot and persists it to
   /opt/pecan-config/initial-admin-password.txt (0600; delete after first
   login). /api/login is throttled: 10 failures per (IP, username) per 60s.
 - Unit tests: `cd web && npm test` (vitest). Fast inner loop — handler
   payload shapes, error mappings, and pure utils are pinned here; run these
   BEFORE deploying to iterate on logic without the e2e cycle.
-- Deploy: `scripts/deploy.sh` (rsync source + deploy/docker-compose.prod.yml
-  → docker build → compose up → verify). Fresh-Deploy behavior: empty
-  /opt/pecan-config → random admin password (see above) + headless
-  re-attachment to the mint via the INITIAL_* env vars in the compose. The
-  mint (own compose at /opt/giftcard-mint) needs `cdk-mintd config init
-  --file mint.toml` after its sqlite is wiped, and crash-loops until the
-  processor is listening — start pecan first.
-- Re-vendor the coco fork: `scripts/vendor-coco.sh [version]`.
+- Processor tests: `cd processor && cargo test` (61 tests, includes the
+  onchain settle predicate for both 0- and ≥1-conf modes). CI runs them,
+  but ONLY on `main` pushes and PRs — run locally before pushing
+  `deployment`.
+- Deploy: `scripts/deploy.sh` — rsync source to **ai-legion-small**,
+  Docker build THERE (32GB RAM; inr2 OOMs on Rust builds), ship the image
+  tar to inr2, compose up, restart the mint, verify the bundle. Fresh-Deploy
+  behavior: empty /opt/pecan-config → random admin password + headless
+  re-attachment via INITIAL_* env vars. The mint (own compose at
+  /opt/giftcard-mint) needs `cdk-mintd config init --file mint.toml` after
+  its sqlite is wiped, and crash-loops until the processor is listening —
+  start pecan first.
+- Re-vendor the coco fork: `scripts/vendor-coco.sh [version]` (typecheck +
+  build + test the fork, pack, vendor). Then regenerate the LINUX lockfile
+  (no local docker? rsync `web/` to ai-legion-small and run the
+  `node:22-bookworm-slim` npm install from gen-web-lockfile.sh there).
 - Spec-quote drift: `scripts/spec-quote-check.sh` (greatspectations). Where a
   NUT requirement is implemented, embed the verbatim spec line as a
   `// NUT #<id>: ...` comment — the check fails when the NUTs change under
@@ -60,15 +75,19 @@ these without spending LLM tokens on browser driving.
 
 - `web/src/lib/coco/` — coco 2 wallet integration: `branch-methods.ts`
   (method registries via declaration merging), `mint-branch-handler.ts`,
-  `melt-branch-handler.ts`, `coco-wallet.ts` (UI-facing API, seed in
-  localStorage `giftcard-coco-seed-v1`, IDB `giftcard-coco-wallet`).
+  `melt-branch-handler.ts` (eager teller melts + exact-amount pre-swap —
+  see the gotchas), `coco-wallet.ts` (UI-facing API, seed in localStorage
+  `giftcard-coco-seed-v1`, IDB `giftcard-coco-wallet`, reload-resume for
+  pending AND prepared ops).
 - `web/vendor/` — pinned tarballs of the `Amperstrand/coco` fork
-  (github.com/Amperstrand/coco, branch `main`, dist committed; fork carries
-  the custom-method extensibility fixes — see its git log).
+  (github.com/Amperstrand/coco, branch `main`, dist committed; see the
+  fork README's branch table for the upstream-PR pipeline).
 - `web/src/pages/wallet.tsx` — coco wallet UI (`/console/wallet`);
   `wallet-classic.tsx` — legacy cashu-ts wallet (`/console/wallet-classic`).
 - `processor/` — Rust cdk payment processor for `branch` (gRPC to mintd) +
   teller/operator web UI. SPA routes served from `processor/src/web.rs`.
+  `processor/src/onchain.rs` — btc rail (esplora poller; pure
+  `received_and_confirmations`/`settles` are unit-tested).
 - `mintctl/` — mint install/wizard tooling.
 
 ## Gotchas
@@ -84,15 +103,41 @@ these without spending LLM tokens on browser driving.
   the linux rolldown bindings (npm/cli#4828) and `npm ci` in the Docker
   build would fail. After local `npm install`, restore the committed
   lockfile (`git checkout web/package-lock.json`) before committing.
+
 - Console roles: `admin` sees the Mint/Access tabs; plain tellers only
   match/settle. New users are tellers; the seeded account is admin.
+
 - Custom NUT-05 melt requests to cdk-axum MUST include `method` and
   `request` fields in the body or the mint answers 400 "Invalid payment
   method" (see `melt-branch-handler.ts`).
+
 - Custom NUT-04 mint quote requests need `unit` and (for locked giftcard
   deposits) `pubkey`; NUT-20 signatures are seed-derived per quote by coco's
   keyring.
+
 - inr2 disk is tight (~38G): `docker builder prune -af` before big builds
   (deploy.sh does this).
+
 - Wallet polls must treat `ops.*.refresh` errors as benign (lock contention
   with coco's background watchers, which own state progression).
+
+- **Melt change is one-time knowledge.** The teller rail must melt EAGERLY
+  (mark-paid refuses until the wallet locks funds: "waiting for the wallet
+  to lock funds"), the mint burns inputs at that POST, and the overpay
+  comes back as change signatures that state checks cannot re-fetch on
+  cdk-mintd 0.18.0-rc.0. Therefore `MeltBranchHandler.needsSwapFor` swaps
+  to EXACT amounts on any overshoot — exact melts return no change, and
+  lost swap responses are recoverable via restore. Full story:
+  docs/lightning-mint.md § Melt saga.
+
+- **e2e onchain payer liquidity.** Every run burns ~7.4k sat (€50 is the
+  mint's onchain minimum). The helper fails over across
+  cln-hub/vls/nostr-signet. CLN reserves a wallet's inputs for ~144 blocks
+  after a FAILED withdraw construction — a killed/stalled RPC bricks that
+  node's wallet for a day, so the helper uses a 300s timeout and reports
+  all three nodes' errors. Refill payers from cln-swap-signet (it receives
+  every onchain deposit) or a signet faucet when they run dry.
+
+- Wallet IndexedDB survives page reloads; force-clear button is the
+  escape hatch (signet only). The EUR switch means old NOK operations in
+  user browsers are inert (unit filter in getPendingDeposit skips them).

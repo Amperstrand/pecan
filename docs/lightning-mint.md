@@ -1,21 +1,21 @@
 # Three-rail minting: teller + lightning + onchain
 
-giftcard.nok mints NOK ecash over two payment rails, both served by ONE
-pecan processor over the single gRPC connection cdk-mintd allows
-(`[grpc_processor]` is a single top-level section — a second processor
-would need a second mint; a second *method* needs none).
+giftcard.cashu.exchange mints EUR ecash over three payment rails, all
+served by ONE pecan processor over the single gRPC connection cdk-mintd
+allows (`[grpc_processor]` is a single top-level section — a second
+processor would need a second mint; a second *method* needs none).
 
 ```
-wallet ──POST /v1/mint/quote/{branch|ln}──▶ cdk-mintd ──gRPC CreatePayment(method)──▶ pecan
-                                                                                        │
-                                              ┌─────────────────────────────────────────┤
-                                              ▼                                         ▼
-                                        branch rail                                 ln rail
-                                     (teller tickets)                    (signet CLN @ inr2, socket)
-                                                                                      │
-                                                          nok → sat (public rate + 10%)│
-                                                          invoice → wallet ────────────┘
-                                                          listinvoices poll → PaymentReceived
+wallet ─POST /v1/mint/quote/{branch|ln|btc}─▶ cdk-mintd ─gRPC CreatePayment(method)─▶ pecan
+                                                                                    │
+                                            ┌───────────────────────────────────────┤
+                                            ▼                   ▼                   ▼
+                                      branch rail           ln rail             btc rail
+                                   (teller tickets)    (signet CLN @ inr2)   (per-quote bech32,
+                                                        │                     esplora-watched)
+                                                        │ eur→sat (rate+10%)
+                                                        invoice → wallet
+                                                        listinvoices poll → PaymentReceived
 ```
 
 ## Rails
@@ -24,13 +24,14 @@ wallet ──POST /v1/mint/quote/{branch|ln}──▶ cdk-mintd ──gRPC Creat
 |---|---|---|---|
 | Mint in | Teller code (quote-id tail) at the counter | Real bolt11 invoice (signet) | Per-quote bech32 address |
 | Melt out | Teller payout (`mark-paid` after cash) | **Refused** — one-way mint | **Refused** — one-way mint |
-| Conversion | none (nok = nok) | NOK/BTC public rate + markup, in pecan | same rate+markup; `expected_sat` in the quote extras |
+| Conversion | none (eur = eur) | EUR/BTC public rate + markup, in pecan | same rate+markup; `expected_sat` in the quote extras |
 | Settlement | Operator marks paid in the console | invoice poller → `PaymentReceived` | esplora utxo poller → `PaymentReceived` |
-| Minimum | 1 kr | 1 kr | 50 kr (dust + chain fees) |
+| Minimum | mint settings floor | mint settings floor | €50 — dust + chain fees (`MIN_ONCHAIN_ORE`) |
 
 **One-way by construction**: `get_payment_quote`/`make_payment` reject
-method `ln` (`Error::UnsupportedPaymentOption`), so NUT-05 never completes
-an ln melt. The only exit from NOK ecash is cash at the counter.
+methods `ln` and `btc` (`Error::UnsupportedPaymentOption`), so NUT-05 never
+completes a non-teller melt. The only exit from EUR ecash is cash at the
+counter.
 
 ## Why the conversion lives in pecan
 
@@ -82,14 +83,16 @@ method-specific settlement logic. pecan converts NOK→sat at quote time
 CDK_BRANCH_PROCESSOR_LN=true
 CDK_BRANCH_PROCESSOR_CLN_SOCKET=/run/pecan-cln/signet/lightning-rpc
 CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT=10
-CDK_BRANCH_PROCESSOR_LN_RATE_URL=https://api.yadio.io/rate/BTC/NOK
-volumes:
-  - /opt/inr2-swapnet/cln-clboss-data:/run/pecan-cln:ro?  # see note
+CDK_BRANCH_PROCESSOR_ONCHAIN=true
+CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS=0   # signet: mempool settlement.
+CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL=https://mempool.space/signet/api
 ```
 
-The socket itself needs write access for `invoice` calls; mount the
-node's lightning dir (the socket re-appears in it on node restart —
-mounting the socket FILE would break across restarts).
+The rate source defaults to `https://api.yadio.io/rate/BTC/{unit}`
+(unit-parameterized; eur today). The socket itself needs write access for
+`invoice` calls; mount the node's lightning dir (the socket re-appears in
+it on node restart — mounting the socket FILE would break across
+restarts).
 
 The mint needs one restart after enabling the rails — it reads the
 processor's `get_settings` (which advertises every enabled method) at boot.
@@ -103,12 +106,61 @@ public esplora directly (`mempool.space/signet/api` by default,
 `CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL` to override). Addresses still
 belong to the node's wallet; only detection is explorer-based. With
 `ONCHAIN_CONFIRMATIONS=0` the deposit settles as soon as esplora's mempool
-shows the utxo; `=1` waits for a block. Underpayments never settle
-(quote expires); overpayments settle the quoted NOK and tip the mint.
+shows the utxo (the current signet deployment — the e2e suite runs in ~1
+min instead of waiting 5–23+ min per block); `≥1` waits for that many
+blocks — mandatory on any value-carrying network, where doublespend
+acceptance means the mint pays out ecash for a transaction that may never
+confirm. Underpayments never settle (quote expires); overpayments settle
+the quoted amount and tip the mint. The settle predicate
+(`received_and_confirmations` / `settles` in `processor/src/onchain.rs`) is
+unit-tested for both modes because the fast e2e only exercises 0-conf.
 
 The CLN socket client holds ONE persistent connection (a connect-per-call
 pattern aggravated an RPC-read crash on a lab node) and skips the blank
 lines CLN frames responses with.
+
+## Melt saga (teller withdraws)
+
+Withdraws are a durable saga across wallet reloads. Four hard constraints
+shape the design; each was learned the hard way:
+
+1. **The melt must happen EAGERLY.** `mark-paid` refuses while the ticket
+   is `waiting` — the operator may only hand out cash after the wallet has
+   locked (burned) its proofs at the mint (make_payment flips the ticket to
+   `pending`). Deferring the melt until the teller settles deadlocks the
+   counter flow.
+2. **The mint burns inputs at the melt POST** — even while the quote is
+   UNPAID — and returns the overpay as change (blinded signatures) in that
+   response.
+3. **Change signatures are one-time knowledge.** Quote state checks cannot
+   re-fetch them: cdk-mintd 0.18.0-rc.0's custom-method check omits
+   `change` (master's `check_melt_quote` re-serves it from the
+   `blind_signature` table — verify before relying on that). A melt
+   response lost to a page reload loses the overpay forever.
+4. **Reloads land anywhere in prepare → swap → melt.** Prepared melt ops
+   are NOT auto-driven by coco (upstream leaves them for manual rollback),
+   so the wallet's `resumePendingOperations` executes them once after a
+   reload; pending/executing ops are driven by the settlement watcher.
+
+**Design consequence**: `MeltBranchHandler.needsSwapFor` (coco ≥1.0.10
+hook) returns swap-on-any-overshoot. Proof granularity (e.g. a single
+512-cent proof for a 500-cent melt) would otherwise mint change; swapping
+to exact amounts first means the melt returns NO change — nothing to lose
+when a response dies. A lost SWAP response is recoverable because swap
+outputs are deterministic and re-fetchable from the mint (restore path in
+coco's executing-recovery).
+
+**Postmortem (2026-08-30)**: every reload-saga e2e run lost €0.12 of a
+€5.12 melt. Mint DB showed 512-in/500-melted with the change never claimed.
+Fixed by the exact-amount swap + prepared-op resume; suite 9/9 twice. The
+e2e helper now polls the ticket out of `waiting` before settling (the
+swap-then-melt needs two mint round trips), and `readBalance` waits out
+the `… €` placeholder.
+
+**Residual window**: a page death during the finalize-time melt of an
+exact amount loses nothing (no change), but a death during the SWAP
+itself relies on the restore path, which the suite does not deliberately
+exercise — that is sandbox-processor work (issue #1).
 
 ## The free-option problem (exchange-rate risk during the deposit window)
 

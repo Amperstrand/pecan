@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # deployment is our production branch — a rename refactor once broke
+    # `cargo test` there for days because CI only watched main
+    branches: [main, deployment]
   pull_request:
 
 jobs:
