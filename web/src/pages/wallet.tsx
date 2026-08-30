@@ -550,6 +550,12 @@ export function WalletPage() {
                 <p className="text-sm text-muted-foreground">
                   Give this code to the teller:
                 </p>
+                <div className="flex justify-center">
+                  <QrCodeImg
+                    text={depositState.quote.quoteId}
+                    alt="Teller code QR — encodes the bare quote id"
+                  />
+                </div>
                 <p className="font-mono text-3xl font-bold tracking-widest select-all">
                   {depositState.quote.tail}
                 </p>
