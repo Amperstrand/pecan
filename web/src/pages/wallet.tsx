@@ -326,6 +326,7 @@ export function WalletPage() {
   }
 
   const startDeposit = async () => {
+    if (depositState.phase === "pending") return
     const amount = parseFloat(depositAmount)
     if (!amount || amount < 1 || amount > 1000) return
     setDepositState({ phase: "creating" })

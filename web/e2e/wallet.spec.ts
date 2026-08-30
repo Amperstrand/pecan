@@ -7,7 +7,7 @@ import {
   readBalance,
   readTellerCode,
   readWalletDb,
-  sendOnchainFromVls,
+  sendOnchainFromExternal,
   sendOnchainToAddress,
   trackWalletErrors,
   waitForDepositFormReset,
@@ -126,7 +126,7 @@ test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", ()
     const expectedSat = Number(sendCaption?.match(/\d+/)?.[0] ?? 0)
     expect(expectedSat).toBeGreaterThan(1000)
 
-    const txid = sendOnchainFromVls(address, expectedSat)
+    const txid = sendOnchainFromExternal(address, expectedSat)
     expect(txid).toHaveLength(64)
 
     // The progress bar shows the mempool state within ~20s

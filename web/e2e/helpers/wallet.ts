@@ -59,7 +59,7 @@ export async function readBalance(page: Page): Promise<number> {
  * deposits (MINT-… quote tail) and withdrawals (MELT-… quote tail).
  */
 export async function readTellerCode(page: Page): Promise<string> {
-  const code = page.locator('p:has-text("Give this code to the teller:") + p')
+  const code = page.locator('p.font-mono.text-3xl')
   await code.waitFor({ state: "visible", timeout: 30_000 })
   const text = (await code.textContent())?.trim() ?? ""
   if (!/^[A-Z0-9]{6}$/.test(text)) {
@@ -103,9 +103,9 @@ export function payLightningInvoiceFromHub(invoice: string): string {
 }
 
 /** Sends on-chain sats to a deposit address from the hub node's wallet. */
-/** Sends on-chain sats from the VLS node — a genuinely external wallet. */
-export function sendOnchainFromVls(address: string, sat: number): string {
-  return sendOnchainFrom("cln-vls-signet", address, sat)
+/** Sends on-chain sats from the nostr node — a genuinely external wallet. */
+export function sendOnchainFromExternal(address: string, sat: number): string {
+  return sendOnchainFrom("cln-nostr-signet", address, sat)
 }
 
 function sendOnchainFrom(node: string, address: string, sat: number): string {
