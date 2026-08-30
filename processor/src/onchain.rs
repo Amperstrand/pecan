@@ -77,6 +77,24 @@ struct AddressUtxoStatus {
     block_height: Option<u64>,
 }
 
+/// Total received (msat) and best confirmations across an address's utxos.
+/// Unconfirmed (mempool) outputs count toward the amount with 0 confirmations.
+fn received_and_confirmations(utxos: &[AddressUtxo], tip: u64) -> (u64, u32) {
+    utxos.iter().fold((0u64, 0u32), |(sum, confs), u| {
+        let c = match (u.status.confirmed, u.status.block_height) {
+            (true, Some(h)) if tip >= h => (tip - h + 1) as u32,
+            _ => 0,
+        };
+        (sum + u.value * 1000, confs.max(c))
+    })
+}
+
+/// A watching address settles once the payment covers the quoted expectation
+/// and carries the required confirmations (0 = mempool acceptance).
+fn settles(received_msat: u64, expected_sat: u64, confs: u32, required: u32) -> bool {
+    received_msat >= expected_sat * 1000 && confs >= required
+}
+
 impl OnchainRail {
     pub async fn start(
         cln: Arc<ClnClient>,
@@ -158,25 +176,16 @@ impl OnchainRail {
                     let Ok(utxos) = resp.json::<Vec<AddressUtxo>>().await else {
                         continue;
                     };
-                    let (msat, confs) = utxos.into_iter().fold(
-                        (0u64, 0u32),
-                        |(sum, confs), u| {
-                            let c = match (u.status.confirmed, u.status.block_height) {
-                                (true, Some(h)) if tip >= h => (tip - h + 1) as u32,
-                                _ => 0,
-                            };
-                            (sum + u.value * 1000, confs.max(c))
-                        },
-                    );
+                    let (msat, confs) = received_and_confirmations(&utxos, tip);
                     let mut settled: Option<(u64, CurrencyUnit)> = None;
                     {
                         let mut guard = addresses.write().await;
                         if let Some(rec) = guard.get_mut(&quote_id) {
                             rec.received_msat = msat;
                             rec.confirmations = confs;
-                            let enough = msat >= rec.expected_sat * 1000;
-                            let confirmed = confs >= required;
-                            if enough && confirmed && rec.state == AddressState::Watching {
+                            if rec.state == AddressState::Watching
+                                && settles(msat, rec.expected_sat, confs, required)
+                            {
                                 rec.state = AddressState::Settled;
                                 settled = Some((rec.amount_ore, rec.unit.clone()));
                                 persist(&store, &guard).await;
@@ -268,5 +277,64 @@ async fn persist(
         if let Err(e) = tokio::fs::write(path, bytes).await {
             tracing::warn!("onchain rail store write failed: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utxo(value_sat: u64, confirmed: bool, height: Option<u64>) -> AddressUtxo {
+        AddressUtxo {
+            value: value_sat,
+            status: AddressUtxoStatus {
+                confirmed,
+                block_height: height,
+            },
+        }
+    }
+
+    #[test]
+    fn mempool_utxo_counts_amount_with_zero_confirmations() {
+        let (msat, confs) = received_and_confirmations(&[utxo(1000, false, None)], 100);
+        assert_eq!((msat, confs), (1_000_000, 0));
+    }
+
+    #[test]
+    fn confirmed_utxo_confirmations_from_tip_height() {
+        let (msat, confs) = received_and_confirmations(&[utxo(1000, true, Some(98))], 100);
+        assert_eq!((msat, confs), (1_000_000, 3));
+    }
+
+    #[test]
+    fn height_above_tip_is_treated_as_unconfirmed() {
+        // Reorg edge: an esplora utxo whose height exceeds the tip we fetched
+        let (_, confs) = received_and_confirmations(&[utxo(1000, true, Some(101))], 100);
+        assert_eq!(confs, 0);
+    }
+
+    #[test]
+    fn multiple_utxos_sum_amounts_and_take_best_confs() {
+        let utxos = [utxo(400, false, None), utxo(600, true, Some(99))];
+        let (msat, confs) = received_and_confirmations(&utxos, 100);
+        assert_eq!((msat, confs), (1_000_000, 2));
+    }
+
+    #[test]
+    fn zero_required_settles_on_mempool_acceptance() {
+        assert!(settles(1_000_000, 1000, 0, 0));
+    }
+
+    #[test]
+    fn one_required_waits_for_a_confirmation() {
+        assert!(!settles(1_000_000, 1000, 0, 1));
+        assert!(settles(1_000_000, 1000, 1, 1));
+        assert!(settles(1_000_000, 1000, 6, 1));
+    }
+
+    #[test]
+    fn underpayment_never_settles_regardless_of_confirmations() {
+        assert!(!settles(999_999, 1000, 6, 0));
+        assert!(!settles(999_999, 1000, 6, 1));
     }
 }

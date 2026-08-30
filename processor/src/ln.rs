@@ -491,15 +491,15 @@ mod tests {
     #[test]
     fn converts_subunit_to_sat_with_markup_rounding_up() {
         // 100 units at 1,000,000 units/BTC, no markup → 10,000 sat exactly.
-        assert_eq!(nok_ore_to_sat(10_000, 1_000_000.0, 0.0), 10_000);
+        assert_eq!(subunit_to_sat(10_000, 1_000_000.0, 0.0), 10_000);
         // 10% markup on the same quote → 11,000 sat (f64 noise must not
         // round an exact result up).
-        assert_eq!(nok_ore_to_sat(10_000, 1_000_000.0, 10.0), 11_000);
+        assert_eq!(subunit_to_sat(10_000, 1_000_000.0, 10.0), 11_000);
         // Fractional results round UP in the mint's favor: 1 subunit at 3 units
         // per BTC → 0.01/3 * 1e8 = 333333.3̅ sat.
-        assert_eq!(nok_ore_to_sat(1, 3.0, 0.0), 333_334);
+        assert_eq!(subunit_to_sat(1, 3.0, 0.0), 333_334);
         // 5 NOK (500 cents) at a realistic 1.2M NOK/BTC with 10% markup:
         // 5.5 / 1_200_000 * 1e8 = 458.33 sat.
-        assert_eq!(nok_ore_to_sat(500, 1_200_000.0, 10.0), 459);
+        assert_eq!(subunit_to_sat(500, 1_200_000.0, 10.0), 459);
     }
 }

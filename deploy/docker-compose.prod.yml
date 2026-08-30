@@ -33,10 +33,12 @@ services:
       CDK_BRANCH_PROCESSOR_CLN_SOCKET: "/run/pecan-cln/signet/lightning-rpc"
       CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT: "10"
       # Onchain-minting rail: per-quote bech32 addresses on the same node.
-      # 1 confirmation = settle when esplora reports the block (signet
-      # blocks arrive every ~5 min). 0 = mempool settlement.
+      # 0 = mempool settlement (signet test money — doublespend risk is
+      # acceptable and e2e stops waiting ~5-23 min for a block; pinned by
+      # processor onchain unit tests). On any value-carrying network use
+      # >= 1 (realistically >= 6).
       CDK_BRANCH_PROCESSOR_ONCHAIN: "true"
-      CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "1"
+      CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "0"
     logging:
       driver: json-file
       options:
