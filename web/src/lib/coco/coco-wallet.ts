@@ -194,26 +194,37 @@ export async function createWithdraw(amountInput: number, recipient: string): Pr
   })
 
   // The teller can only pay out once this wallet has locked funds at the
-  // mint — hand the code over no sooner. Until then a reload could strand
-  // the op before its melt POST (nothing for the resume driver to pick up)
-  // and the ticket sits unpayable.
-  const lockDeadline = Date.now() + 30_000
-  for (;;) {
-    const op = await coco.ops.melt.get(prepared.id)
-    if (op && op.state !== "prepared" && op.state !== "executing") {
-      break
-    }
-    if (Date.now() > lockDeadline) {
-      break
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
+  // mint, so the code must not appear before that. The lock happens INSIDE
+  // the melt POST — which long-polls until the teller settles — so the op
+  // stays 'executing' and cannot signal it. The mint quote can: UNPAID →
+  // PENDING means the ticket flipped to submitted (funds locked). Poll the
+  // quote state directly; touches no coco locks, so the in-flight melt is
+  // undisturbed.
+  await waitForMeltQuoteLock(quote.quoteId)
 
   return {
     quoteId: quote.quoteId,
     tail: quote.quoteId.slice(-6).toUpperCase(),
     amount,
     submitted: true,
+  }
+}
+
+async function waitForMeltQuoteLock(quoteId: string): Promise<void> {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${MINT_URL()}/v1/melt/quote/branch/${quoteId}`)
+      if (res.ok) {
+        const q = (await res.json()) as { state?: string }
+        if (q.state === "PENDING" || q.state === "PAID") {
+          return
+        }
+      }
+    } catch {
+      // transient network error — retry until the deadline
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300))
   }
 }
 
