@@ -1,0 +1,51 @@
+# Production compose for the pecan teller/processor on inr2.
+# Lives in the repo so fresh deploys are reproducible; scripts/deploy.sh
+# rsyncs it to /opt/pecan/docker-compose.prod.yml.
+#
+# The mint (giftcard-mint-mintd-1) is managed by its own compose at
+# /opt/giftcard-mint — NOT here. Caddy (:443) terminates TLS in front.
+#
+# First-boot behavior when /opt/pecan-config is empty:
+#   * setup.json is absent → the INITIAL_* vars below attach the processor
+#     to the mint headlessly (first-boot-only; ignored once setup.json exists)
+#   * users.json is absent and no INITIAL_ADMIN_PASSWORD is set → the
+#     processor generates a RANDOM admin password and logs it once:
+#       docker logs pecan-pecan-1 2>&1 | grep 'generated random admin password'
+services:
+  pecan:
+    image: pecan:nok
+    command: ["cdk-branch-processor"]
+    network_mode: host
+    environment:
+      RUST_LOG: "info,cdk_payment_processor=info"
+      CDK_BRANCH_PROCESSOR_WORK_DIR: /var/lib/cdk-branch-processor
+      CDK_BRANCH_PROCESSOR_CONFIG_DIR: /var/lib/pecan/config
+      CDK_BRANCH_PROCESSOR_GRPC_ADDR: "127.0.0.1"
+      CDK_BRANCH_PROCESSOR_GRPC_PORT: "50054"
+      CDK_BRANCH_PROCESSOR_HTTP_ADDR: "127.0.0.1"
+      CDK_BRANCH_PROCESSOR_HTTP_PORT: "9091"
+      CDK_BRANCH_PROCESSOR_INITIAL_UNIT: "nok"
+      CDK_BRANCH_PROCESSOR_INITIAL_MINT_URL: "http://127.0.0.1:8089"
+      CDK_BRANCH_PROCESSOR_INITIAL_ADVERTISED_GRPC: "127.0.0.1:50054"
+      # Lightning-minting rail (see docs/lightning-mint.md): signet CLN node
+      # on this host, NOK/BTC converted in-process with a 10% markup.
+      CDK_BRANCH_PROCESSOR_LN: "true"
+      CDK_BRANCH_PROCESSOR_CLN_SOCKET: "/run/pecan-cln/signet/lightning-rpc"
+      CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT: "10"
+      # Onchain-minting rail: per-quote bech32 addresses on the same node.
+      # 1 confirmation = settle when esplora reports the block (signet
+      # blocks arrive every ~5 min). 0 = mempool settlement.
+      CDK_BRANCH_PROCESSOR_ONCHAIN: "true"
+      CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - /opt/pecan-data:/var/lib/cdk-branch-processor
+      - /opt/pecan-config:/var/lib/pecan/config
+      # The CLN node's lightning dir (socket re-appears here on node restart;
+      # mounting the socket file itself would break). invoice RPC needs write.
+      - /opt/inr2-swapnet/cln-swap-data:/run/pecan-cln
+    restart: unless-stopped

@@ -19,6 +19,7 @@
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -34,15 +35,26 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::config::MELT_TICKET_TTL_SECS;
+use crate::ln::LnRail;
+use crate::onchain::OnchainRail;
 use crate::state::{BranchState, Ticket};
 
-/// Single-method, single-unit payment backend for one attached mint.
+/// Onchain deposits carry real chain weight; keep them well above dust.
+const MIN_ONCHAIN_ORE: u64 = 5_000;
+
+/// Single-unit payment processor for one attached mint; routes mint quotes
+/// per method: the teller rail (`branch`) and, when configured, the
+/// lightning rail (`ln`). Melt quotes exist for `branch` only.
 pub struct BranchBackend {
     state: BranchState,
     /// The one unit this install serves. `None` until the operator completes
     /// setup in the console; updated live (no restart) when setup changes.
     unit: RwLock<Option<CurrencyUnit>>,
     method: String,
+    /// Lightning-minting rail; `None` unless CDK_BRANCH_PROCESSOR_LN=true.
+    ln: Option<Arc<LnRail>>,
+    /// Onchain-minting rail; `None` unless CDK_BRANCH_PROCESSOR_ONCHAIN=true.
+    onchain: Option<Arc<OnchainRail>>,
     stream_active: AtomicBool,
     /// Unix seconds of the first `wait_payment_event` attach since this
     /// process started; 0 = never. Never cleared on client disconnect — it
@@ -63,11 +75,19 @@ impl std::fmt::Debug for BranchBackend {
 }
 
 impl BranchBackend {
-    pub fn new(state: BranchState, unit: Option<CurrencyUnit>, method: String) -> Self {
+    pub fn new(
+        state: BranchState,
+        unit: Option<CurrencyUnit>,
+        method: String,
+        ln: Option<Arc<LnRail>>,
+        onchain: Option<Arc<OnchainRail>>,
+    ) -> Self {
         Self {
             state,
             unit: RwLock::new(unit),
             method,
+            ln,
+            onchain,
             stream_active: AtomicBool::new(false),
             stream_attached_at: AtomicU64::new(0),
             last_settings_at: AtomicU64::new(0),
@@ -120,6 +140,123 @@ impl BranchBackend {
         }
         Ok(())
     }
+
+    /// Which rail a quote asks for: the (future, PR #2275) method field, or
+    /// today's `rail` tag in the flattened extra fields. Default: teller.
+    fn rail_of(opts: &cdk_common::payment::CustomIncomingPaymentOptions) -> &'static str {
+        match opts.method.trim() {
+            "ln" => return "ln",
+            "btc" => return "btc",
+            _ => {}
+        }
+        match opts.extra_json.as_deref() {
+            Some(extra) => match serde_json::from_str::<serde_json::Value>(extra) {
+                Ok(v) => match v.get("rail").and_then(|r| r.as_str()) {
+                    Some("ln") => "ln",
+                    Some("btc") => "btc",
+                    _ => "branch",
+                },
+                Err(_) => "branch",
+            },
+            None => "branch",
+        }
+    }
+
+    /// Lightning rail: create a real CLN invoice for the quote. The bolt11
+    /// string is the `request` the wallet renders; settlement is announced
+    /// by the rail's poller over the shared event channel.
+    async fn ln_create(
+        &self,
+        opts: cdk_common::payment::CustomIncomingPaymentOptions,
+    ) -> Result<CreateIncomingPaymentResponse, Error> {
+        let amount = opts
+            .amount
+            .as_ref()
+            .ok_or_else(|| Error::Custom("an amount is required".into()))?;
+        self.check_unit(amount.unit())?;
+        if amount.value() == 0 {
+            return Err(Error::Custom("amount must be greater than zero".into()));
+        }
+        // Same NUT-20 lock policy as the teller rail: the lock is what stops
+        // a quote-id eavesdropper from front-running after the invoice is
+        // paid.
+        if opts.pubkey.is_none() {
+            return Err(Error::Custom(
+                "ln mint quotes must be locked to a wallet key (NUT-20): create the quote \
+                 with a pubkey"
+                    .into(),
+            ));
+        }
+        let rail = self.ln.as_ref().expect("caller checked the rail is enabled");
+        let quote_id = opts.quote_id.to_string();
+        let (bolt11, expires_at) = match rail
+            .create_invoice(&quote_id, amount.value(), amount.unit(), opts.description.clone())
+            .await
+        {
+            Ok(created) => created,
+            Err(e) => {
+                tracing::warn!("ln invoice creation failed for {quote_id}: {e}");
+                return Err(e);
+            }
+        };
+        Ok(CreateIncomingPaymentResponse {
+            request_lookup_id: PaymentIdentifier::CustomId(quote_id),
+            request: bolt11,
+            expiry: expires_at.or(opts.unix_expiry),
+            extra_json: None,
+        })
+    }
+
+    /// Onchain rail: fresh bech32 address per quote. The response's
+    /// flattened extra carries `expected_sat` so the wallet can render the
+    /// exact amount to send. Settlement needs the expected sats on-chain
+    /// (plus confirmations per config).
+    async fn onchain_create(
+        &self,
+        opts: cdk_common::payment::CustomIncomingPaymentOptions,
+    ) -> Result<CreateIncomingPaymentResponse, Error> {
+        let amount = opts
+            .amount
+            .as_ref()
+            .ok_or_else(|| Error::Custom("an amount is required".into()))?;
+        self.check_unit(amount.unit())?;
+        if amount.value() < MIN_ONCHAIN_ORE {
+            return Err(Error::Custom(format!(
+                "onchain deposits must be at least {} {} (dust + chain fees); use lightning                  or the teller for smaller amounts",
+                MIN_ONCHAIN_ORE / 100,
+                amount.unit(),
+            )));
+        }
+        // Same NUT-20 lock policy as the other rails.
+        if opts.pubkey.is_none() {
+            return Err(Error::Custom(
+                "onchain mint quotes must be locked to a wallet key (NUT-20): create the \
+                 quote with a pubkey"
+                    .into(),
+            ));
+        }
+        let rail = self
+            .onchain
+            .as_ref()
+            .expect("caller checked the rail is enabled");
+        let quote_id = opts.quote_id.to_string();
+        let (address, expected_sat) = match rail
+            .new_address(&quote_id, amount.value(), amount.unit())
+            .await
+        {
+            Ok(created) => created,
+            Err(e) => {
+                tracing::warn!("onchain address creation failed for {quote_id}: {e}");
+                return Err(e);
+            }
+        };
+        Ok(CreateIncomingPaymentResponse {
+            request_lookup_id: PaymentIdentifier::CustomId(quote_id),
+            request: address,
+            expiry: opts.unix_expiry,
+            extra_json: Some(serde_json::json!({"expected_sat": expected_sat})),
+        })
+    }
 }
 
 #[async_trait]
@@ -141,6 +278,12 @@ impl MintPayment for BranchBackend {
         let unit = self.configured_unit()?;
         let mut custom = std::collections::HashMap::new();
         custom.insert(self.method.clone(), "{}".to_string());
+        if self.ln.is_some() {
+            custom.insert("ln".to_string(), "{}".to_string());
+        }
+        if self.onchain.is_some() {
+            custom.insert("btc".to_string(), "{}".to_string());
+        }
         Ok(SettingsResponse {
             // The stock boot handshake compares this against the mint's
             // `[[payment_backend]] unit` (strict, modulo sat/msat) — one unit
@@ -160,9 +303,31 @@ impl MintPayment for BranchBackend {
     ) -> Result<CreateIncomingPaymentResponse, Self::Err> {
         match options {
             IncomingPaymentOptions::Custom(opts) => {
-                // The proto still omits the method name (server-side sets "").
-                // Whatever method the mint advertises that points at us IS our
-                // method — see `get_settings` where we declare it.
+                // The gRPC proto cannot carry the method name yet (field 5 is
+                // reserved for the in-flight upstream PR #2275), so the mint
+                // drops it. Until then the wallet tags the rail in the
+                // request's flattened extra fields (`{"rail":"ln"}`) — the
+                // proto's documented pass-through for method-specific data.
+                // Absent tag or empty method = the teller rail (back-compat).
+                match Self::rail_of(&opts) {
+                    "ln" => {
+                        return match &self.ln {
+                            Some(_) => self.ln_create(*opts).await,
+                            None => {
+                                Err(Error::Custom("ln rail is not enabled on this processor".into()))
+                            }
+                        };
+                    }
+                    "btc" => {
+                        return match &self.onchain {
+                            Some(_) => self.onchain_create(*opts).await,
+                            None => Err(Error::Custom(
+                                "onchain rail is not enabled on this processor".into(),
+                            )),
+                        };
+                    }
+                    _ => {}
+                }
                 let amount = opts
                     .amount
                     .as_ref()
@@ -171,7 +336,7 @@ impl MintPayment for BranchBackend {
                 if amount.value() == 0 {
                     return Err(Error::Custom("amount must be greater than zero".into()));
                 }
-                // NUT-20 lock policy: cash over the counter is only safe when
+                // Lock policy (NUT-20): cash over the counter is only safe when
                 // the customer's wallet alone can mint the paid quote. The
                 // mint verifies signatures at mint time; we require the lock
                 // to exist at creation time.
@@ -200,6 +365,7 @@ impl MintPayment for BranchBackend {
                     request_lookup_id: PaymentIdentifier::CustomId(ticket.id.clone()),
                     // The "payment request" the wallet displays; handing its tail
                     // (or the quote id it embeds) to the teller IS the payment.
+                    // NUT #4: `quote` is a **unique and random** id generated by the mint to internally look up the payment state. `quote` **SHOULD** be UUID v7 with all 74 variable bits generated by a CSPRNG and **MUST** remain a secret between user and mint and **MUST NOT** be derivable from the payment request. A third party who knows the `quote` ID can front-run and steal the tokens that this operation mints. To prevent this, use [NUT-20][20] locks to enforce public key authentication during minting.
                     request: ticket.id,
                     expiry: opts.unix_expiry,
                     extra_json: None,
@@ -219,6 +385,12 @@ impl MintPayment for BranchBackend {
         self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
+                // One-way mint: the ln and onchain rails never melt.
+                if matches!(opts.method.trim(), "ln" | "btc")
+                    || extra_names_rail(opts.extra_json.as_deref())
+                {
+                    return Err(Error::UnsupportedPaymentOption);
+                }
                 // The wallet declares the payout amount in the melt quote
                 // request's `amount` field; the mint requires proofs covering
                 // exactly what we echo back, so misdeclaring cannot profit.
@@ -272,6 +444,12 @@ impl MintPayment for BranchBackend {
         self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
+                // One-way mint: the ln and onchain rails never melt.
+                if matches!(opts.method.trim(), "ln" | "btc")
+                    || extra_names_rail(opts.extra_json.as_deref())
+                {
+                    return Err(Error::UnsupportedPaymentOption);
+                }
                 // The wallet has locked its proofs at the mint; flip the ticket
                 // to Pending so the operator may dispense cash. The quote id is
                 // the correlation key set during get_payment_quote.
@@ -341,6 +519,31 @@ impl MintPayment for BranchBackend {
         &self,
         payment_identifier: &PaymentIdentifier,
     ) -> Result<Vec<WaitPaymentResponse>, Self::Err> {
+        // Ticket ids carry MINT-/MELT- prefixes; the ln rail keys its
+        // invoices by the bare quote id.
+        if let PaymentIdentifier::CustomId(id) = payment_identifier {
+            if !id.starts_with("MINT-") && !id.starts_with("MELT-") {
+                if let Some(rail) = &self.ln {
+                    if let Some((ore, unit)) = rail.paid_amount(id).await {
+                        return Ok(vec![WaitPaymentResponse {
+                            payment_identifier: PaymentIdentifier::CustomId(id.clone()),
+                            payment_amount: Amount::new(ore, unit),
+                            payment_id: id.clone(),
+                        }]);
+                    }
+                }
+                if let Some(rail) = &self.onchain {
+                    if let Some((ore, unit)) = rail.paid_amount(id).await {
+                        return Ok(vec![WaitPaymentResponse {
+                            payment_identifier: PaymentIdentifier::CustomId(id.clone()),
+                            payment_amount: Amount::new(ore, unit),
+                            payment_id: id.clone(),
+                        }]);
+                    }
+                }
+                return Ok(Vec::new());
+            }
+        }
         Ok(self.state.lookup_incoming(payment_identifier).await)
     }
 
@@ -357,10 +560,56 @@ impl MintPayment for BranchBackend {
     }
 }
 
+/// True when the flattened extra fields tag a non-teller rail (melt refusal).
+fn extra_names_rail(extra_json: Option<&str>) -> bool {
+    extra_json
+        .and_then(|extra| serde_json::from_str::<serde_json::Value>(extra).ok())
+        .and_then(|v| v.get("rail").and_then(|r| r.as_str()).map(str::to_string))
+        .is_some_and(|rail| rail == "ln" || rail == "btc")
+}
+
 fn unix_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extra_names_rail, BranchBackend};
+    use cdk_common::payment::CustomIncomingPaymentOptions;
+
+    fn opts(method: &str, extra: Option<&str>) -> CustomIncomingPaymentOptions {
+        CustomIncomingPaymentOptions {
+            method: method.to_string(),
+            description: None,
+            amount: None,
+            unix_expiry: None,
+            extra_json: extra.map(str::to_string),
+            quote_id: "00000000-0000-7000-8000-000000000000".parse().unwrap(),
+            pubkey: None,
+        }
+    }
+
+    #[test]
+    fn rail_routing_by_method_and_tag() {
+        assert_eq!(BranchBackend::rail_of(&opts("ln", None)), "ln");
+        assert_eq!(BranchBackend::rail_of(&opts("btc", None)), "btc");
+        assert_eq!(BranchBackend::rail_of(&opts("", Some(r#"{"rail":"ln"}"#))), "ln");
+        assert_eq!(BranchBackend::rail_of(&opts("", Some(r#"{"rail":"btc"}"#))), "btc");
+        // Default and malformed input route to the teller rail.
+        assert_eq!(BranchBackend::rail_of(&opts("", None)), "branch");
+        assert_eq!(BranchBackend::rail_of(&opts("", Some("not json"))), "branch");
+        assert_eq!(BranchBackend::rail_of(&opts("", Some(r#"{"other":1}"#))), "branch");
+    }
+
+    #[test]
+    fn melt_refusal_covers_both_non_teller_rails() {
+        assert!(extra_names_rail(Some(r#"{"rail":"ln"}"#)));
+        assert!(extra_names_rail(Some(r#"{"rail":"btc"}"#)));
+        assert!(!extra_names_rail(Some(r#"{"rail":"branch"}"#)));
+        assert!(!extra_names_rail(None));
+    }
 }

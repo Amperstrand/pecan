@@ -274,6 +274,19 @@ pub fn restore(archive: PathBuf, yes: bool) -> Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .context("archive path has no file name")?;
+    // The file name is interpolated into a `sh -c` script inside the restore
+    // container; any shell metacharacter in it is command injection
+    // (CWE-78). Restrict to a conservative charset that cannot escape it.
+    if !archive_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        bail!(
+            "archive file name {:?} contains characters outside [A-Za-z0-9._-]; \
+             rename the archive before restoring",
+            archive_name
+        );
+    }
 
     // Which shape does the archive have, and does it match this install?
     let listing = std::process::Command::new("tar")

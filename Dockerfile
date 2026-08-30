@@ -14,7 +14,14 @@
 FROM node:22-bookworm-slim AS web-builder
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+COPY web/vendor ./vendor
+# Integrity gate for the vendored coco fork tarballs: a replaced tgz needs no
+# install script — its prebuilt dist/ bundles straight into the served wallet.
+RUN cd vendor && sha256sum -c --strict SHA256SUMS
+# The lockfile is generated on linux (scripts/gen-web-lockfile.sh, run when
+# dependencies change) because macOS npm drops the linux rolldown bindings
+# (npm/cli#4828). `npm ci` pins the tree: no registry drift between builds.
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY web ./
 RUN npm run build
 

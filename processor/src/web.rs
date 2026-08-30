@@ -11,6 +11,7 @@
 //! without a restart.
 
 use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -97,6 +98,8 @@ pub fn router(state: WebState) -> Router {
         .route("/", get(spa_page))
         .route("/teller", get(spa_page))
         .route("/login", get(spa_page))
+        .route("/wallet", get(spa_page))
+        .route("/wallet-classic", get(spa_page))
         // Unauthenticated liveness probe for container healthchecks and the
         // installer's wait loop.
         .route("/healthz", get(healthz))
@@ -108,6 +111,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/tickets/{id}/mark-failed", post(api_mark_failed))
         .route("/api/settings/attachment", post(api_set_attachment))
         .route("/api/mint/self-test", post(api_self_test))
+        .route("/api/onchain-status/{address}", get(api_onchain_status))
         .route("/api/users", post(api_users_create))
         .route("/api/users/{username}", delete(api_users_delete))
         .route(
@@ -189,9 +193,24 @@ fn font_response(bytes: &'static [u8]) -> Response {
 
 // ---------------- SPA assets ----------------
 
+/// Content-Security-Policy for the served console/wallet HTML. The bundle is
+/// fully self-hosted (no CDNs, no inline scripts); inline style ATTRIBUTES
+/// (used heavily by the UI kit) stay allowed, which CSP governs separately
+/// from inline <style> elements.
+const SPA_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+                       img-src 'self' data:; font-src 'self'; connect-src 'self' https://mempool.space/signet/api; \
+                       base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
 async fn spa_page() -> Response {
     match read_spa_file("index.html").await {
-        Ok(bytes) => bytes_response(bytes, "text/html; charset=utf-8"),
+        Ok(bytes) => {
+            let mut resp = bytes_response(bytes, "text/html; charset=utf-8");
+            resp.headers_mut().insert(
+                "content-security-policy",
+                SPA_CSP.try_into().expect("static CSP header value"),
+            );
+            resp
+        }
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             [("content-type", "text/html; charset=utf-8")],
@@ -334,6 +353,21 @@ async fn require_api_auth(state: &WebState, headers: &HeaderMap) -> Result<Authe
     Ok(authed)
 }
 
+/// Management surface (user accounts, mint attachment, self-test): admin
+/// only. Plain teller accounts can match and settle tickets, nothing else —
+/// a compromised teller must not be able to reset the admin password or
+/// re-point the mint URL.
+async fn require_api_admin(state: &WebState, headers: &HeaderMap) -> Result<Authed, Response> {
+    let authed = require_api_auth(state, headers).await?;
+    if !state.users.is_admin(&authed.username).await {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin role required",
+        ));
+    }
+    Ok(authed)
+}
+
 #[derive(Serialize)]
 struct ApiAppSnapshot {
     now: u64,
@@ -368,6 +402,9 @@ struct ApiSessionInfo {
     /// Mirrors the login response so a reload mid-flow still lands on the
     /// forced-change screen instead of the console.
     must_change_password: bool,
+    /// `"admin"` or `None` (plain teller); the console hides management
+    /// surfaces for tellers.
+    role: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -415,6 +452,8 @@ struct ApiTicket {
     expires_at: Option<u64>,
     description: Option<String>,
     notes: Option<String>,
+    settled_by: Option<String>,
+    voided_by: Option<String>,
 }
 
 /// Redacted row for the teller's open-quote list. `prefix` is the leading 13
@@ -547,8 +586,13 @@ async fn api_app(State(state): State<WebState>, headers: HeaderMap) -> Response 
     Json(ApiAppSnapshot {
         now,
         session: ApiSessionInfo {
-            username: authed.username,
+            username: authed.username.clone(),
             must_change_password: authed.must_change_password,
+            role: if state.users.is_admin(&authed.username).await {
+                Some("admin".into())
+            } else {
+                None
+            },
         },
         users: state.users.list().await,
         demo_password_active: state.users.demo_password_active().await,
@@ -603,6 +647,8 @@ impl ApiTicket {
             expires_at: ticket.expires_at,
             description: ticket.description.clone(),
             notes: ticket.notes.clone(),
+            settled_by: ticket.settled_by.clone(),
+            voided_by: ticket.voided_by.clone(),
         }
     }
 }
@@ -638,15 +684,67 @@ fn circulation_points(tickets: &[Ticket]) -> Vec<CirculationPoint> {
         .collect()
 }
 
+/// Failed-login throttle. Without it /api/login is a public, unthrottled
+/// online brute-force surface (10k-wordlist ≈ minutes at measured rates);
+/// the KDF cost slows both sides but never stops an attacker.
+const LOGIN_WINDOW_SECS: u64 = 60;
+const LOGIN_MAX_FAILURES: usize = 10;
+static LOGIN_FAILURES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, VecDeque<std::time::Instant>>>,
+> = std::sync::OnceLock::new();
+
+/// Keyed by X-Forwarded-For — set by the fronting proxy; the processor binds
+/// loopback in production, so the header cannot be spoofed remotely.
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next_back())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn login_throttle_allows(key: &str) -> bool {
+    let lock = LOGIN_FAILURES.get_or_init(Default::default);
+    let mut map = lock.lock().unwrap();
+    let window = std::time::Duration::from_secs(LOGIN_WINDOW_SECS);
+    let now = std::time::Instant::now();
+    let hits = map
+        .entry(key.to_string())
+        .or_default()
+        .iter()
+        .filter(|t| now.duration_since(**t) < window)
+        .count();
+    hits < LOGIN_MAX_FAILURES
+}
+
+fn login_throttle_record(key: &str) {
+    let lock = LOGIN_FAILURES.get_or_init(Default::default);
+    let mut map = lock.lock().unwrap();
+    map.entry(key.to_string()).or_default().push_back(std::time::Instant::now());
+}
+
+fn login_throttle_clear(key: &str) {
+    if let Some(lock) = LOGIN_FAILURES.get() {
+        lock.lock().unwrap().remove(key);
+    }
+}
+
 async fn api_login(
     State(state): State<WebState>,
     headers: HeaderMap,
     Json(form): Json<LoginForm>,
 ) -> Response {
     let username = form.username.trim().to_ascii_lowercase();
+    let throttle_key = format!("{}|{}", client_ip(&headers), username);
+    if !login_throttle_allows(&throttle_key) {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "too many failed attempts; wait a minute");
+    }
     if !state.users.verify(&username, &form.password).await {
+        login_throttle_record(&throttle_key);
         return api_error(StatusCode::UNAUTHORIZED, "incorrect username or password");
     }
+    login_throttle_clear(&throttle_key);
     let sid = uuid::Uuid::new_v4().to_string();
     state.sessions.insert(&sid, &username).await;
     let mut resp = Json(LoginResponse {
@@ -692,6 +790,53 @@ struct MatchQuoteForm {
 /// or the full quote id from a scanner) to the one open quote it identifies.
 /// The full ticket is revealed only here — the open-quote list stays redacted
 /// so the code must come from the customer.
+/// Proxies esplora address-utxo data so the wallet's onchain status
+/// display stays same-origin (the CSP blocks external fetches, and this
+/// avoids teaching the browser about our chain backend). No session
+/// needed: the bech32 address is a fresh per-quote secret — knowing it is
+/// the proof you created the deposit.
+async fn api_onchain_status(
+    State(state): State<WebState>,
+    AxumPath(address): AxumPath<String>,
+) -> Response {
+    if !address.starts_with("tb1") || address.len() > 100 {
+        return api_error(StatusCode::BAD_REQUEST, "not a bech32 address");
+    }
+    let esplora = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL")
+        .unwrap_or_else(|_| "https://mempool.space/signet/api".into());
+    let tip_url = format!("{esplora}/blocks/tip/height");
+    let utxo_url = format!("{esplora}/address/{address}/utxo");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("reqwest client");
+    let (tip, utxos) = match tokio::join!(
+        client.get(&tip_url).send(),
+        client.get(&utxo_url).send()
+    ) {
+        (Ok(t), Ok(u)) => (
+            t.text().await.unwrap_or_default().trim().to_string(),
+            u.text().await.unwrap_or_default(),
+        ),
+        _ => {
+            return api_error(StatusCode::BAD_GATEWAY, "esplora unreachable");
+        }
+    };
+    let required: u32 = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
+    let esplora_base = esplora.trim_end_matches("/api");
+    let body = format!(
+        r#"{{"tip":{tip},"utxos":{utxos},"required_confirmations":{required},"explorer":"{esplora_base}"}}"#
+    );
+    (
+        [("content-type", "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 async fn api_match_quote(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -827,10 +972,11 @@ async fn api_mark_paid(
     AxumPath(id): AxumPath<String>,
     Json(form): Json<NotesForm>,
 ) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
-        return r;
-    }
-    match mark_paid_inner(&state, &id, form.notes).await {
+    let authed = match require_api_auth(&state, &headers).await {
+        Ok(authed) => authed,
+        Err(r) => return r,
+    };
+    match mark_paid_inner(&state, &id, form.notes, &authed.username).await {
         Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -842,10 +988,11 @@ async fn api_mark_failed(
     AxumPath(id): AxumPath<String>,
     Json(form): Json<NotesForm>,
 ) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
-        return r;
-    }
-    match mark_failed_inner(&state, &id, form.notes).await {
+    let authed = match require_api_auth(&state, &headers).await {
+        Ok(authed) => authed,
+        Err(r) => return r,
+    };
+    match mark_failed_inner(&state, &id, form.notes, &authed.username).await {
         Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -873,7 +1020,7 @@ async fn api_set_attachment(
     headers: HeaderMap,
     Json(form): Json<AttachmentForm>,
 ) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
+    if let Err(r) = require_api_admin(&state, &headers).await {
         return r;
     }
     let mut config = state.config.read().await.clone();
@@ -951,7 +1098,7 @@ async fn api_set_attachment(
 // ---------------- self-test ----------------
 
 async fn api_self_test(State(state): State<WebState>, headers: HeaderMap) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
+    if let Err(r) = require_api_admin(&state, &headers).await {
         return r;
     }
     let config = state.config.read().await.clone();
@@ -1033,7 +1180,7 @@ async fn api_users_create(
     headers: HeaderMap,
     Json(form): Json<CreateUserForm>,
 ) -> Response {
-    if let Err(r) = require_api_auth(&state, &headers).await {
+    if let Err(r) = require_api_admin(&state, &headers).await {
         return r;
     }
     match state
@@ -1054,7 +1201,7 @@ async fn api_users_delete(
     headers: HeaderMap,
     AxumPath(username): AxumPath<String>,
 ) -> Response {
-    let authed = match require_api_auth(&state, &headers).await {
+    let authed = match require_api_admin(&state, &headers).await {
         Ok(authed) => authed,
         Err(r) => return r,
     };
@@ -1114,7 +1261,7 @@ async fn api_users_reset_password(
     AxumPath(username): AxumPath<String>,
     Json(form): Json<PasswordResetForm>,
 ) -> Response {
-    let authed = match require_api_auth(&state, &headers).await {
+    let authed = match require_api_admin(&state, &headers).await {
         Ok(authed) => authed,
         Err(r) => return r,
     };
@@ -1264,18 +1411,28 @@ fn clean_notes(notes: String) -> Option<String> {
     }
 }
 
-async fn mark_paid_inner(state: &WebState, id: &str, notes: String) -> Result<Ticket, String> {
+async fn mark_paid_inner(
+    state: &WebState,
+    id: &str,
+    notes: String,
+    settled_by: &str,
+) -> Result<Ticket, String> {
     state
         .branch
-        .mark_paid(id, clean_notes(notes))
+        .mark_paid(id, clean_notes(notes), settled_by)
         .await
         .map_err(|e| format!("mark_paid: {e}"))
 }
 
-async fn mark_failed_inner(state: &WebState, id: &str, notes: String) -> Result<Ticket, String> {
+async fn mark_failed_inner(
+    state: &WebState,
+    id: &str,
+    notes: String,
+    voided_by: &str,
+) -> Result<Ticket, String> {
     state
         .branch
-        .mark_failed(id, clean_notes(notes))
+        .mark_failed(id, clean_notes(notes), voided_by)
         .await
         .map_err(|e| format!("mark_failed: {e}"))
 }
@@ -1325,6 +1482,26 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-proto", value.parse().unwrap());
         headers
+    }
+
+    #[test]
+    fn login_throttle_blocks_after_max_failures_and_recovers_on_success() {
+        let key = "test-ip|admin";
+        for _ in 0..LOGIN_MAX_FAILURES {
+            assert!(login_throttle_allows(key), "within the limit");
+            login_throttle_record(key);
+        }
+        assert!(!login_throttle_allows(key), "11th attempt is throttled");
+        login_throttle_clear(key);
+        assert!(login_throttle_allows(key), "successful login resets the window");
+    }
+
+    #[test]
+    fn client_ip_uses_last_forwarded_entry() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "spoofed, real-client".parse().unwrap());
+        assert_eq!(client_ip(&headers), "real-client");
+        assert_eq!(client_ip(&HeaderMap::new()), "unknown");
     }
 
     #[test]

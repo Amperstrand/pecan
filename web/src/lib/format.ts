@@ -1,4 +1,23 @@
+const ISO_4217_TWO_DECIMAL = new Set([
+  "usd", "eur", "nok", "sek", "dkk", "gbp", "chf", "cad", "aud",
+  "nzd", "isk", "pln", "czk", "huf", "ron", "bgn", "hrk",
+])
+
 export function formatAmount(amount: number, unit: string) {
+  const u = unit.toLowerCase()
+  if (ISO_4217_TWO_DECIMAL.has(u)) {
+    const value = amount / 100
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: u.toUpperCase(),
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(value)
+    } catch {
+      return `${value.toFixed(2)} ${unit.toUpperCase()}`
+    }
+  }
   return `${new Intl.NumberFormat().format(amount)} ${unit.toUpperCase()}`
 }
 

@@ -595,12 +595,30 @@ pub async fn run_self_test(
     let mut latency_ms = None;
 
     // Deposit leg: NUT-20-locked mint quote with an ephemeral key.
+    // Probe with the mint's minimum amount (mints for high-denomination
+    // units like øre/cents reject 1-unit probes — min is typically 100).
+    let probe_amount: u64 = mint
+        .get_info()
+        .await
+        .ok()
+        .and_then(|info| {
+            info.get("nuts")
+                .and_then(|n| n.get("4"))
+                .and_then(|n| n.get("methods"))
+                .and_then(|m| m.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|m| m.get("min_amount"))
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(1)
+        .max(1);
+
     let pubkey = cdk_common::nuts::SecretKey::generate()
         .public_key()
         .to_string();
     let started = std::time::Instant::now();
     let deposit = match mint
-        .create_probe_mint_quote(method, unit, 1, &pubkey, SELF_TEST_DESCRIPTION)
+        .create_probe_mint_quote(method, unit, probe_amount, &pubkey, SELF_TEST_DESCRIPTION)
         .await
     {
         Err(e) => SelfTestLeg::fail(
@@ -634,7 +652,7 @@ pub async fn run_self_test(
                 ),
                 Some(_) => {
                     if let Err(e) = branch
-                        .mark_failed(&ticket_id, Some(SELF_TEST_NOTE.to_string()))
+                        .mark_failed(&ticket_id, Some(SELF_TEST_NOTE.to_string()), "self-test")
                         .await
                     {
                         tracing::warn!("could not void self-test ticket {ticket_id}: {e:#}");
@@ -663,7 +681,7 @@ pub async fn run_self_test(
         SelfTestLeg::skipped("mint unreachable")
     } else {
         match mint
-            .create_probe_melt_quote(method, unit, 1, SELF_TEST_DESCRIPTION)
+            .create_probe_melt_quote(method, unit, probe_amount, SELF_TEST_DESCRIPTION)
             .await
         {
             Err(e) => SelfTestLeg::fail(
@@ -688,7 +706,7 @@ pub async fn run_self_test(
                     ),
                     Some(_) => {
                         if let Err(e) = branch
-                            .mark_failed(&ticket_id, Some(SELF_TEST_NOTE.to_string()))
+                            .mark_failed(&ticket_id, Some(SELF_TEST_NOTE.to_string()), "self-test")
                             .await
                         {
                             tracing::warn!("could not void self-test ticket {ticket_id}: {e:#}");

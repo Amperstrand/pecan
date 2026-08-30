@@ -11,7 +11,9 @@ const TAB_NAMES = ["overview", "mint", "access"]
 export function ConsolePage() {
   const { snapshot } = useSnapshot()
   const [rawTab, setTab] = useHashTab("overview")
-  const tab = TAB_NAMES.includes(rawTab) ? rawTab : "overview"
+  const isAdmin = snapshot.session.role === "admin"
+  const tabs = isAdmin ? TAB_NAMES : ["overview"]
+  const tab = tabs.includes(rawTab) ? rawTab : "overview"
 
   const mintNeedsAttention = snapshot.checklist.some(
     (check) => check.status === "fail" || check.status === "warn",
@@ -29,34 +31,42 @@ export function ConsolePage() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="w-full max-w-md">
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="mint" className="relative">
-            Mint
-            {mintNeedsAttention && (
-              <span
-                className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-foreground"
-                aria-label="Mint attachment needs attention"
-              />
-            )}
-          </TabsTrigger>
-          <TabsTrigger value="access" className="relative">
-            Access
-            {snapshot.demo_password_active && (
-              <span
-                className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-foreground"
-                aria-label="Demo password active"
-              />
-            )}
-          </TabsTrigger>
+          {isAdmin && (
+            <TabsTrigger value="mint" className="relative">
+              Mint
+              {mintNeedsAttention && (
+                <span
+                  className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-foreground"
+                  aria-label="Mint attachment needs attention"
+                />
+              )}
+            </TabsTrigger>
+          )}
+          {isAdmin && (
+            <TabsTrigger value="access" className="relative">
+              Access
+              {snapshot.demo_password_active && (
+                <span
+                  className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-foreground"
+                  aria-label="Demo password active"
+                />
+              )}
+            </TabsTrigger>
+          )}
         </TabsList>
         <TabsContent value="overview">
           <OverviewTab snapshot={snapshot} />
         </TabsContent>
-        <TabsContent value="mint">
-          <MintTab snapshot={snapshot} />
-        </TabsContent>
-        <TabsContent value="access">
-          <AccessTab snapshot={snapshot} />
-        </TabsContent>
+        {isAdmin && (
+          <TabsContent value="mint">
+            <MintTab snapshot={snapshot} />
+          </TabsContent>
+        )}
+        {isAdmin && (
+          <TabsContent value="access">
+            <AccessTab snapshot={snapshot} />
+          </TabsContent>
+        )}
       </Tabs>
     </>
   )
