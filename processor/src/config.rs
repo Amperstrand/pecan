@@ -589,16 +589,33 @@ pub fn validate_operator_password(password: &str, password_confirm: &str) -> Res
     Ok(())
 }
 
-// Upgrade slot: to move to a vetted KDF (argon2id), add an "argon2id:" branch
-// in `verify_password`, switch this function's output format, and rehash
-// opportunistically on successful login in `UserStore::verify`.
+/// New hashes are argon2id (PHC string carries algorithm, version, params,
+/// salt, and digest; Argon2::default = v19, 19 MiB, t=2, p=1 — OWASP
+/// minimums). Legacy `sha256:<iters>:<salt>:<digest>` rows still verify and
+/// are rehashed to argon2id opportunistically on successful login in
+/// `UserStore::verify`.
 pub fn hash_password(password: &str) -> String {
-    let salt = uuid::Uuid::new_v4().to_string();
-    let digest = password_digest(&salt, password);
-    format!("sha256:120000:{salt}:{digest}")
+    use argon2::password_hash::{rand_core::OsRng, SaltString};
+    use argon2::{Argon2, PasswordHasher};
+    let salt = SaltString::generate(&mut OsRng);
+    let phc = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2id with a fresh random salt cannot fail")
+        .to_string();
+    format!("argon2id:{phc}")
 }
 
 pub fn verify_password(password: &str, stored: &str) -> bool {
+    use argon2::password_hash::PasswordHash;
+    use argon2::{Argon2, PasswordVerifier};
+    if let Some(phc) = stored.strip_prefix("argon2id:") {
+        let Ok(parsed) = PasswordHash::new(phc) else {
+            return false;
+        };
+        return Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok();
+    }
     let parts: Vec<&str> = stored.split(':').collect();
     if parts.len() != 4 || parts[0] != "sha256" {
         return false;
@@ -609,10 +626,6 @@ pub fn verify_password(password: &str, stored: &str) -> bool {
     }
     let digest = password_digest_with_iterations(parts[2], password, iterations);
     constant_time_eq(digest.as_bytes(), parts[3].as_bytes())
-}
-
-fn password_digest(salt: &str, password: &str) -> String {
-    password_digest_with_iterations(salt, password, 120_000)
 }
 
 fn password_digest_with_iterations(salt: &str, password: &str, iterations: usize) -> String {
@@ -626,6 +639,17 @@ fn password_digest_with_iterations(salt: &str, password: &str, iterations: usize
         hash = sha256::Hash::hash(&input).to_byte_array().to_vec();
     }
     bytes_to_hex(&hash)
+}
+
+/// Pre-argon2id format, for tests that seed stores the way pre-upgrade
+/// installs wrote them.
+#[cfg(test)]
+pub(crate) fn legacy_sha256_password_hash(password: &str) -> String {
+    let salt = uuid::Uuid::new_v4().to_string();
+    format!(
+        "sha256:120000:{salt}:{}",
+        password_digest_with_iterations(&salt, password, 120_000)
+    )
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -905,6 +929,27 @@ mod tests {
         assert!(validate_operator_password("12345678", "12345678").is_ok()); // digits only
         assert!(validate_operator_password("password", "password").is_ok()); // letters only
         assert!(validate_operator_password("password", "different").is_err()); // mismatch
+    }
+
+    #[test]
+    fn argon2id_hashes_round_trip_and_reject_wrong_passwords() {
+        let stored = hash_password("correct horse battery staple");
+        assert!(stored.starts_with("argon2id:$argon2id$"));
+        assert!(verify_password("correct horse battery staple", &stored));
+        assert!(!verify_password("wrong horse", &stored));
+        assert!(!verify_password("correct horse battery staple", "garbage"));
+        assert!(!verify_password(
+            "correct horse battery staple",
+            "argon2id:$argon2id$not-a-phc-string"
+        ));
+    }
+
+    #[test]
+    fn legacy_sha256_rows_still_verify() {
+        let stored = legacy_sha256_password_hash("old-secret");
+        assert!(stored.starts_with("sha256:"));
+        assert!(verify_password("old-secret", &stored));
+        assert!(!verify_password("new-secret", &stored));
     }
 
     #[tokio::test]

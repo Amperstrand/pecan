@@ -258,6 +258,9 @@ impl UserStore {
 
     /// Constant-shape credential check: unknown usernames still burn a full
     /// verify against a dummy hash so they are not distinguishable by timing.
+    /// A successful login against a legacy `sha256:` hash rehashes the
+    /// password to argon2id in place — the store migrates itself as
+    /// operators log in, no forced reset.
     pub async fn verify(&self, username: &str, password: &str) -> bool {
         let username = normalize_username(username);
         let hash = {
@@ -265,7 +268,27 @@ impl UserStore {
             users.get(&username).map(|user| user.password_hash.clone())
         };
         match hash {
-            Some(hash) => verify_password(password, &hash),
+            Some(hash) => {
+                if !verify_password(password, &hash) {
+                    return false;
+                }
+                if hash.starts_with("sha256:") {
+                    let upgraded = hash_password(password);
+                    let mut users = self.inner.users.write().await;
+                    if let Some(user) = users.get_mut(&username) {
+                        if user.password_hash == hash {
+                            user.password_hash = upgraded;
+                            drop(users);
+                            if let Err(e) = self.persist().await {
+                                tracing::warn!(
+                                    "argon2id rehash persist failed for {username}: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+                true
+            }
             None => {
                 verify_password(password, dummy_hash());
                 false
@@ -696,12 +719,42 @@ mod tests {
     #[tokio::test]
     async fn legacy_hash_wins_over_initial_password() {
         let path = temp_path("initial-vs-legacy");
-        let legacy = hash_password("Old-passw0rd!");
+        let legacy = crate::config::legacy_sha256_password_hash("Old-passw0rd!");
         let store = UserStore::load(path.clone(), Some(legacy), Some("installer-secret".into()))
             .await
             .expect("load");
         assert!(store.verify("admin", "Old-passw0rd!").await);
         assert!(!store.verify("admin", "installer-secret").await);
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn successful_login_rehashes_legacy_rows_to_argon2id() {
+        let path = temp_path("argon2-upgrade");
+        let legacy = crate::config::legacy_sha256_password_hash("Upgr4de-me!");
+        let store = UserStore::load(path.clone(), Some(legacy), None)
+            .await
+            .expect("load");
+
+        assert!(store.verify("admin", "Upgr4de-me!").await);
+
+        // snapshot() never exposes hashes; assert on the persisted artifact
+        let bytes = tokio::fs::read(path.clone()).await.expect("users.json");
+        let hash = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .expect("valid json")["users"]["admin"]["password_hash"]
+            .as_str()
+            .expect("hash")
+            .to_string();
+        assert!(
+            hash.starts_with("argon2id:"),
+            "expected upgraded hash, got {hash}"
+        );
+
+        let reloaded = UserStore::load(path.clone(), None, None)
+            .await
+            .expect("reload");
+        assert!(reloaded.verify("admin", "Upgr4de-me!").await);
+        assert!(!reloaded.verify("admin", "anything-else").await);
         let _ = tokio::fs::remove_file(&path).await;
     }
 

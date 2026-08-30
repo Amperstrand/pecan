@@ -193,6 +193,22 @@ export async function createWithdraw(amountInput: number, recipient: string): Pr
     console.warn("melt execute background:", err)
   })
 
+  // The teller can only pay out once this wallet has locked funds at the
+  // mint — hand the code over no sooner. Until then a reload could strand
+  // the op before its melt POST (nothing for the resume driver to pick up)
+  // and the ticket sits unpayable.
+  const lockDeadline = Date.now() + 30_000
+  for (;;) {
+    const op = await coco.ops.melt.get(prepared.id)
+    if (op && op.state !== "prepared" && op.state !== "executing") {
+      break
+    }
+    if (Date.now() > lockDeadline) {
+      break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+
   return {
     quoteId: quote.quoteId,
     tail: quote.quoteId.slice(-6).toUpperCase(),

@@ -28,6 +28,7 @@ cdk-common = { version = "=0.18.0-rc.0", default-features = false, features = ["
 cdk-payment-processor = { version = "=0.18.0-rc.0", default-features = false }
 
 anyhow = "1"
+argon2 = "0.5"
 async-trait = "0.1"
 axum = "0.8.1"
 bitcoin_hashes = "0.14.1"
