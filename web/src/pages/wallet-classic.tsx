@@ -18,7 +18,7 @@ import {
   type DepositQuote,
   createDepositQuote,
   createWithdraw,
-  getBalanceOre,
+  getBalanceCents,
   getHistory,
   getWallet,
   pollAndMint,
@@ -28,7 +28,7 @@ import {
 interface HistoryRow {
   id?: number
   type: "deposit" | "withdraw"
-  amount_ore: number
+  amount: number
   description: string
   created_at: number
 }
@@ -59,7 +59,7 @@ export function WalletClassicPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [ore, hist] = await Promise.all([getBalanceOre(), getHistory(15)])
+      const [ore, hist] = await Promise.all([getBalanceCents(), getHistory(15)])
       setBalance(ore)
       setHistory(hist)
     } catch {
@@ -83,7 +83,7 @@ export function WalletClassicPage() {
       setDepositState({ phase: "pending", quote })
 
       pollRef.current = setInterval(async () => {
-        const done = await pollAndMint(quote.quoteId, quote.amountOre, quote.privkey)
+        const done = await pollAndMint(quote.quoteId, quote.amount, quote.privkey)
         if (done) {
           clearInterval(pollRef.current!)
           pollRef.current = null
@@ -187,7 +187,7 @@ export function WalletClassicPage() {
                 {depositState.quote.tail}
               </p>
               <p className="text-sm text-muted-foreground">
-                {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
+                {(depositState.quote.amount / 100).toFixed(2)} kr — waiting…
               </p>
               <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="size-3 animate-spin" />
@@ -290,7 +290,7 @@ export function WalletClassicPage() {
                   </span>
                   <span className="font-mono tabular-nums">
                     {h.type === "deposit" ? "+" : "−"}
-                    {(h.amount_ore / 100).toFixed(2)} kr
+                    {(h.amount / 100).toFixed(2)} kr
                   </span>
                 </div>
               ))}

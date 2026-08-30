@@ -21,7 +21,7 @@ interface StoredSeed {
 interface HistoryEntry {
   id?: number
   type: "deposit" | "withdraw"
-  amount_ore: number
+  amount: number
   description: string
   created_at: number
 }
@@ -92,7 +92,7 @@ export async function getWallet(): Promise<Wallet> {
   return wallet
 }
 
-export async function getBalanceOre(): Promise<number> {
+export async function getBalanceCents(): Promise<number> {
   const all = await db.proofs.toArray()
   return all.filter((p) => !p.reserved).reduce((sum, p) => sum + Number(p.amount), 0)
 }
@@ -137,12 +137,12 @@ export async function removeProofs(ids: string[]): Promise<void> {
 
 export async function addHistory(
   type: "deposit" | "withdraw",
-  amountOre: number,
+  amount: number,
   description: string,
 ): Promise<void> {
   await db.history.add({
     type,
-    amount_ore: amountOre,
+    amount: amount,
     description,
     created_at: Date.now(),
   })
@@ -168,17 +168,17 @@ export async function generateKeypair(): Promise<{
 export interface DepositQuote {
   quoteId: string
   tail: string
-  amountOre: number
+  amount: number
   privkey: string
 }
 
 export async function createDepositQuote(amountKr: number): Promise<DepositQuote> {
   const wallet = await getWallet()
   const { pubkeyHex, privHex } = await generateKeypair()
-  const amountOre = Math.round(amountKr * 100)
+  const amount = Math.round(amountKr * 100)
 
   const quote = await wallet.createMintQuote("branch", {
-    amount: amountOre,
+    amount: amount,
     description: "Wallet deposit",
     pubkey: pubkeyHex,
   })
@@ -186,14 +186,14 @@ export async function createDepositQuote(amountKr: number): Promise<DepositQuote
   return {
     quoteId: quote.quote,
     tail: quote.quote.slice(-6).toUpperCase(),
-    amountOre,
+    amount,
     privkey: privHex,
   }
 }
 
 export async function pollAndMint(
   quoteId: string,
-  amountOre: number,
+  amount: number,
   privkey: string,
 ): Promise<boolean> {
   const wallet = await getWallet()
@@ -202,18 +202,18 @@ export async function pollAndMint(
   if (paid === 0) return false
 
   const quoteObj = await wallet.checkMintQuote("branch", quoteId)
-  const proofs = await wallet.mintProofs("branch", amountOre, quoteObj, {
+  const proofs = await wallet.mintProofs("branch", amount, quoteObj, {
     privkey,
   })
   await addProofs(proofs)
-  await addHistory("deposit", amountOre, `Deposit · ${proofs.length} proofs`)
+  await addHistory("deposit", amount, `Deposit · ${proofs.length} proofs`)
   return true
 }
 
 export interface WithdrawResult {
   quoteId: string
   tail: string
-  amountOre: number
+  amount: number
   submitted: boolean
 }
 
@@ -232,17 +232,17 @@ export async function createWithdraw(
   recipient: string,
 ): Promise<WithdrawResult> {
   const wallet = await getWallet()
-  const amountOre = Math.round(amountKr * 100)
+  const amount = Math.round(amountKr * 100)
 
   const quote = await wallet.createMeltQuote("branch", {
     method: "branch",
     request: recipient,
     unit: "nok",
-    amount: amountOre,
+    amount: amount,
   })
 
   const fee = 0 // pecan branch method has no fee; add dynamic fee when supported
-  const need = amountOre + fee
+  const need = amount + fee
   const unspent = await getUnspentProofs()
 
   // Try exact subset first (avoids needing change)
@@ -290,11 +290,11 @@ export async function createWithdraw(
     }
   }
 
-  await addHistory("withdraw", amountOre, `Withdraw · ${recipient}`)
+  await addHistory("withdraw", amount, `Withdraw · ${recipient}`)
   return {
     quoteId: quote.quote,
     tail: quote.quote.slice(-6).toUpperCase(),
-    amountOre,
+    amount,
     submitted,
   }
 }

@@ -34,6 +34,7 @@ import {
   resumePendingOperations,
 } from "@/lib/coco/coco-wallet"
 import { getCoco } from "@/lib/coco/coco-wallet"
+import { UNIT } from "@/lib/coco/branch-methods"
 
 type DepositState =
   | { phase: "idle" }
@@ -44,7 +45,7 @@ type DepositState =
 
 interface DepositReceipt {
   method: DepositMethod
-  amountOre: number
+  amount: number
   sat?: number
   address?: string
 }
@@ -281,7 +282,7 @@ export function WalletPage() {
                 phase: "done",
                 receipt: {
                   method: pendingDeposit.method,
-                  amountOre: pendingDeposit.amountOre,
+                  amount: pendingDeposit.amount,
                   sat: pendingDeposit.expectedSat,
                   address: pendingDeposit.method === "btc" ? pendingDeposit.request : undefined,
                 },
@@ -350,7 +351,20 @@ export function WalletPage() {
       }, 3000)
     } catch (e) {
       console.error("deposit failed:", e)
-      setDepositState({ phase: "error", message: String(e) })
+      const msg = e instanceof Error ? e.message : String(e)
+      // cdk flattens processor errors into vague messages; add context
+      let helpful = msg
+      if (msg.includes("Invalid payment request")) {
+        helpful =
+          "The mint rejected this deposit. The quote may have expired, the mint may have been reset, or the currency unit may have changed. Try cancelling any pending deposits and creating a fresh one."
+      } else if (msg.includes("quote not found") || msg.includes("Unknown quote")) {
+        helpful =
+          "This quote no longer exists on the mint (it may have expired or the mint was restarted). Please create a new deposit."
+      } else if (msg.includes("Unit mismatch") || msg.includes("Unsupported unit")) {
+        helpful =
+          `The mint doesn't support the currency unit this wallet is configured for. Expected: ${UNIT}. The mint may have been re-denominated.`
+      }
+      setDepositState({ phase: "error", message: helpful })
     }
   }
 
@@ -420,7 +434,7 @@ export function WalletPage() {
                 Deposit confirmed
               </p>
               <p className="text-lg font-bold">
-                +{(depositState.receipt.amountOre / 100).toFixed(2)} €
+                +{(depositState.receipt.amount / 100).toFixed(2)} €
               </p>
               <div className="text-xs text-muted-foreground">
                 {depositState.receipt.method === "btc" && depositState.receipt.sat && (
@@ -524,7 +538,7 @@ export function WalletPage() {
                   Copy invoice
                 </Button>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amountOre / 100).toFixed(2)} € — waiting…
+                  {(depositState.quote.amount / 100).toFixed(2)} € — waiting…
                 </p>
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
@@ -553,7 +567,7 @@ export function WalletPage() {
                   Copy address
                 </Button>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amountOre / 100).toFixed(2)} € — waiting…
+                  {(depositState.quote.amount / 100).toFixed(2)} € — waiting…
                 </p>
                 <OnchainStatus address={depositState.quote.request} />
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
@@ -579,7 +593,7 @@ export function WalletPage() {
                   {depositState.quote.tail}
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amountOre / 100).toFixed(2)} € — waiting…
+                  {(depositState.quote.amount / 100).toFixed(2)} € — waiting…
                 </p>
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
@@ -691,7 +705,7 @@ export function WalletPage() {
                     className={`font-mono tabular-nums ${h.pending ? "text-muted-foreground" : ""}`}
                   >
                     {h.type === "deposit" ? "+" : "−"}
-                    {(h.amount_cents / 100).toFixed(2)} €
+                    {(h.amount / 100).toFixed(2)} €
                   </span>
                 </div>
               ))}

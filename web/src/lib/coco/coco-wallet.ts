@@ -11,7 +11,7 @@ import { MintBranchHandler } from "./mint-branch-handler"
 export interface HistoryRow {
   id?: number
   type: "deposit" | "withdraw"
-  amount_cents: number
+  amount: number
   description: string
   created_at: number
   pending?: boolean
@@ -23,7 +23,7 @@ export interface DepositQuote {
   tail: string
   /** branch: the MINT- ticket id; ln: the bolt11 invoice; btc: the address. */
   request: string
-  amountOre: number
+  amount: number
   /** btc: the sats the payer must send, from the processor via extra. */
   expectedSat?: number
 }
@@ -31,7 +31,7 @@ export interface DepositQuote {
 export interface WithdrawResult {
   quoteId: string
   tail: string
-  amountOre: number
+  amount: number
   submitted: boolean
 }
 
@@ -105,7 +105,7 @@ export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
     if (entry.state === "failed") return null
     return {
       type: "deposit",
-      amount_cents: Number(entry.amount.toBigInt()),
+      amount: Number(entry.amount.toBigInt()),
       description: stale && entry.state !== "finalized" ? "Expired" : "Deposit",
       created_at: createdAt,
       pending: entry.state !== "finalized" && !stale,
@@ -114,7 +114,7 @@ export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
   if (entry.type === "melt") {
     return {
       type: "withdraw",
-      amount_cents: Number(entry.amount.toBigInt()),
+      amount: Number(entry.amount.toBigInt()),
       description: stale && entry.state !== "finalized" ? "Expired" : "Withdraw",
       created_at: createdAt,
       pending: entry.state !== "finalized" && !stale,
@@ -124,22 +124,22 @@ export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
 }
 
 export async function createDepositQuote(
-  amountKr: number,
+  amountInput: number,
   method: DepositMethod = "branch",
 ): Promise<DepositQuote> {
   const coco = await getCoco()
-  const amountOre = Math.round(amountKr * 100)
+  const amount = Math.round(amountInput * 100)
 
   const quote = await coco.quotes.mint.create({
     mintUrl: MINT_URL(),
     method,
-    amount: amountOre,
+    amount: amount,
     unit: UNIT,
     description: "Wallet deposit",
     locked: true,
   })
 
-  const operation = await coco.ops.mint.prepare({ quote, amount: amountOre })
+  const operation = await coco.ops.mint.prepare({ quote, amount: amount })
   void coco.ops.mint.execute(operation.id).catch((err: unknown) => {
     console.warn("mint execute background:", err)
   })
@@ -152,7 +152,7 @@ export async function createDepositQuote(
     quoteId: quote.quoteId,
     tail: quote.quoteId.slice(-6).toUpperCase(),
     request: quote.request,
-    amountOre,
+    amount,
     ...(expectedSat !== undefined ? { expectedSat } : {}),
   }
 }
@@ -177,14 +177,14 @@ export async function pollAndMint(quoteId: string): Promise<boolean> {
   }
 }
 
-export async function createWithdraw(amountKr: number, recipient: string): Promise<WithdrawResult> {
+export async function createWithdraw(amountInput: number, recipient: string): Promise<WithdrawResult> {
   const coco = await getCoco()
-  const amountOre = Math.round(amountKr * 100)
+  const amount = Math.round(amountInput * 100)
 
   const quote = await coco.quotes.melt.create({
     mintUrl: MINT_URL(),
     method: "branch",
-    methodData: { amount: Amount.from(amountOre), description: recipient },
+    methodData: { amount: Amount.from(amount), description: recipient },
     unit: UNIT,
   })
 
@@ -196,7 +196,7 @@ export async function createWithdraw(amountKr: number, recipient: string): Promi
   return {
     quoteId: quote.quoteId,
     tail: quote.quoteId.slice(-6).toUpperCase(),
-    amountOre,
+    amount,
     submitted: true,
   }
 }
@@ -322,7 +322,7 @@ export async function getPendingDeposit(): Promise<DepositQuote | null> {
     quoteId: op.quoteId,
     tail: op.quoteId.slice(-6).toUpperCase(),
     request: quote.request,
-    amountOre: Number(
+    amount: Number(
       (quote as { amount?: { toBigInt(): bigint } }).amount?.toBigInt?.() ?? 0,
     ),
     ...(expectedSat !== undefined ? { expectedSat } : {}),
