@@ -23,6 +23,7 @@ path = "src/main.rs"
 # src/config.rs — CI's pin-check enforces the pair.
 # ---------------------------------------------------------------------------
 [dependencies]
+rand = "0.8"
 cdk-common = { version = "=0.18.0-rc.0", default-features = false, features = ["mint", "grpc"] }
 cdk-payment-processor = { version = "=0.18.0-rc.0", default-features = false }
 

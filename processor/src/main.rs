@@ -17,9 +17,12 @@
 //! attachment checklist plus an end-to-end self-test confirm the link.
 
 mod backend;
+mod backends;
 mod checks;
 mod clients;
 mod config;
+mod ln;
+mod onchain;
 mod sessions;
 mod state;
 mod users;
@@ -241,10 +244,113 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow!("bad configured unit {}: {e}", app_config.unit))?,
         )
     };
+    let sandbox = std::env::var("SANDBOX")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if sandbox {
+        let sandbox_method = std::env::var("SANDBOX_METHOD").unwrap_or_else(|_| "sandbox".into());
+        let backend = Arc::new(backends::sandbox::SandboxBackend::new(sandbox_method.clone()));
+        if let Some(u) = unit.as_ref() {
+            backend.set_unit(Some(u.clone()));
+        }
+        let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
+            .map_err(|e| anyhow!("payment processor server init: {e}"))?;
+        server
+            .start(tls_dir.clone())
+            .await
+            .map_err(|e| anyhow!("grpc start: {e}"))?;
+        tracing::info!(
+            "sandbox-processor gRPC on {grpc_addr}:{grpc_port} (method={sandbox_method}, unit={}, auto_settle={})",
+            app_config.unit,
+            std::env::var("SANDBOX_AUTO_SETTLE").unwrap_or_default()
+        );
+
+        let health_app = axum::Router::new()
+            .route("/healthz", axum::routing::get(|| async { "sandbox: ok" }));
+        let health_listener = TcpListener::bind(http_socket).await?;
+        tracing::info!("sandbox-processor HTTP on {http_socket}");
+        axum::serve(health_listener, health_app)
+            .await
+            .map_err(|e| anyhow!("http: {e}"))?;
+        return Ok(());
+    }
+
+    // Optional rails alongside the teller rail: lightning (bolt11 invoices)
+    // and onchain (per-quote bech32 addresses), both on the CLN node, both
+    // converting NOK<->sat in-process (cdk has no price service) with a
+    // markup. One processor advertises every enabled method.
+    let ln_env_on = std::env::var("CDK_BRANCH_PROCESSOR_LN")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let onchain_env_on = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let cln_client = if ln_env_on || onchain_env_on {
+        let socket = std::env::var("CDK_BRANCH_PROCESSOR_CLN_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/run/lightning-rpc"));
+        Some(onchain::cln_client(socket))
+    } else {
+        None
+    };
+    let markup: f64 = std::env::var("CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(10.0);
+    let rate_url = std::env::var("CDK_BRANCH_PROCESSOR_LN_RATE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "https://api.yadio.io/rate/BTC/NOK".into());
+
+    let ln_rail = if ln_env_on {
+        let rail = ln::LnRail::start_with_client(
+            cln_client.clone().expect("ln enabled implies client"),
+            markup,
+            rate_url.clone(),
+            Some(work_dir.join("ln-rail-store.json")),
+            branch.event_sender(),
+        )
+        .await;
+        tracing::info!("ln rail enabled (markup {markup}%)");
+        Some(rail)
+    } else {
+        None
+    };
+    let onchain_rail = if onchain_env_on {
+        let confirmations: u32 = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(1);
+        let esplora = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "https://mempool.space/signet/api".into());
+        let rail = onchain::OnchainRail::start(
+            cln_client.expect("onchain enabled implies client"),
+            Arc::new(ln::Fx::new(rate_url, markup)),
+            confirmations,
+            esplora,
+            Some(work_dir.join("onchain-rail-store.json")),
+            branch.event_sender(),
+        )
+        .await;
+        tracing::info!(
+            "onchain rail enabled (settlement after {confirmations} confirmation(s))"
+        );
+        Some(rail)
+    } else {
+        None
+    };
+
     let backend = Arc::new(BranchBackend::new(
         branch.clone(),
         unit,
         app_config.method.clone(),
+        ln_rail,
+        onchain_rail,
     ));
     let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
         .map_err(|e| anyhow!("payment processor server init: {e}"))?;
