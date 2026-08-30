@@ -109,3 +109,37 @@ shows the utxo; `=1` waits for a block. Underpayments never settle
 The CLN socket client holds ONE persistent connection (a connect-per-call
 pattern aggravated an RPC-read crash on a lab node) and skips the blank
 lines CLN frames responses with.
+
+## The free-option problem (exchange-rate risk during the deposit window)
+
+When a wallet creates a quote, the NOK→sat rate is locked. The user then
+takes time to pay (copy invoice, open wallet, confirm). During this window
+the exchange rate may move:
+
+- **BTC appreciates** → the user pays fewer sats than current-market NOK
+  equivalent → windfall for the user, loss for the mint
+- **BTC depreciates** → the user simply doesn't pay and retries at the new
+  rate → no loss, free option
+
+### Current mitigations
+
+| Mitigation | Effect |
+|---|---|
+| 10% markup | Absorbs rate moves up to ~10% during the window |
+| 5-min lightning invoice expiry | Short window limits exposure |
+| 30-min mint quote TTL | Hard ceiling on how long a rate is honored |
+| Cancel button | User can abandon a stale quote immediately |
+
+### Future options (ordered by correctness × complexity)
+
+1. **Rate-at-settlement for on-chain**: compute NOK based on the rate when
+   the payment is detected, not at quote time. Requires variable-amount
+   mint quotes (NUT-04 protocol change or a processor-side second quote).
+2. **HODL invoices for lightning**: create an invoice that doesn't settle
+   until we accept it. Refuse if the rate moved > threshold. Requires CLN
+   `holdinvoice` support in our rail.
+3. **Dynamic fee**: adjust the markup percentage in real-time based on
+   rate volatility. Simple but blunt.
+
+The 10% markup + 5-minute window handles all but extreme volatility
+scenarios and is the pragmatic choice for a simulated mint.

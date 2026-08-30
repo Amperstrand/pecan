@@ -317,6 +317,14 @@ export function WalletPage() {
     }
   }, [refresh])
 
+  const cancelDeposit = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+    setDepositState({ phase: "idle" })
+  }
+
   const startDeposit = async () => {
     const amount = parseFloat(depositAmount)
     if (!amount || amount < 1 || amount > 1000) return
@@ -517,6 +525,9 @@ export function WalletPage() {
                   <Loader2 className="size-3 animate-spin" />
                   Polling for payment
                 </div>
+                <Button variant="outline" size="sm" onClick={cancelDeposit}>
+                  Cancel
+                </Button>
               </div>
             ) : depositState.quote.method === "btc" ? (
               <div className="grid gap-3 text-center">
@@ -544,6 +555,9 @@ export function WalletPage() {
                   <Loader2 className="size-3 animate-spin" />
                   Polling for payment
                 </div>
+                <Button variant="outline" size="sm" onClick={cancelDeposit}>
+                  Cancel
+                </Button>
               </div>
             ) : (
               <div className="grid gap-3 text-center">
@@ -566,6 +580,9 @@ export function WalletPage() {
                   <Loader2 className="size-3 animate-spin" />
                   Polling for payment
                 </div>
+                <Button variant="outline" size="sm" onClick={cancelDeposit}>
+                  Cancel
+                </Button>
               </div>
             )
           ) : (
