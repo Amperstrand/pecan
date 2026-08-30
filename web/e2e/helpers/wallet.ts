@@ -33,6 +33,24 @@ export async function matchAndSettle(
   if (!match.id) {
     throw new Error(`match failed for ${tellerCode}: ${JSON.stringify(match).slice(0, 200)}`)
   }
+
+  // Outgoing tickets sit in `waiting` until the wallet locks funds at the
+  // mint — a swap-then-melt wallet needs two round trips, so poll until the
+  // operator would actually be allowed to pay out.
+  let ticket = match as { id: string; kind: string; status: string; amount: number }
+  const deadline = Date.now() + 30_000
+  while (ticket.status === "waiting" && Date.now() < deadline) {
+    await page.waitForTimeout(500)
+    const poll = await page.request.post(`/api/quotes/match`, {
+      headers: { "Content-Type": "application/json" },
+      data: { code: tellerCode },
+    })
+    ticket = await poll.json()
+  }
+  if (ticket.status === "waiting") {
+    throw new Error(`ticket ${match.id} never left 'waiting' (wallet did not lock funds)`)
+  }
+
   const settleResp = await page.request.post(`/api/tickets/${match.id}/mark-paid`, {
     headers: { "Content-Type": "application/json" },
     data: { notes },
