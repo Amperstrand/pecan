@@ -7,8 +7,8 @@
   font-weight: 100 900;
   font-display: swap;
   src:
-    url("/static/inter.woff2") format("woff2-variations"),
-    url("/static/inter.woff2") format("woff2");
+    url("../static/inter.woff2") format("woff2-variations"),
+    url("../static/inter.woff2") format("woff2");
 }
 
 @font-face {
@@ -16,7 +16,7 @@
   font-style: normal;
   font-weight: 400 500;
   font-display: swap;
-  src: url("/static/jbm.woff2") format("woff2");
+  src: url("../static/jbm.woff2") format("woff2");
 }
 
 @theme inline {
