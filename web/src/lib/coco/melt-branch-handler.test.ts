@@ -157,6 +157,13 @@ describe("MeltBranchHandler.checkMeltQuote (change recovery from state checks)",
 })
 
 describe("MeltBranchHandler fee and finalization", () => {
+  it("swaps on any selection overshoot so melts never carry change", () => {
+    const handler = new TestableMeltHandler()
+    expect(handler.needsSwapFor(Amount.from(512), Amount.from(500))).toBe(true)
+    expect(handler.needsSwapFor(Amount.from(500), Amount.from(500))).toBe(false)
+    expect(handler.needsSwapFor(Amount.from(501), Amount.from(500))).toBe(true)
+  })
+
   it("treats a missing fee_reserve as zero", () => {
     const fee = new TestableMeltHandler().callGetFeeReserveForQuote({
       quote: "q1",

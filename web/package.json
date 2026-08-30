@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "5.0.0-rc.4",
-    "@cashu/coco-core": "file:vendor/cashu-coco-core-1.0.9.tgz",
-    "@cashu/coco-indexeddb": "file:vendor/cashu-coco-indexeddb-1.0.9.tgz",
+    "@cashu/coco-core": "file:vendor/cashu-coco-core-1.0.10.tgz",
+    "@cashu/coco-indexeddb": "file:vendor/cashu-coco-indexeddb-1.0.10.tgz",
     "@radix-ui/react-alert-dialog": "^1.1.23",
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-separator": "^1.1.15",

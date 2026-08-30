@@ -69,26 +69,41 @@ export function payLightningInvoice(invoice: string): string {
 }
 
 /**
- * Sends on-chain sats from the vls node — a genuinely external wallet.
- * (The nostr node was the original payer but its confirmed utxos ended up
- * reserved until block 320158 after a stalled withdraw; vls is the backup
- * lab wallet. The 300s timeout matters: killing the RPC mid-flight leaves
- * CLN input reservations behind that only clear after reserved_to_block.)
+ * Sends on-chain sats from a genuinely external lab wallet. The CLN nodes run
+ * esplora chain mode; a withdraw can stall on slow esplora fetches, and
+ * killing the RPC mid-flight strands the node's inputs as reserved for a long
+ * block window — so we fail over across every lab wallet and keep the
+ * timeout generous. €50 is the mint's onchain minimum, so each run burns
+ * ~7.4k sat of payer liquidity; top the payers up from a signet faucet when
+ * they run dry.
  */
+const ONCHAIN_PAYERS = ["cln-hub-signet", "cln-vls-signet", "cln-nostr-signet"] as const
+
 export function sendOnchainFromExternal(address: string, sat: number): string {
-  let out: string
-  try {
-    out = execSync(
-      `ssh root@46.224.104.12 "docker exec cln-vls-signet lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
-      { timeout: 300_000, stdio: ["ignore", "pipe", "pipe"] },
-    ).toString()
-  } catch (err) {
-    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
-    throw new Error(`onchain withdraw failed: ${stderr.slice(0, 300)}`)
+  const failures: string[] = []
+  for (const node of ONCHAIN_PAYERS) {
+    let out: string
+    try {
+      out = execSync(
+        `ssh root@46.224.104.12 "docker exec ${node} lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
+        { timeout: 300_000, stdio: ["ignore", "pipe", "pipe"] },
+      ).toString()
+    } catch (err) {
+      const e = err as { stderr?: Buffer; stdout?: Buffer }
+      // lightning-cli reports RPC errors on stdout; keep both for diagnosis
+      failures.push(
+        `${node}: ${`${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 300)}`,
+      )
+      continue
+    }
+    const match = out.match(/"txid":\s*"([0-9a-f]+)"/)
+    if (!match) {
+      failures.push(`${node}: no txid in output: ${out.slice(0, 300)}`)
+      continue
+    }
+    return match[1]
   }
-  const match = out.match(/"txid":\s*"([0-9a-f]+)"/)
-  if (!match) throw new Error(`withdraw produced no txid: ${out.slice(0, 300)}`)
-  return match[1]
+  throw new Error(`onchain withdraw failed on all payers:\n${failures.join("\n")}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -104,11 +119,21 @@ export async function clearWalletDb(page: Page): Promise<void> {
 }
 
 export async function readBalance(page: Page): Promise<number> {
-  // Balance renders as a sibling of the "Balance" label inside a card header
+  // Balance renders as a sibling of the "Balance" label inside a card header;
+  // it shows "… €" until the wallet initializes, so retry until a number
+  // appears — a NaN here would poison every later `before ± amount` check.
   const el = page.locator('.text-4xl.tabular-nums')
   await el.waitFor({ state: "visible", timeout: 20_000 })
-  const text = await el.textContent()
-  return parseFloat(text!.replace(/[^\d.]/g, ""))
+  const deadline = Date.now() + 20_000
+  for (;;) {
+    const text = await el.textContent()
+    const value = parseFloat(text!.replace(/[^\d.]/g, ""))
+    if (!Number.isNaN(value)) return value
+    if (Date.now() > deadline) {
+      throw new Error(`balance never rendered a number: "${text?.trim()}"`)
+    }
+    await page.waitForTimeout(250)
+  }
 }
 
 /**

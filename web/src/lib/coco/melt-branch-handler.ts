@@ -24,6 +24,18 @@ function proofsToSerializedChange(proofs: Proof[]): SerializedBlindedSignature[]
 export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
   protected readonly method = "branch" as const
 
+  /**
+   * Swap on ANY overshoot: proof granularity (e.g. a single 512 for a 500
+   * melt) would otherwise return the overpay as one-time change signatures in
+   * the melt response — and this mint's custom-method state checks do not
+   * re-serve them, so a response lost to a page reload loses the overpay. An
+   * exact-amount melt returns no change; a lost SWAP response is recoverable
+   * from the mint via restore.
+   */
+  needsSwapFor(selectedAmount: Amount, totalAmount: Amount): boolean {
+    return selectedAmount.greaterThan(totalAmount)
+  }
+
   protected async createRemoteQuote(
     ctx: CreateMeltQuoteContext<"branch">,
   ): Promise<BranchMeltQuoteResponse> {
