@@ -351,3 +351,79 @@ export async function getPendingWithdraw(): Promise<{
     tail: op.quoteId.slice(-6).toUpperCase(),
   }
 }
+
+// ---------------------------------------------------------------------------
+// Developer tools (signet/test only — never enable on a value-carrying mint)
+// ---------------------------------------------------------------------------
+
+export const DEV_WALLET_TOOLS = true
+
+export interface WalletDump {
+  exportedAt: string
+  unit: string
+  seed: string | null
+  mintUrl: string
+  proofs: Array<Record<string, unknown>>
+  mintOperations: Array<Record<string, unknown>>
+  meltOperations: Array<Record<string, unknown>>
+  history: Array<Record<string, unknown>>
+}
+
+export async function exportWalletDump(): Promise<WalletDump> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const req = indexedDB.open("giftcard-coco-wallet")
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+  const getAll = (store: string) =>
+    new Promise<Array<Record<string, unknown>>>((resolve) => {
+      const tx = db.transaction(store, "readonly")
+      const req = tx.objectStore(store).getAll()
+      req.onsuccess = () => resolve(req.result as Array<Record<string, unknown>>)
+      req.onerror = () => resolve([])
+    })
+  const stringify = (rows: Array<Record<string, unknown>>) =>
+    rows.map((row) => {
+      const out: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(row)) {
+        out[k] = v instanceof Uint8Array ? Array.from(v) : v
+      }
+      return out
+    })
+  return {
+    exportedAt: new Date().toISOString(),
+    unit: UNIT,
+    seed: window.localStorage.getItem(SEED_STORAGE_KEY),
+    mintUrl: MINT_URL(),
+    proofs: stringify(await getAll("coco_cashu_proofs")),
+    mintOperations: stringify(await getAll("coco_cashu_mint_operations")),
+    meltOperations: stringify(await getAll("coco_cashu_melt_operations")),
+    history: stringify(await getAll("coco_cashu_history")),
+  }
+}
+
+export function downloadWalletDump(dump: WalletDump): void {
+  const blob = new Blob([JSON.stringify(dump, null, 2)], {
+    type: "application/json",
+  })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = `giftcard-wallet-dump-${dump.exportedAt.replace(/[:.]/g, "-")}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Permanently deletes all wallet state (IndexedDB + localStorage seed).
+ * The page must reload afterward — the wallet is unusable until then.
+ */
+export async function forceClearWallet(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const req = indexedDB.deleteDatabase("giftcard-coco-wallet")
+    req.onsuccess = () => resolve()
+    req.onerror = () => resolve()
+    req.onblocked = () => resolve()
+  })
+  window.localStorage.removeItem(SEED_STORAGE_KEY)
+}

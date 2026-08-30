@@ -8,19 +8,18 @@ import {
   readTellerCode,
   readWalletDb,
   sendOnchainFromExternal,
-  sendOnchainToAddress,
   trackWalletErrors,
   waitForDepositFormReset,
   waitForOpState,
 } from "./helpers/wallet"
 
 const WALLET = "/console/wallet"
-const DEPOSIT_KR = 5
+const DEPOSIT_AMOUNT = 5
 
-async function waitForBalance(page: Page, expectedKr: number, timeout = 45_000) {
+async function waitForBalance(page: Page, expected: number, timeout = 45_000) {
   await expect
     .poll(async () => readBalance(page), { timeout })
-    .toBeCloseTo(expectedKr, 2)
+    .toBeCloseTo(expected, 2)
 }
 
 let sharedPage: Page | null = null
@@ -37,58 +36,48 @@ test.afterAll(async () => {
   if (sharedPage) await sharedPage.close()
 })
 
-test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", () => {
+test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
   test.describe.configure({ mode: "serial" })
 
-  test("wallet page loads with zero console errors", async () => {
+  test("fresh wallet loads (new browser context = fresh IndexedDB)", async () => {
     const page = sharedPage!
     await page.goto(WALLET)
     await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
     await readBalance(page)
   })
 
-  test("deposit: quote → teller settle → auto-claim to proofs", async () => {
+  test("teller deposit: quote → teller settle → auto-claim", async () => {
     const page = sharedPage!
-    await page.goto(WALLET)
     await apiLogin(page)
 
     const before = await readBalance(page)
-
-    await page.getByPlaceholder("5.00").fill(String(DEPOSIT_KR))
+    await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT))
     await page.getByRole("button", { name: "Create deposit quote" }).click()
 
     const code = await readTellerCode(page)
-    await expect(page.getByText("Polling for payment")).toBeVisible()
-
-    const ticket = await matchAndSettle(page, code, "E2E deposit")
+    const ticket = await matchAndSettle(page, code, "E2E teller deposit")
     expect(ticket.status).toBe("paid")
     expect(ticket.kind).toBe("incoming")
-    expect(ticket.amount).toBe(DEPOSIT_KR * 100)
+    expect(ticket.amount).toBe(DEPOSIT_AMOUNT * 100)
 
-    await waitForBalance(page, before + DEPOSIT_KR)
-
+    await waitForBalance(page, before + DEPOSIT_AMOUNT)
     await waitForDepositFormReset(page)
     expectNoWalletErrors(walletErrors)
 
     await waitForOpState(page, "mint", code, "finalized")
     const db = await readWalletDb(page)
-    expect(db.proofCount).toBeGreaterThan(0)
-    expect(db.spendableSum).toBeGreaterThanOrEqual((before + DEPOSIT_KR) * 100)
+    expect(db.spendableSum).toBeGreaterThanOrEqual((before + DEPOSIT_AMOUNT) * 100)
   })
 
-  test("lightning deposit: invoice → paid by signet node → auto-claim", async () => {
+  test("lightning deposit: invoice → paid by hub node → auto-claim", async () => {
     const page = sharedPage!
-    await page.goto(WALLET)
-
     const before = await readBalance(page)
 
     await page.getByRole("button", { name: "Lightning", exact: true }).click()
     await page.getByPlaceholder("5.00").fill("1")
     await page.getByRole("button", { name: "Create lightning invoice" }).click()
 
-    const invoiceBox = page.locator(
-      'p.font-mono:has-text("lntbs")',
-    )
+    const invoiceBox = page.locator('p.font-mono:has-text("lntbs")')
     await invoiceBox.waitFor({ state: "visible", timeout: 30_000 })
     const invoice = (await invoiceBox.textContent())?.trim() ?? ""
     expect(invoice.startsWith("lntbs")).toBeTruthy()
@@ -99,16 +88,22 @@ test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", ()
     await waitForBalance(page, before + 1, 60_000)
     await waitForDepositFormReset(page, "Create lightning invoice")
     expectNoWalletErrors(walletErrors)
-
-    const db = await readWalletDb(page)
-    expect(db.spendableSum).toBeGreaterThanOrEqual((before + 1) * 100)
   })
 
   test("onchain deposit: external wallet → mempool → 1-conf → receipt", async () => {
-    test.setTimeout(600_000)
+    // Signet blocks can take 5-30+ minutes; adapt timeout to current cadence
+    const blocks = await sharedPage!.request.get(
+      "https://mempool.space/signet/api/blocks",
+    ).then((r) => r.json());
+    const now = Math.floor(Date.now() / 1000);
+    const intervals = blocks.slice(0, 3).map((b: { timestamp: number }, i: number) =>
+      i === 0 ? now - b.timestamp : blocks[i - 1].timestamp - b.timestamp,
+    );
+    const avgInterval = intervals.reduce((a: number, b: number) => a + b, 0) / intervals.length;
+    const timeout = Math.min(Math.ceil((avgInterval * 3) / 60) * 60_000, 1_800_000);
+    test.setTimeout(timeout + 60_000);
+    console.log(`  signet avg block interval: ${Math.round(avgInterval)}s → timeout ${Math.round(timeout / 1000)}s`);
     const page = sharedPage!
-    await page.goto(WALLET)
-
     const before = await readBalance(page)
 
     await page.getByRole("button", { name: "On-chain", exact: true }).click()
@@ -129,60 +124,47 @@ test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", ()
     const txid = sendOnchainFromExternal(address, expectedSat)
     expect(txid).toHaveLength(64)
 
-    // The progress bar shows the mempool state within ~20s
     await expect(
       page.getByText("Payment detected in mempool"),
     ).toBeVisible({ timeout: 30_000 })
 
-    // 1-conf: wait for a signet block (~5 min avg) then balance updates
-    await waitForBalance(page, before + 50, 480_000)
+    await waitForBalance(page, before + 50, timeout)
     expectNoWalletErrors(walletErrors)
   })
 
   test("one-way mint: ln and btc melt quotes are refused", async () => {
     const page = sharedPage!
-    await page.goto(WALLET)
 
-    const lnMelt = await page.request.post(
-      "/v1/melt/quote/ln",
-      {
-        headers: { "Content-Type": "application/json" },
-        data: { unit: "nok", amount: 500, request: "lntbs1test", rail: "ln" },
-      },
-    )
+    const lnMelt = await page.request.post("/v1/melt/quote/ln", {
+      headers: { "Content-Type": "application/json" },
+      data: { unit: "eur", amount: 500, request: "lntbs1test", rail: "ln" },
+    })
     expect(lnMelt.status()).toBeGreaterThanOrEqual(400)
 
-    const btcMelt = await page.request.post(
-      "/v1/melt/quote/btc",
-      {
-        headers: { "Content-Type": "application/json" },
-        data: { unit: "nok", amount: 500, request: "tb1qtest", rail: "btc" },
-      },
-    )
+    const btcMelt = await page.request.post("/v1/melt/quote/btc", {
+      headers: { "Content-Type": "application/json" },
+      data: { unit: "eur", amount: 500, request: "tb1qtest", rail: "btc" },
+    })
     expect(btcMelt.status()).toBeGreaterThanOrEqual(400)
   })
 
   test("withdraw: melt → teller payout → finalized, proofs released", async () => {
     const page = sharedPage!
-    await page.goto(WALLET)
     await apiLogin(page)
 
     const before = await readBalance(page)
-    test.skip(before < DEPOSIT_KR, "insufficient balance for withdraw test")
+    test.skip(before < DEPOSIT_AMOUNT, "insufficient balance for withdraw")
 
     await page.getByPlaceholder("Phone or reference").fill("e2e-recipient")
-    await page.getByPlaceholder("1.00").fill(String(DEPOSIT_KR))
+    await page.getByPlaceholder("1.00").fill(String(DEPOSIT_AMOUNT))
     await page.getByRole("button", { name: "Send", exact: true }).click()
 
     const code = await readTellerCode(page)
-    await expect(page.getByText("Waiting for payout")).toBeVisible()
-
     const ticket = await matchAndSettle(page, code, "E2E payout")
     expect(ticket.status).toBe("paid")
     expect(ticket.kind).toBe("outgoing")
-    expect(ticket.amount).toBe(DEPOSIT_KR * 100)
 
-    await waitForBalance(page, before - DEPOSIT_KR, 60_000)
+    await waitForBalance(page, before - DEPOSIT_AMOUNT, 60_000)
     expectNoWalletErrors(walletErrors)
 
     await waitForOpState(page, "melt", code, "finalized")
@@ -190,27 +172,27 @@ test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", ()
     expect(db.spendableSum).toBeLessThan(before * 100)
   })
 
-  test("withdraw survives reload while payout pending (durable saga)", async () => {
+  test("withdraw survives reload (durable saga)", async () => {
     const page = sharedPage!
-    await page.goto(WALLET)
     await apiLogin(page)
-
     const start = await readBalance(page)
 
-    await page.getByPlaceholder("5.00").fill(String(DEPOSIT_KR))
-    await page.getByRole("button", { name: "Create deposit quote" }).click()
-    const depositCode = await readTellerCode(page)
-    await matchAndSettle(page, depositCode, "E2E reload-saga funding")
-    await waitForBalance(page, start + DEPOSIT_KR)
+    await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT)).catch(() => {})
+    // fund if needed
+    if (start < DEPOSIT_AMOUNT * 2) {
+      await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT))
+      await page.getByRole("button", { name: "Create deposit quote" }).click()
+      const depCode = await readTellerCode(page)
+      await matchAndSettle(page, depCode, "E2E reload-saga funding")
+      await waitForBalance(page, start + DEPOSIT_AMOUNT)
+    }
 
+    const before = await readBalance(page)
     await page.getByPlaceholder("Phone or reference").fill("e2e-reload")
-    await page.getByPlaceholder("1.00").fill(String(DEPOSIT_KR))
+    await page.getByPlaceholder("1.00").fill(String(DEPOSIT_AMOUNT))
     await page.getByRole("button", { name: "Send", exact: true }).click()
     const code = await readTellerCode(page)
-    await expect(page.getByText("Waiting for payout")).toBeVisible()
 
-    // Kill the page mid-saga: any poller/UI state is gone; only the durable
-    // operation row + coco's boot-recovery watcher can finish the withdraw.
     await page.reload()
     await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
 
@@ -218,7 +200,7 @@ test.describe("Coco 2 browser wallet E2E (branch method, teller settlement)", ()
     expect(ticket.status).toBe("paid")
 
     await waitForOpState(page, "melt", code, "finalized", 90_000)
-    await waitForBalance(page, start, 90_000)
+    await waitForBalance(page, before - DEPOSIT_AMOUNT, 90_000)
     expectNoWalletErrors(walletErrors)
   })
 

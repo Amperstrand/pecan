@@ -14,8 +14,8 @@ export async function apiLogin(page: Page): Promise<void> {
     )
   }
   const resp = await page.request.post(`/api/login`, {
-    headers: { 'Content-Type': 'application/json' },
-    data: { username: 'admin', password },
+    headers: { "Content-Type": "application/json" },
+    data: { username: "admin", password },
   })
   if (resp.status() !== 200) throw new Error(`admin login failed: ${resp.status()}`)
 }
@@ -44,43 +44,9 @@ export async function matchAndSettle(
 }
 
 // ---------------------------------------------------------------------------
-// Wallet UI helpers (coco wallet at /console/wallet)
+// External wallet helpers (pay from lab nodes via SSH)
 // ---------------------------------------------------------------------------
 
-export async function readBalance(page: Page): Promise<number> {
-  const el = page.getByText(/^\d+\.\d{2} €$/, { exact: true }).first()
-  await el.waitFor({ state: "visible", timeout: 15_000 })
-  const text = await el.textContent()
-  return parseFloat(text!.replace(/[^\d.]/g, ""))
-}
-
-/**
- * The 6-character code shown under "Give this code to the teller:" for both
- * deposits (MINT-… quote tail) and withdrawals (MELT-… quote tail).
- */
-export async function readTellerCode(page: Page): Promise<string> {
-  const code = page.locator('p.font-mono.text-3xl')
-  await code.waitFor({ state: "visible", timeout: 30_000 })
-  const text = (await code.textContent())?.trim() ?? ""
-  if (!/^[A-Z0-9]{6}$/.test(text)) {
-    throw new Error(`expected 6-char teller code, got: "${text}"`)
-  }
-  return text
-}
-
-export async function waitForDepositFormReset(
-  page: Page,
-  buttonName = "Create deposit quote",
-): Promise<void> {
-  await page
-    .getByRole("button", { name: buttonName })
-    .waitFor({ state: "visible", timeout: 45_000 })
-}
-
-/**
- * Pays a lightning invoice from the lab's signet CLN node (simulated rail —
- * no real money moves). Returns the payment preimage.
- */
 export function payLightningInvoiceFrom(node: string, invoice: string): string {
   let out: string
   try {
@@ -97,38 +63,17 @@ export function payLightningInvoiceFrom(node: string, invoice: string): string {
   return match[1]
 }
 
-/** Pays from a second signet node — proves routability beyond the primary. */
-export function payLightningInvoiceFromHub(invoice: string): string {
+/** Pays from the hub node (well-connected, multiple channels). */
+export function payLightningInvoice(invoice: string): string {
   return payLightningInvoiceFrom("cln-hub-signet", invoice)
 }
 
-/** Sends on-chain sats to a deposit address from the hub node's wallet. */
 /** Sends on-chain sats from the nostr node — a genuinely external wallet. */
 export function sendOnchainFromExternal(address: string, sat: number): string {
-  return sendOnchainFrom("cln-nostr-signet", address, sat)
-}
-
-function sendOnchainFrom(node: string, address: string, sat: number): string {
   let out: string
   try {
     out = execSync(
-      `ssh root@46.224.104.12 "docker exec ${node} lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
-      { timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
-    ).toString()
-  } catch (err) {
-    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
-    throw new Error(`onchain withdraw from ${node} failed: ${stderr.slice(0, 300)}`)
-  }
-  const match = out.match(/"txid":\s*"([0-9a-f]+)"/)
-  if (!match) throw new Error(`withdraw produced no txid: ${out.slice(0, 300)}`)
-  return match[1]
-}
-
-export function sendOnchainToAddress(address: string, sat: number): string {
-  let out: string
-  try {
-    out = execSync(
-      `ssh root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
+      `ssh root@46.224.104.12 "docker exec cln-nostr-signet lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
       { timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
     ).toString()
   } catch (err) {
@@ -140,20 +85,47 @@ export function sendOnchainToAddress(address: string, sat: number): string {
   return match[1]
 }
 
-export function payLightningInvoice(invoice: string): string {
-  let out: string
-  try {
-    out = execSync(
-      `ssh root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet pay ${invoice}"`,
-      { timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] },
-    ).toString()
-  } catch (err) {
-    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
-    throw new Error(`lightning pay failed: ${stderr.slice(0, 300)}`)
+// ---------------------------------------------------------------------------
+// Wallet UI helpers (coco wallet at /console/wallet)
+// ---------------------------------------------------------------------------
+
+export async function clearWalletDb(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    indexedDB.deleteDatabase("giftcard-coco-wallet")
+    localStorage.removeItem("giftcard-coco-seed-v1")
+  })
+  await page.reload()
+}
+
+export async function readBalance(page: Page): Promise<number> {
+  // Balance renders as a sibling of the "Balance" label inside a card header
+  const el = page.locator('.text-4xl.tabular-nums')
+  await el.waitFor({ state: "visible", timeout: 20_000 })
+  const text = await el.textContent()
+  return parseFloat(text!.replace(/[^\d.]/g, ""))
+}
+
+/**
+ * The 6-character code shown under "Give this code to the teller:" for both
+ * deposits (MINT-… quote tail) and withdrawals (MELT-… quote tail).
+ */
+export async function readTellerCode(page: Page): Promise<string> {
+  const code = page.locator("p.font-mono.text-3xl")
+  await code.waitFor({ state: "visible", timeout: 30_000 })
+  const text = (await code.textContent())?.trim() ?? ""
+  if (!/^[A-Z0-9]{6}$/.test(text)) {
+    throw new Error(`expected 6-char teller code, got: "${text}"`)
   }
-  const match = out.match(/"payment_preimage":\s*"([0-9a-f]+)"/)
-  if (!match) throw new Error(`payment did not complete: ${out.slice(0, 300)}`)
-  return match[1]
+  return text
+}
+
+export async function waitForDepositFormReset(
+  page: Page,
+  buttonName = "Create deposit quote",
+): Promise<void> {
+  await page
+    .getByRole("button", { name: buttonName })
+    .waitFor({ state: "visible", timeout: 45_000 })
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ function historyFixture(fields: {
 describe("mapHistoryEntry", () => {
   it("maps finalized mint entries to completed deposits", () => {
     const row = mapHistoryEntry(historyFixture({ type: "mint", state: "finalized", amount: 500 }))
-    expect(row).toMatchObject({ type: "deposit", amount_ore: 500, pending: false })
+    expect(row).toMatchObject({ type: "deposit", amount_cents: 500, pending: false })
   })
 
   it("marks non-finalized mint entries as pending", () => {
@@ -35,7 +35,7 @@ describe("mapHistoryEntry", () => {
   it("maps melt entries and marks only finalized ones complete", () => {
     expect(
       mapHistoryEntry(historyFixture({ type: "melt", state: "finalized", amount: 500 })),
-    ).toMatchObject({ type: "withdraw", amount_ore: 500, pending: false })
+    ).toMatchObject({ type: "withdraw", amount_cents: 500, pending: false })
     expect(
       mapHistoryEntry(historyFixture({ type: "melt", state: "executing", amount: 500 })),
     ).toMatchObject({ type: "withdraw", pending: true })

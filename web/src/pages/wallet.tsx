@@ -18,6 +18,10 @@ import { Separator } from "@/components/ui/separator"
 import {
   type DepositQuote,
   type DepositMethod,
+  DEV_WALLET_TOOLS,
+  downloadWalletDump,
+  exportWalletDump,
+  forceClearWallet,
   type HistoryRow,
   createDepositQuote,
   createWithdraw,
@@ -692,6 +696,44 @@ export function WalletPage() {
                 </div>
               ))}
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {DEV_WALLET_TOOLS && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm text-destructive">
+              Developer Tools
+            </CardTitle>
+            <CardDescription className="text-xs">
+              Signet/test only. These actions are irreversible.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                const dump = await exportWalletDump()
+                downloadWalletDump(dump)
+              }}
+            >
+              Export wallet data (JSON)
+            </Button>
+            <Button
+              variant="outline" className="text-destructive border-destructive hover:bg-destructive hover:text-white"
+              size="sm"
+              onClick={async () => {
+                const dump = await exportWalletDump()
+                downloadWalletDump(dump)
+                await new Promise((r) => setTimeout(r, 500))
+                await forceClearWallet()
+                window.location.reload()
+              }}
+            >
+              Force clear wallet (downloads backup first)
+            </Button>
           </CardContent>
         </Card>
       )}
