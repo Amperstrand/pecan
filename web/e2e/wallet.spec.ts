@@ -292,4 +292,75 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     expect(rows.some((r) => r.includes("Withdraw"))).toBeTruthy()
     expectNoWalletErrors(walletErrors)
   })
+
+  test("lost swap response recovers via mint restore", async () => {
+    const page = sharedPage!
+    await apiLogin(page)
+
+    // €6 deposits split as 512+64+16+8 — no exact-500 subset exists, so a
+    // €5 withdraw MUST take the pre-swap path.
+    await page.getByPlaceholder("5.00").fill("6")
+    await page.getByRole("button", { name: "Create deposit quote" }).click()
+    const depCode = await readTellerCode(page)
+    await matchAndSettle(page, depCode, "E2E swap-recovery funding")
+    await waitForBalance(page, 6)
+
+    // Let the mint process the swap, but never deliver the response — the
+    // exact shape of a page death mid-swap: inputs burned and outputs
+    // issued server-side, everything after lost.
+    let swapKilled = false
+    await page.route("**/v1/swap", async (route) => {
+      await route.fetch()
+      swapKilled = true
+      await route.abort()
+    })
+
+    await page.getByPlaceholder("Phone or reference").fill("swap-kill")
+    await page.getByPlaceholder("1.00").fill("5")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await page.waitForTimeout(4000)
+    expect(swapKilled, "the swap request reached the mint").toBe(true)
+
+    // Reload: recovery must detect the spent swap inputs and restore the
+    // outputs from the mint (NUT-06 restore) instead of losing them.
+    await page.reload()
+    await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
+    await waitForBalance(page, 6, 90_000)
+
+    // The aborted withdraw's ticket waits forever — void it so the ledger
+    // stays clean, then prove a normal withdraw still works end to end.
+    const killCode = page.locator("p.font-mono.text-3xl")
+    if (await killCode.isVisible().catch(() => false)) {
+      const code = ((await killCode.textContent()) ?? "").trim()
+      if (/^[A-Z0-9]{6}$/.test(code)) {
+        const match = await page.request
+          .post("/api/quotes/match", {
+            headers: { "Content-Type": "application/json" },
+            data: { code },
+          })
+          .then((r) => r.json())
+          .catch(() => null)
+        if (match?.id) {
+          await page.request
+            .post(`/api/tickets/${match.id}/mark-failed`, {
+              headers: { "Content-Type": "application/json" },
+              data: { notes: "E2E swap-kill cleanup" },
+            })
+            .catch(() => {})
+        }
+      }
+    }
+
+    await page.getByPlaceholder("Phone or reference").fill("after-restore")
+    await page.getByPlaceholder("1.00").fill("5")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const code = await readTellerCode(page)
+    const ticket = await matchAndSettle(page, code, "E2E payout after restore")
+    expect(ticket.status).toBe("paid")
+    await waitForOpState(page, "melt", code, "finalized", 90_000)
+    await waitForBalance(page, 1, 90_000)
+    const change = await finalizedMeltChange(page, code)
+    expect(change, "post-restore melt settles with zero change").toBe(0)
+    expectNoWalletErrors(walletErrors)
+  })
 })

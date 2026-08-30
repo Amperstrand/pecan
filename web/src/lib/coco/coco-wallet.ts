@@ -300,6 +300,8 @@ export async function resumePendingOperations(
     }
   }
 
+  await resumeStrandedWithdrawQuotes(coco, melts, preparedMelts)
+
   void (async () => {
     const deadline = Date.now() + RESUME_TIMEOUT_MS
     let settledAny = false
@@ -328,6 +330,59 @@ export async function resumePendingOperations(
     if (settledAny) onSettled?.()
   })()
   return true
+}
+
+/**
+ * A page death between quote creation and prepare strands the quote with no
+ * operation: the teller ticket waits forever on a fund lock that will never
+ * come. Re-bind fresh stranded branch quotes to a new op and execute it —
+ * the withdraw the user already accepted continues instead of silently
+ * dying with the reload.
+ */
+async function resumeStrandedWithdrawQuotes(
+  coco: Awaited<ReturnType<typeof getCoco>>,
+  inFlight: Array<{ quoteId?: string }>,
+  prepared: Array<{ quoteId?: string }>,
+): Promise<void> {
+  const known = new Set(
+    [...inFlight, ...prepared]
+      .map((op) => op.quoteId)
+      .filter((id): id is string => typeof id === "string"),
+  )
+  const staleCutoff = Date.now() - 45 * 60 * 1000
+  let stranded: Array<{
+    mintUrl: string
+    quoteId: string
+    method: string
+    createdAt: number
+  }> = []
+  try {
+    stranded = (await coco.quotes.melt.listPending()).filter(
+      (q) =>
+        q.mintUrl === MINT_URL() &&
+        q.method === "branch" &&
+        q.quoteId &&
+        !known.has(q.quoteId) &&
+        q.createdAt > staleCutoff,
+    )
+  } catch {
+    // quote enumeration is best-effort; the watcher owns listed ops anyway
+    return
+  }
+  for (const q of stranded) {
+    try {
+      const op = await coco.ops.melt.prepare({
+        quote: { mintUrl: q.mintUrl, quoteId: q.quoteId, method: "branch" },
+      })
+      await coco.ops.melt.execute(op.id)
+      walletLog("info", "resumed stranded withdraw quote", { quoteId: q.quoteId })
+    } catch (err) {
+      walletLog("warn", "stranded withdraw quote resume failed", {
+        quoteId: q.quoteId,
+        error: String(err),
+      })
+    }
+  }
 }
 
 /**

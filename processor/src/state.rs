@@ -443,10 +443,15 @@ impl BranchState {
                 TicketStatus::Failed => bail!("ticket {id} was voided; it cannot be settled"),
                 TicketStatus::Paid => (ticket.clone(), false),
                 TicketStatus::Pending => {
-                    if ticket.kind == TicketKind::Incoming && ticket.expired(unix_now()) {
+                    if ticket.expired(unix_now()) {
                         bail!(
-                            "quote {id} has expired; ask the customer to create a fresh one \
-                             before taking cash"
+                            "quote {id} has expired; {}",
+                            if ticket.kind == TicketKind::Incoming {
+                                "ask the customer to create a fresh one before taking cash"
+                            } else {
+                                "the mint may already have refunded the customer's ecash — \
+                                 settling now risks paying out twice"
+                            }
                         );
                     }
                     ticket.status = TicketStatus::Paid;
@@ -634,6 +639,11 @@ impl BranchState {
 fn outgoing_payment_response(t: &Ticket) -> MakePaymentResponse {
     let status = match t.status {
         TicketStatus::Paid => MeltQuoteState::Paid,
+        // An expired unsettled payout must read as Failed so the mint's
+        // status check compensates the melt saga (un-burns the wallet's
+        // inputs and resets the quote). Reporting Pending forever strands
+        // the customer's burned proofs with no refund path.
+        TicketStatus::Pending if t.expired(unix_now()) => MeltQuoteState::Failed,
         TicketStatus::Pending => MeltQuoteState::Pending,
         TicketStatus::Waiting => MeltQuoteState::Unpaid,
         TicketStatus::Failed => MeltQuoteState::Failed,
@@ -890,6 +900,39 @@ mod tests {
             .outgoing_by_quote_id("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4")
             .await
             .is_some_and(|x| x.id == t.id));
+    }
+
+    #[tokio::test]
+    async fn expired_payouts_report_failed_and_refuse_settlement() {
+        let state = fresh_state().await;
+        let mut t = outgoing("0198c0ef-3f11-7abc-9def-eeeeee9ec0f4", 700);
+        t.expires_at = Some(unix_now() - 1);
+        let t = state.insert_open(t).await.unwrap();
+        let funded = state.mark_outgoing_submitted(&t.id).await.unwrap();
+        assert_eq!(funded.status, TicketStatus::Pending);
+
+        // the mint's status check must see Failed so its melt saga
+        // compensates (un-burns the wallet's inputs)
+        let resp = state
+            .lookup_outgoing(&PaymentIdentifier::CustomId(t.id.clone()))
+            .await
+            .expect("outgoing lookup");
+        assert_eq!(resp.status, MeltQuoteState::Failed);
+
+        // and the operator must not pay out cash for it
+        let err = state.mark_paid(&t.id, None, "test").await.unwrap_err();
+        assert!(err.to_string().contains("expired"));
+
+        // unexpired payouts are unaffected
+        let mut live = outgoing("0198c0ef-3f11-7abc-9def-eeeeee9ec0f5", 700);
+        live.expires_at = Some(unix_now() + 900);
+        let live = state.insert_open(live).await.unwrap();
+        state.mark_outgoing_submitted(&live.id).await.unwrap();
+        let resp = state
+            .lookup_outgoing(&PaymentIdentifier::CustomId(live.id.clone()))
+            .await
+            .expect("outgoing lookup");
+        assert_eq!(resp.status, MeltQuoteState::Pending);
     }
 
     #[tokio::test]
