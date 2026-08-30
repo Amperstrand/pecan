@@ -21,7 +21,7 @@ import {
   type HistoryRow,
   createDepositQuote,
   createWithdraw,
-  getBalanceOre,
+  getBalanceCents,
   getHistory,
   getPendingDeposit,
   getPendingWithdraw,
@@ -247,8 +247,8 @@ export function WalletPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [ore, hist] = await Promise.all([getBalanceOre(), getHistory(15)])
-      setBalance(ore)
+      const [balance, hist] = await Promise.all([getBalanceCents(), getHistory(15)])
+      setBalance(balance)
       setHistory(hist)
     } catch {
       // wallet not initialized yet
@@ -377,7 +377,7 @@ export function WalletPage() {
     }
   }
 
-  const balanceKr = balance !== null ? (balance / 100).toFixed(2) : "…"
+  const balanceEur = balance !== null ? (balance / 100).toFixed(2) : "…"
   const isDark = document.documentElement.classList.contains("dark")
 
   return (
@@ -394,7 +394,7 @@ export function WalletPage() {
         <CardHeader>
           <CardDescription>Balance</CardDescription>
           <CardTitle className="text-4xl tabular-nums">
-            {balanceKr} <span className="text-base font-normal text-muted-foreground">kr</span>
+            {balanceEur} <span className="text-base font-normal text-muted-foreground">€</span>
           </CardTitle>
         </CardHeader>
       </Card>
@@ -416,7 +416,7 @@ export function WalletPage() {
                 Deposit confirmed
               </p>
               <p className="text-lg font-bold">
-                +{(depositState.receipt.amountOre / 100).toFixed(2)} kr
+                +{(depositState.receipt.amountOre / 100).toFixed(2)} €
               </p>
               <div className="text-xs text-muted-foreground">
                 {depositState.receipt.method === "btc" && depositState.receipt.sat && (
@@ -470,11 +470,11 @@ export function WalletPage() {
               </div>
               {depositMethod === "btc" && (
                 <p className="text-xs text-muted-foreground">
-                  Minimum 50 kr — on-chain deposits pay for dust and chain fees.
+                  Minimum 50 € — on-chain deposits pay for dust and chain fees.
                 </p>
               )}
               <div className="grid gap-1.5">
-                <Label htmlFor="dep-amt">Amount (kr)</Label>
+                <Label htmlFor="dep-amt">Amount (€)</Label>
                 <Input
                   id="dep-amt"
                   type="number"
@@ -520,7 +520,7 @@ export function WalletPage() {
                   Copy invoice
                 </Button>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
+                  {(depositState.quote.amountOre / 100).toFixed(2)} € — waiting…
                 </p>
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
@@ -549,7 +549,7 @@ export function WalletPage() {
                   Copy address
                 </Button>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
+                  {(depositState.quote.amountOre / 100).toFixed(2)} € — waiting…
                 </p>
                 <OnchainStatus address={depositState.quote.request} />
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
@@ -575,7 +575,7 @@ export function WalletPage() {
                   {depositState.quote.tail}
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amountOre / 100).toFixed(2)} kr — waiting…
+                  {(depositState.quote.amountOre / 100).toFixed(2)} € — waiting…
                 </p>
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
@@ -615,7 +615,7 @@ export function WalletPage() {
                 />
               </div>
               <div className="grid gap-1.5">
-                <Label htmlFor="wd-amt">Amount (kr)</Label>
+                <Label htmlFor="wd-amt">Amount (€)</Label>
                 <Input
                   id="wd-amt"
                   type="number"
@@ -687,7 +687,7 @@ export function WalletPage() {
                     className={`font-mono tabular-nums ${h.pending ? "text-muted-foreground" : ""}`}
                   >
                     {h.type === "deposit" ? "+" : "−"}
-                    {(h.amount_ore / 100).toFixed(2)} kr
+                    {(h.amount_cents / 100).toFixed(2)} €
                   </span>
                 </div>
               ))}

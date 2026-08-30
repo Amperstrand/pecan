@@ -73,4 +73,4 @@ export const BRANCH_METHOD = "branch" as const
 export const LN_METHOD = "ln" as const
 export type DepositMethod = "branch" | "ln" | "btc"
 export const MINT_URL = (): string => window.location.origin
-export const UNIT = "nok"
+export const UNIT = "eur"

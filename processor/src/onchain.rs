@@ -184,7 +184,7 @@ impl OnchainRail {
                         }
                     }
                     if let Some((ore, unit)) = settled {
-                        tracing::info!("onchain deposit settled: {quote_id} ({ore} øre)");
+                        tracing::info!("onchain deposit settled: {quote_id} ({ore} cents)");
                         let _ = events.send(Event::PaymentReceived(WaitPaymentResponse {
                             payment_identifier: PaymentIdentifier::CustomId(quote_id.clone()),
                             payment_amount: Amount::new(ore, unit),
@@ -224,7 +224,7 @@ impl OnchainRail {
         );
         persist(&self.store, &addresses).await;
         tracing::info!(
-            "onchain address {quote_id} for {amount_ore} øre (expect {expected_sat} sat \
+            "onchain address {quote_id} for {amount_ore} cents (expect {expected_sat} sat \
              to {})",
             addr.bech32
         );

@@ -11,7 +11,7 @@ import { MintBranchHandler } from "./mint-branch-handler"
 export interface HistoryRow {
   id?: number
   type: "deposit" | "withdraw"
-  amount_ore: number
+  amount_cents: number
   description: string
   created_at: number
   pending?: boolean
@@ -83,7 +83,7 @@ export function getCoco(): Promise<Manager> {
   return cocoInstance
 }
 
-export async function getBalanceOre(): Promise<number> {
+export async function getBalanceCents(): Promise<number> {
   const coco = await getCoco()
   const balances = await coco.wallet.balances.byUnit({ mintUrls: [MINT_URL()] })
   const nok = balances[UNIT]
@@ -105,7 +105,7 @@ export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
     if (entry.state === "failed") return null
     return {
       type: "deposit",
-      amount_ore: Number(entry.amount.toBigInt()),
+      amount_cents: Number(entry.amount.toBigInt()),
       description: stale && entry.state !== "finalized" ? "Expired" : "Deposit",
       created_at: createdAt,
       pending: entry.state !== "finalized" && !stale,
@@ -114,7 +114,7 @@ export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
   if (entry.type === "melt") {
     return {
       type: "withdraw",
-      amount_ore: Number(entry.amount.toBigInt()),
+      amount_cents: Number(entry.amount.toBigInt()),
       description: stale && entry.state !== "finalized" ? "Expired" : "Withdraw",
       created_at: createdAt,
       pending: entry.state !== "finalized" && !stale,
@@ -298,8 +298,14 @@ export async function resumePendingOperations(
 export async function getPendingDeposit(): Promise<DepositQuote | null> {
   const coco = await getCoco()
   const ops = await coco.ops.mint.listInFlight()
-  const op = ops.find((o) => o.state === "pending" || o.state === "executing")
-  if (!op) return null
+  const staleCutoff = Date.now() - 45 * 60 * 1000
+  const op = ops.find(
+    (o) =>
+      (o.state === "pending" || o.state === "executing") &&
+      o.unit === UNIT &&
+      o.createdAt > staleCutoff,
+  )
+  if (!op || !op.quoteId) return null
 
   const quote = await coco.quotes.mint.get({
     mintUrl: MINT_URL(),
@@ -332,8 +338,14 @@ export async function getPendingWithdraw(): Promise<{
 } | null> {
   const coco = await getCoco()
   const ops = await coco.ops.melt.listInFlight()
-  const op = ops.find((o) => o.state === "executing" || o.state === "pending")
-  if (!op) return null
+  const staleCutoff = Date.now() - 45 * 60 * 1000
+  const op = ops.find(
+    (o) =>
+      (o.state === "executing" || o.state === "pending") &&
+      o.unit === UNIT &&
+      o.createdAt > staleCutoff,
+  )
+  if (!op || !op.quoteId) return null
   return {
     quoteId: op.quoteId,
     tail: op.quoteId.slice(-6).toUpperCase(),

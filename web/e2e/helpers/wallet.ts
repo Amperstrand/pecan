@@ -48,7 +48,7 @@ export async function matchAndSettle(
 // ---------------------------------------------------------------------------
 
 export async function readBalance(page: Page): Promise<number> {
-  const el = page.getByText(/^\d+\.\d{2} kr$/, { exact: true }).first()
+  const el = page.getByText(/^\d+\.\d{2} €$/, { exact: true }).first()
   await el.waitFor({ state: "visible", timeout: 15_000 })
   const text = await el.textContent()
   return parseFloat(text!.replace(/[^\d.]/g, ""))

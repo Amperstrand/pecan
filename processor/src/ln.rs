@@ -27,49 +27,54 @@ use cdk_common::Amount;
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
-const DEFAULT_RATE_URL: &str = "https://api.yadio.io/rate/BTC/NOK";
+pub(crate) fn default_rate_url(unit: &str) -> String {
+    format!("https://api.yadio.io/rate/BTC/{unit}")
+}
 const RATE_TTL_SECS: u64 = 300;
 const POLL_INTERVAL_SECS: u64 = 3;
 /// Invoice lifetime on the node; the mint's quote TTL stays the wallet-facing
 /// deadline, so keep the invoice alive at least that long.
 pub const INVOICE_EXPIRY_SECS: u64 = 60;
 
-/// NOK øre → invoice sats, rounded up, markup applied first so the mint
+/// NOK cents → invoice sats, rounded up, markup applied first so the mint
 /// always receives at least the quoted NOK value at the quoted rate.
-pub fn nok_ore_to_sat(ore: u64, nok_per_btc: f64, markup_percent: f64) -> u64 {
-    let nok = ore as f64 / 100.0;
-    let with_markup = nok * (1.0 + markup_percent / 100.0);
-    let sat = with_markup / nok_per_btc * 1e8;
+pub fn subunit_to_sat(subunit: u64, fiat_per_btc: f64, markup_percent: f64) -> u64 {
+    let fiat = subunit as f64 / 100.0;
+    let with_markup = fiat * (1.0 + markup_percent / 100.0);
+    let sat = with_markup / fiat_per_btc * 1e8;
     // Subtract a rounding epsilon before ceil so exact integer results in
     // decimal terms (e.g. 11000) are not pushed up by f64 noise (11000.000…2).
     (sat - 1e-6).ceil() as u64
 }
 
 pub(crate) struct Fx {
+    /// Currency code (e.g. "eur", "nok") — drives the rate source.
+    unit: String,
     url: String,
     http: reqwest::Client,
     markup_percent: f64,
-    nok_per_btc: std::sync::RwLock<Option<(f64, u64)>>,
+    fiat_per_btc: std::sync::RwLock<Option<(f64, u64)>>,
 }
 
 impl Fx {
-    pub(crate) fn new(url: String, markup_percent: f64) -> Self {
+    pub(crate) fn new(unit: String, url: Option<String>, markup_percent: f64) -> Self {
         Self {
-            url,
+            url: url.unwrap_or_else(|| default_rate_url(&unit)),
             markup_percent,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("reqwest client"),
-            nok_per_btc: std::sync::RwLock::new(None),
+            unit,
+            fiat_per_btc: std::sync::RwLock::new(None),
         }
     }
 
-    /// Quote-time sat expectation for a NOK øre amount (used by rails that
+    /// Quote-time sat expectation for a NOK cents amount (used by rails that
     /// display/verify an expected payment, like onchain addresses).
-    pub(crate) async fn quote_sat(&self, ore: u64) -> Result<u64, Error> {
+    pub(crate) async fn quote_sat(&self, subunit: u64) -> Result<u64, Error> {
         let rate = self.get().await?;
-        Ok(nok_ore_to_sat(ore, rate, self.markup_percent))
+        Ok(subunit_to_sat(subunit, rate, self.markup_percent))
     }
 
     async fn fetch(&self) -> Option<f64> {
@@ -87,42 +92,42 @@ impl Fx {
         if let Ok(resp) = primary {
             if let Ok(rate) = resp.json::<RateResp>().await {
                 if let Some(normalized) = Self::normalize(rate.rate) {
-                    *self.nok_per_btc.write().expect("rate lock") =
+                    *self.fiat_per_btc.write().expect("rate lock") =
                         Some((normalized, unix_now()));
                     return Some(normalized);
                 }
             }
         }
-        // Fallback: CoinGecko simple price (BTC in NOK)
-        #[derive(Deserialize)]
-        struct CoinGeckoInner {
-            nok: f64,
-        }
+        // Fallback: CoinGecko simple price (BTC in the configured currency)
         #[derive(Deserialize)]
         struct CoinGeckoResp {
-            bitcoin: CoinGeckoInner,
+            bitcoin: std::collections::HashMap<String, f64>,
         }
-        if let Ok(resp) = self
-            .http
-            .get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=nok")
-            .send()
-            .await
-        {
+        let cg_url = format!(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies={}",
+            self.unit
+        );
+        if let Ok(resp) = self.http.get(&cg_url).send().await {
             if let Ok(data) = resp.json::<CoinGeckoResp>().await {
-                if let Some(normalized) = Self::normalize(data.bitcoin.nok) {
-                    tracing::info!("rate from CoinGecko fallback: {normalized:.0} NOK/BTC");
-                    *self.nok_per_btc.write().expect("rate lock") =
-                        Some((normalized, unix_now()));
-                    return Some(normalized);
+                if let Some(rate) = data.bitcoin.get(&self.unit) {
+                    if let Some(normalized) = Self::normalize(*rate) {
+                        tracing::info!(
+                            "rate from CoinGecko fallback: {normalized:.0} {}/BTC",
+                            self.unit.to_uppercase()
+                        );
+                        *self.fiat_per_btc.write().expect("rate lock") =
+                            Some((normalized, unix_now()));
+                        return Some(normalized);
+                    }
                 }
             }
         }
         None
     }
 
-    /// yadio's /rate/BTC/NOK answers in BTC per NOK (≈1.4e-6); CoinGecko
-    /// answers NOK per BTC (≈730k). Normalize by magnitude — no fiat
-    /// answers "NOK per BTC" below 1.
+    /// yadio's /rate/BTC/{unit} answers in BTC per unit (≈1.4e-6 for NOK);
+    /// CoinGecko answers units per BTC (≈730k). Normalize by magnitude —
+    /// no fiat answers "units per BTC" below 1.
     fn normalize(rate: f64) -> Option<f64> {
         if rate.is_finite() && rate > 0.0 {
             Some(if rate < 1.0 { 1.0 / rate } else { rate })
@@ -135,7 +140,7 @@ impl Fx {
     /// rate when the source is down (a stale rate is preferable to a rail
     /// that cannot quote at all — the markup absorbs small drift).
     async fn get(&self) -> Result<f64, Error> {
-        let cached = *self.nok_per_btc.read().expect("rate lock");
+        let cached = *self.fiat_per_btc.read().expect("rate lock");
         if let Some((rate, at)) = cached {
             if unix_now().saturating_sub(at) < RATE_TTL_SECS {
                 return Ok(rate);
@@ -149,7 +154,7 @@ impl Fx {
             return Ok(rate);
         }
         Err(Error::Custom(
-            "no NOK/BTC rate available yet; retry shortly".into(),
+            "no fiat/BTC rate available yet; retry shortly".into(),
         ))
     }
 }
@@ -277,7 +282,7 @@ enum InvoiceState {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct InvoiceRecord {
-    amount_ore: u64,
+    amount_subunit: u64,
     unit: CurrencyUnit,
     state: InvoiceState,
 }
@@ -316,15 +321,16 @@ impl LnRail {
     /// (an in-memory-only rail orphans every open invoice on redeploy).
     pub async fn start_with_client(
         cln: Arc<ClnClient>,
+        unit: String,
         markup_percent: f64,
-        rate_url: String,
+        rate_url: Option<String>,
         store: Option<std::path::PathBuf>,
         events: broadcast::Sender<Event>,
     ) -> Arc<Self> {
         let invoices = Arc::new(tokio::sync::RwLock::new(load_store(&store).await));
         let rail = Arc::new(Self {
             cln,
-            fx: Arc::new(Fx::new(rate_url, markup_percent)),
+            fx: Arc::new(Fx::new(unit.clone(), rate_url, markup_percent)),
             invoices,
             store,
             events,
@@ -373,7 +379,7 @@ impl LnRail {
                         match guard.get_mut(&quote_id) {
                             Some(rec) if rec.state == InvoiceState::Open => {
                                 rec.state = new_state.clone();
-                                let out = (rec.amount_ore, rec.unit.clone());
+                                let out = (rec.amount_subunit, rec.unit.clone());
                                 persist(&store, &guard).await;
                                 out
                             }
@@ -382,7 +388,7 @@ impl LnRail {
                     };
                     if new_state == InvoiceState::Paid {
                         tracing::info!(
-                            "ln invoice settled: {quote_id} ({} øre)",
+                            "ln invoice settled: {quote_id} ({} cents)",
                             settled.0
                         );
                         let _ = events.send(Event::PaymentReceived(WaitPaymentResponse {
@@ -401,11 +407,11 @@ impl LnRail {
     pub async fn create_invoice(
         &self,
         quote_id: &str,
-        amount_ore: u64,
+        amount_subunit: u64,
         unit: &CurrencyUnit,
         description: Option<String>,
     ) -> Result<(String, Option<u64>), Error> {
-        let sat = self.fx.quote_sat(amount_ore).await?;
+        let sat = self.fx.quote_sat(amount_subunit).await?;
         let invoice: InvoiceResult = self
             .cln
             .call(
@@ -423,21 +429,21 @@ impl LnRail {
         invoices.insert(
             quote_id.to_string(),
             InvoiceRecord {
-                amount_ore,
+                amount_subunit,
                 unit: unit.clone(),
                 state: InvoiceState::Open,
             },
         );
         persist(&self.store, &invoices).await;
-        tracing::info!("ln invoice {quote_id} for {amount_ore} øre ({sat} sat)");
+        tracing::info!("ln invoice {quote_id} for {amount_subunit} cents ({sat} sat)");
         Ok((invoice.bolt11, invoice.expires_at))
     }
 
-    /// Paid amount (øre) for a settled invoice, if this rail knows it.
+    /// Paid amount (cents) for a settled invoice, if this rail knows it.
     pub async fn paid_amount(&self, quote_id: &str) -> Option<(u64, CurrencyUnit)> {
         let invoices = self.invoices.read().await;
         let rec = invoices.get(quote_id)?;
-        (rec.state == InvoiceState::Paid).then_some((rec.amount_ore, rec.unit.clone()))
+        (rec.state == InvoiceState::Paid).then_some((rec.amount_subunit, rec.unit.clone()))
     }
 }
 
@@ -483,16 +489,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn converts_nok_to_sat_with_markup_rounding_up() {
-        // 100 NOK at 1,000,000 NOK/BTC, no markup → 10,000 sat exactly.
+    fn converts_subunit_to_sat_with_markup_rounding_up() {
+        // 100 units at 1,000,000 units/BTC, no markup → 10,000 sat exactly.
         assert_eq!(nok_ore_to_sat(10_000, 1_000_000.0, 0.0), 10_000);
         // 10% markup on the same quote → 11,000 sat (f64 noise must not
         // round an exact result up).
         assert_eq!(nok_ore_to_sat(10_000, 1_000_000.0, 10.0), 11_000);
-        // Fractional results round UP in the mint's favor: 1 øre at 3 NOK
+        // Fractional results round UP in the mint's favor: 1 subunit at 3 units
         // per BTC → 0.01/3 * 1e8 = 333333.3̅ sat.
         assert_eq!(nok_ore_to_sat(1, 3.0, 0.0), 333_334);
-        // 5 NOK (500 øre) at a realistic 1.2M NOK/BTC with 10% markup:
+        // 5 NOK (500 cents) at a realistic 1.2M NOK/BTC with 10% markup:
         // 5.5 / 1_200_000 * 1e8 = 458.33 sat.
         assert_eq!(nok_ore_to_sat(500, 1_200_000.0, 10.0), 459);
     }

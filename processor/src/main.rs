@@ -307,8 +307,9 @@ async fn main() -> Result<()> {
     let ln_rail = if ln_env_on {
         let rail = ln::LnRail::start_with_client(
             cln_client.clone().expect("ln enabled implies client"),
+            app_config.unit.clone(),
             markup,
-            rate_url.clone(),
+            Some(rate_url.clone()),
             Some(work_dir.join("ln-rail-store.json")),
             branch.event_sender(),
         )
@@ -330,7 +331,7 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| "https://mempool.space/signet/api".into());
         let rail = onchain::OnchainRail::start(
             cln_client.expect("onchain enabled implies client"),
-            Arc::new(ln::Fx::new(rate_url, markup)),
+            Arc::new(ln::Fx::new(app_config.unit.clone(), Some(rate_url), markup)),
             confirmations,
             esplora,
             Some(work_dir.join("onchain-rail-store.json")),
