@@ -1,0 +1,22 @@
+name: E2E (post-deploy)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npx playwright test
+        working-directory: web
+        env:
+          PECAN_ADMIN_PASSWORD: ${{ secrets.PECAN_ADMIN_PASSWORD }}
+        timeout-minutes: 15

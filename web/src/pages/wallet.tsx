@@ -23,6 +23,8 @@ import {
   createWithdraw,
   getBalanceOre,
   getHistory,
+  getPendingDeposit,
+  getPendingWithdraw,
   pollAndMint,
   pollWithdraw,
   resumePendingOperations,
@@ -254,15 +256,64 @@ export function WalletPage() {
   }, [])
 
   useEffect(() => {
+    let withdrawPollRef: ReturnType<typeof setInterval> | null = null
+
     getCoco()
-      .then(() => {
+      .then(async () => {
         refresh()
+
+        // Restore any in-flight deposit/withdraw cards so a page reload
+        // doesn't lose visual context (the operations complete either way,
+        // but the user shouldn't see a blank form).
+        const pendingDeposit = await getPendingDeposit()
+        if (pendingDeposit) {
+          setDepositState({ phase: "pending", quote: pendingDeposit })
+          pollRef.current = setInterval(async () => {
+            const done = await pollAndMint(pendingDeposit.quoteId)
+            if (done) {
+              if (pollRef.current) clearInterval(pollRef.current)
+              pollRef.current = null
+              setDepositState({
+                phase: "done",
+                receipt: {
+                  method: pendingDeposit.method,
+                  amountOre: pendingDeposit.amountOre,
+                  sat: pendingDeposit.expectedSat,
+                  address: pendingDeposit.method === "btc" ? pendingDeposit.request : undefined,
+                },
+              })
+              refresh()
+            }
+          }, 3000)
+        }
+
+        const pendingWithdraw = await getPendingWithdraw()
+        if (pendingWithdraw) {
+          setWithdrawState({
+            phase: "pending",
+            quoteId: pendingWithdraw.quoteId,
+            tail: pendingWithdraw.tail,
+          })
+          withdrawPollRef = setInterval(async () => {
+            const preimage = await pollWithdraw(pendingWithdraw.quoteId)
+            if (preimage) {
+              if (withdrawPollRef) clearInterval(withdrawPollRef)
+              withdrawPollRef = null
+              setWithdrawState({ phase: "done", preimage })
+              refresh()
+              setTimeout(() => setWithdrawState({ phase: "idle" }), 5000)
+            }
+          }, 3000)
+        }
+
         return resumePendingOperations(() => void refresh())
       })
       .catch(() => {})
       .finally(() => refresh())
+
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
+      if (withdrawPollRef) clearInterval(withdrawPollRef)
     }
   }, [refresh])
 

@@ -10,7 +10,7 @@ function historyFixture(fields: {
 }): HistoryEntry {
   return {
     ...fields,
-    createdAt: 1_700_000_000_000,
+    createdAt: Date.now() - 1000,
     amount: Amount.from(fields.amount),
   } as unknown as HistoryEntry
 }

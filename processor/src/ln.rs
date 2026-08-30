@@ -77,24 +77,55 @@ impl Fx {
         struct RateResp {
             rate: f64,
         }
-        let resp: RateResp = self
+        // Primary source
+        let primary = self
             .http
             .get(&self.url)
             .send()
             .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
+            .and_then(|r| r.error_for_status());
+        if let Ok(resp) = primary {
+            if let Ok(rate) = resp.json::<RateResp>().await {
+                if let Some(normalized) = Self::normalize(rate.rate) {
+                    *self.nok_per_btc.write().expect("rate lock") =
+                        Some((normalized, unix_now()));
+                    return Some(normalized);
+                }
+            }
+        }
+        // Fallback: CoinGecko simple price (BTC in NOK)
+        #[derive(Deserialize)]
+        struct CoinGeckoInner {
+            nok: f64,
+        }
+        #[derive(Deserialize)]
+        struct CoinGeckoResp {
+            bitcoin: CoinGeckoInner,
+        }
+        if let Ok(resp) = self
+            .http
+            .get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=nok")
+            .send()
             .await
-            .ok()?;
-        // yadio's /rate/BTC/NOK answers in BTC per NOK (≈1.4e-6); other
-        // sources may answer NOK per BTC (≈730k). Normalize by magnitude —
-        // no fiat answers "NOK per BTC" below 1.
-        if resp.rate.is_finite() && resp.rate > 0.0 {
-            let nok_per_btc = if resp.rate < 1.0 { 1.0 / resp.rate } else { resp.rate };
-            *self.nok_per_btc.write().expect("rate lock") = Some((nok_per_btc, unix_now()));
-            Some(nok_per_btc)
+        {
+            if let Ok(data) = resp.json::<CoinGeckoResp>().await {
+                if let Some(normalized) = Self::normalize(data.bitcoin.nok) {
+                    tracing::info!("rate from CoinGecko fallback: {normalized:.0} NOK/BTC");
+                    *self.nok_per_btc.write().expect("rate lock") =
+                        Some((normalized, unix_now()));
+                    return Some(normalized);
+                }
+            }
+        }
+        None
+    }
+
+    /// yadio's /rate/BTC/NOK answers in BTC per NOK (≈1.4e-6); CoinGecko
+    /// answers NOK per BTC (≈730k). Normalize by magnitude — no fiat
+    /// answers "NOK per BTC" below 1.
+    fn normalize(rate: f64) -> Option<f64> {
+        if rate.is_finite() && rate > 0.0 {
+            Some(if rate < 1.0 { 1.0 / rate } else { rate })
         } else {
             None
         }

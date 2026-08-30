@@ -289,3 +289,53 @@ export async function resumePendingOperations(
   })()
   return true
 }
+
+/**
+ * Returns the wallet's in-flight deposit (if any) so the UI can restore
+ * the pending card after a page reload — the user shouldn't lose visual
+ * context just because they refreshed.
+ */
+export async function getPendingDeposit(): Promise<DepositQuote | null> {
+  const coco = await getCoco()
+  const ops = await coco.ops.mint.listInFlight()
+  const op = ops.find((o) => o.state === "pending" || o.state === "executing")
+  if (!op) return null
+
+  const quote = await coco.quotes.mint.get({
+    mintUrl: MINT_URL(),
+    quoteId: op.quoteId,
+  })
+  if (!quote) return null
+
+  const expectedSat = (
+    quote as { quoteData?: { expected_sat?: number } }
+  ).quoteData?.expected_sat
+
+  return {
+    method: op.method as DepositMethod,
+    quoteId: op.quoteId,
+    tail: op.quoteId.slice(-6).toUpperCase(),
+    request: quote.request,
+    amountOre: Number(
+      (quote as { amount?: { toBigInt(): bigint } }).amount?.toBigInt?.() ?? 0,
+    ),
+    ...(expectedSat !== undefined ? { expectedSat } : {}),
+  }
+}
+
+/**
+ * Returns the wallet's in-flight withdrawal (if any) for the same reason.
+ */
+export async function getPendingWithdraw(): Promise<{
+  quoteId: string
+  tail: string
+} | null> {
+  const coco = await getCoco()
+  const ops = await coco.ops.melt.listInFlight()
+  const op = ops.find((o) => o.state === "executing" || o.state === "pending")
+  if (!op) return null
+  return {
+    quoteId: op.quoteId,
+    tail: op.quoteId.slice(-6).toUpperCase(),
+  }
+}
