@@ -1,7 +1,6 @@
 import { Amount, MintOperationError, type Proof, type SerializedBlindedSignature } from "@cashu/cashu-ts"
 import {
   BaseQuoteMeltHandler,
-  deserializeOutputData,
   type BoltMeltQuote,
   type BoltMeltQuoteState,
   type QuoteMeltResponse,
@@ -20,11 +19,6 @@ import type { BranchMeltQuoteResponse } from "./branch-methods"
 function proofsToSerializedChange(proofs: Proof[]): SerializedBlindedSignature[] | undefined {
   if (proofs.length === 0) return undefined
   return proofs.map((p) => ({ id: p.id, amount: p.amount, C_: p.C }))
-}
-
-function inputsAlreadySpent(err: unknown): boolean {
-  if (!(err instanceof MintOperationError)) return false
-  return err.code === 20006 || /spent/i.test(String(err.message ?? ""))
 }
 
 export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
@@ -57,88 +51,19 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
     changeOutputs: Parameters<BaseQuoteMeltHandler<"branch">["executeMelt"]>[2],
     quoteId: string,
   ): Promise<QuoteMeltResponse<"branch">> {
-    // Swap-then-melt sends exact-amount proofs (this rail's fee_reserve is 0),
-    // so an eager melt cannot lose anything meaningful to a lost response.
-    if (ctx.operation.needsSwap) {
-      return this.meltProofsFor(ctx.wallet, ctx.operation, proofsToMelt, changeOutputs, quoteId)
-    }
-    // Direct melts can overshoot (proof granularity) and the overpay is
-    // returned as one-time change signatures in the melt response. Melting an
-    // UNPAID teller quote burns the inputs immediately, stranding that change
-    // in a response a page reload can kill. Defer the melt until the teller
-    // settles; checkMeltQuote performs it once the quote is PAID.
-    const state = await this.remoteQuoteState(ctx, quoteId)
-    if (state !== "PAID") {
-      return { state: "PENDING" }
-    }
-    return this.meltProofsFor(ctx.wallet, ctx.operation, proofsToMelt, changeOutputs, quoteId)
-  }
-
-  protected async checkMeltQuote(
-    ctx: FinalizeContext<"branch"> | RecoverExecutingContext<"branch">,
-  ): Promise<QuoteMeltResponse<"branch">> {
-    const q = await ctx.mintAdapter.checkMeltQuoteFor(
-      ctx.operation.mintUrl,
-      "branch",
-      ctx.operation.quoteId,
-    )
-    if (q.state !== "PAID" || ctx.operation.needsSwap) {
-      return { state: q.state, payment_preimage: q.payment_preimage }
-    }
-    // The deferred direct melt happens here, with the change response
-    // processed live by finalize. If an earlier attempt's response was lost,
-    // the mint refuses the already-spent inputs — settle without change.
-    const inputs = await ctx.proofRepository.getProofsByOperationId(
-      ctx.operation.mintUrl,
-      ctx.operation.id,
-    )
-    const changeOutputs = deserializeOutputData(ctx.operation.changeOutputData).keep
-    const { wallet } = await ctx.walletService.getWalletWithActiveKeysetId(
-      ctx.operation.mintUrl,
-      ctx.operation.unit,
-    )
+    // Eager by design: the teller may only dispense cash once the wallet has
+    // locked (burned) its proofs — the mint's make_payment marks the ticket
+    // submitted, which mark-paid requires ("waiting for the wallet to lock
+    // funds"). The mint persists the melt's change signatures with the quote,
+    // so a response lost to a reload is recoverable via checkMeltQuote.
     try {
-      return await this.meltProofsFor(
-        wallet,
-        ctx.operation,
-        inputs,
-        changeOutputs,
-        ctx.operation.quoteId,
-      )
-    } catch (err) {
-      if (inputsAlreadySpent(err)) {
-        return { state: "PAID", payment_preimage: q.payment_preimage }
-      }
-      throw err
-    }
-  }
-
-  protected async checkMeltQuoteState(
-    ctx: PendingContext<"branch"> | RecoverExecutingContext<"branch">,
-  ): Promise<BoltMeltQuoteState> {
-    const q = await ctx.mintAdapter.checkMeltQuoteFor(
-      ctx.operation.mintUrl,
-      "branch",
-      ctx.operation.quoteId,
-    )
-    return q.state
-  }
-
-  private async meltProofsFor(
-    wallet: ExecuteContext<"branch">["wallet"],
-    operation: Pick<ExecuteContext<"branch">["operation"], "amount" | "unit">,
-    proofsToMelt: Proof[],
-    changeOutputs: Parameters<BaseQuoteMeltHandler<"branch">["executeMelt"]>[2],
-    quoteId: string,
-  ): Promise<QuoteMeltResponse<"branch">> {
-    try {
-      const res = await wallet.meltProofs(
+      const res = await ctx.wallet.meltProofs(
         "branch",
         {
           quote: quoteId,
-          amount: operation.amount,
+          amount: ctx.operation.amount,
           request: "",
-          unit: operation.unit,
+          unit: ctx.operation.unit,
         } as BranchMeltQuoteResponse,
         proofsToMelt,
         undefined,
@@ -157,11 +82,32 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
     }
   }
 
-  private async remoteQuoteState(
-    ctx: ExecuteContext<"branch">,
-    quoteId: string,
+  protected async checkMeltQuote(
+    ctx: FinalizeContext<"branch"> | RecoverExecutingContext<"branch">,
+  ): Promise<QuoteMeltResponse<"branch">> {
+    // The mint stores a melt's change signatures with the quote and re-serves
+    // them on state checks — this is the only way to recover the overpay when
+    // the original melt response was lost (e.g. page reload during execute).
+    const q = await ctx.mintAdapter.checkMeltQuoteFor(
+      ctx.operation.mintUrl,
+      "branch",
+      ctx.operation.quoteId,
+    )
+    return {
+      state: q.state,
+      change: q.change as SerializedBlindedSignature[] | undefined,
+      payment_preimage: q.payment_preimage,
+    }
+  }
+
+  protected async checkMeltQuoteState(
+    ctx: PendingContext<"branch"> | RecoverExecutingContext<"branch">,
   ): Promise<BoltMeltQuoteState> {
-    const q = await ctx.mintAdapter.checkMeltQuoteFor(ctx.operation.mintUrl, "branch", quoteId)
+    const q = await ctx.mintAdapter.checkMeltQuoteFor(
+      ctx.operation.mintUrl,
+      "branch",
+      ctx.operation.quoteId,
+    )
     return q.state
   }
 
