@@ -68,13 +68,19 @@ export function payLightningInvoice(invoice: string): string {
   return payLightningInvoiceFrom("cln-hub-signet", invoice)
 }
 
-/** Sends on-chain sats from the nostr node — a genuinely external wallet. */
+/**
+ * Sends on-chain sats from the vls node — a genuinely external wallet.
+ * (The nostr node was the original payer but its confirmed utxos ended up
+ * reserved until block 320158 after a stalled withdraw; vls is the backup
+ * lab wallet. The 300s timeout matters: killing the RPC mid-flight leaves
+ * CLN input reservations behind that only clear after reserved_to_block.)
+ */
 export function sendOnchainFromExternal(address: string, sat: number): string {
   let out: string
   try {
     out = execSync(
-      `ssh root@46.224.104.12 "docker exec cln-nostr-signet lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
-      { timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
+      `ssh root@46.224.104.12 "docker exec cln-vls-signet lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
+      { timeout: 300_000, stdio: ["ignore", "pipe", "pipe"] },
     ).toString()
   } catch (err) {
     const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""

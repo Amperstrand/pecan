@@ -90,7 +90,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     expectNoWalletErrors(walletErrors)
   })
 
-  test("onchain deposit: external wallet → mempool → 1-conf → receipt", async () => {
+  test("onchain deposit: external wallet → mempool → settled → receipt", async () => {
     // Signet blocks can take 5-30+ minutes; adapt timeout to current cadence
     const blocks = await sharedPage!.request.get(
       "https://mempool.space/signet/api/blocks",
@@ -124,9 +124,17 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     const txid = sendOnchainFromExternal(address, expectedSat)
     expect(txid).toHaveLength(64)
 
-    await expect(
-      page.getByText("Payment detected in mempool"),
-    ).toBeVisible({ timeout: 30_000 })
+    // At 0 required confirmations the rail settles on mempool visibility and
+    // the deposit card can go straight to claimed — the "detected in mempool"
+    // toast only reliably exists while confirmations are actually required.
+    const rail = await sharedPage!
+      .request.get(`/api/onchain-status/${address}`)
+      .then((r) => r.json())
+    if (rail.required_confirmations >= 1) {
+      await expect(
+        page.getByText("Payment detected in mempool"),
+      ).toBeVisible({ timeout: 30_000 })
+    }
 
     await waitForBalance(page, before + 50, timeout)
     expectNoWalletErrors(walletErrors)

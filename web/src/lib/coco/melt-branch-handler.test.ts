@@ -3,7 +3,9 @@ import { Amount, MintOperationError } from "@cashu/cashu-ts"
 import type {
   CreateMeltQuoteContext,
   ExecuteContext,
+  FinalizeContext,
 } from "@cashu/coco-core/operations/melt"
+import { serializeOutputData } from "@cashu/coco-core"
 import { MeltBranchHandler } from "./melt-branch-handler"
 import type { BranchMeltQuoteResponse } from "./branch-methods"
 
@@ -19,6 +21,10 @@ class TestableMeltHandler extends MeltBranchHandler {
     quoteId: string,
   ) {
     return this.executeMelt(ctx, proofs, changeOutputs, quoteId)
+  }
+
+  async callCheckMeltQuote(ctx: FinalizeContext<"branch">) {
+    return this.checkMeltQuote(ctx)
   }
 
   callGetFeeReserveForQuote(quote: BranchMeltQuoteResponse) {
@@ -89,6 +95,7 @@ describe("MeltBranchHandler.executeMelt", () => {
         mintUrl: "https://mint.example",
         amount: Amount.from(500),
         unit: "nok",
+        needsSwap: true,
       },
     } as unknown as ExecuteContext<"branch">
 
@@ -108,11 +115,135 @@ describe("MeltBranchHandler.executeMelt", () => {
         mintUrl: "https://mint.example",
         amount: Amount.from(500),
         unit: "nok",
+        needsSwap: true,
       },
     } as unknown as ExecuteContext<"branch">
 
     await expect(
       new TestableMeltHandler().callExecuteMelt(ctx, [], [], "q1"),
+    ).rejects.toMatchObject({ code: 20003 })
+  })
+
+  it("defers direct melts while the teller quote is unpaid (nothing is burned)", async () => {
+    const meltProofs = vi.fn()
+    const ctx = {
+      wallet: { meltProofs },
+      mintAdapter: {
+        checkMeltQuoteFor: vi.fn(async () => ({ state: "UNPAID" })),
+      },
+      operation: {
+        id: "op1",
+        mintUrl: "https://mint.example",
+        amount: Amount.from(500),
+        unit: "nok",
+        needsSwap: false,
+      },
+    } as unknown as ExecuteContext<"branch">
+
+    const result = await new TestableMeltHandler().callExecuteMelt(ctx, [], [], "q1")
+    expect(result).toEqual({ state: "PENDING" })
+    expect(meltProofs).not.toHaveBeenCalled()
+  })
+
+  it("melts directly when the quote is already paid", async () => {
+    const meltProofs = vi.fn(async () => ({
+      quote: { state: "PAID", payment_preimage: "pre" },
+      change: [],
+    }))
+    const ctx = {
+      wallet: { meltProofs },
+      mintAdapter: {
+        checkMeltQuoteFor: vi.fn(async () => ({ state: "PAID" })),
+      },
+      operation: {
+        id: "op1",
+        mintUrl: "https://mint.example",
+        amount: Amount.from(500),
+        unit: "nok",
+        needsSwap: false,
+      },
+    } as unknown as ExecuteContext<"branch">
+
+    const result = await new TestableMeltHandler().callExecuteMelt(ctx, [], [], "q1")
+    expect(result.state).toBe("PAID")
+    expect(meltProofs).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("MeltBranchHandler.checkMeltQuote (deferred melt at settlement)", () => {
+  const changeOutputData = serializeOutputData({ keep: [], send: [] })
+
+  const finalizeCtx = (overrides: {
+    quoteState?: string
+    meltProofs?: ReturnType<typeof vi.fn>
+    getProofs?: ReturnType<typeof vi.fn>
+  }) => {
+    const meltProofs =
+      overrides.meltProofs ??
+      vi.fn(async () => ({ quote: { state: "PAID", payment_preimage: "pre" }, change: [] }))
+    return {
+      walletService: {
+        getWalletWithActiveKeysetId: vi.fn(async () => ({ wallet: { meltProofs } })),
+      },
+      mintAdapter: {
+        checkMeltQuoteFor: vi.fn(async () => ({
+          state: overrides.quoteState ?? "PAID",
+          payment_preimage: "pre",
+        })),
+      },
+      proofRepository: {
+        getProofsByOperationId:
+          overrides.getProofs ?? vi.fn(async () => [{ secret: "s1", amount: Amount.from(512) }]),
+      },
+      operation: {
+        id: "op1",
+        mintUrl: "https://mint.example",
+        quoteId: "q1",
+        amount: Amount.from(500),
+        unit: "nok",
+        needsSwap: false,
+        changeOutputData,
+      },
+    } as unknown as FinalizeContext<"branch">
+  }
+
+  it("performs the deferred melt once the quote is paid", async () => {
+    const meltProofs = vi.fn(async () => ({
+      quote: { state: "PAID", payment_preimage: "pre" },
+      change: [],
+    }))
+    const result = await new TestableMeltHandler().callCheckMeltQuote(
+      finalizeCtx({ meltProofs }),
+    )
+    expect(result.state).toBe("PAID")
+    expect(meltProofs).toHaveBeenCalledTimes(1)
+  })
+
+  it("treats already-spent inputs as settled when an earlier response was lost", async () => {
+    const meltProofs = vi.fn(async () => {
+      throw new MintOperationError(20006, "inputs have already been spent")
+    })
+    const result = await new TestableMeltHandler().callCheckMeltQuote(
+      finalizeCtx({ meltProofs }),
+    )
+    expect(result).toEqual({ state: "PAID", payment_preimage: "pre" })
+  })
+
+  it("passes non-paid quote states through without melting", async () => {
+    const meltProofs = vi.fn()
+    const result = await new TestableMeltHandler().callCheckMeltQuote(
+      finalizeCtx({ quoteState: "PENDING", meltProofs }),
+    )
+    expect(result.state).toBe("PENDING")
+    expect(meltProofs).not.toHaveBeenCalled()
+  })
+
+  it("rethrows unexpected melt failures for the retry loop", async () => {
+    const meltProofs = vi.fn(async () => {
+      throw new MintOperationError(20003, "insufficient funds")
+    })
+    await expect(
+      new TestableMeltHandler().callCheckMeltQuote(finalizeCtx({ meltProofs })),
     ).rejects.toMatchObject({ code: 20003 })
   })
 })
