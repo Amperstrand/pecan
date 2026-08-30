@@ -242,23 +242,36 @@ const RESUME_TIMEOUT_MS = 180_000
 /**
  * After a page reload mid-operation, nothing polls the pending quotes: the
  * UI card state is gone and the settlement watcher's interests have no
- * active poll source. Drive every persisted pending mint/melt operation to
- * a terminal state by refreshing on an interval; fire `onSettled` once any
- * operation settles so the UI can reload balance and history.
+ * active poll source. Prepared melt operations are stranded too — coco
+ * leaves them for manual rollback, but the withdraw was already accepted
+ * (the teller ticket waits on it), so execute them once and let the
+ * settlement watcher drive the resulting operation. Terminal operations are
+ * refreshed to completion; `onSettled` fires once anything settles so the
+ * UI can reload balance and history.
  */
 export async function resumePendingOperations(
   onSettled?: () => void,
 ): Promise<boolean> {
   const coco = await getCoco()
-  const [melts, mints] = await Promise.all([
+  const [melts, mints, preparedMelts] = await Promise.all([
     coco.ops.melt.listInFlight(),
     coco.ops.mint.listInFlight(),
+    coco.ops.melt.listPrepared(),
   ])
-  const pending = [
+  const pending: Array<{ id: string; kind: "melt" | "mint" | "prepared-melt" }> = [
     ...melts.map((op) => ({ id: op.id, kind: "melt" as const })),
     ...mints.map((op) => ({ id: op.id, kind: "mint" as const })),
   ]
-  if (pending.length === 0) return false
+  if (pending.length === 0 && preparedMelts.length === 0) return false
+
+  for (const op of preparedMelts) {
+    try {
+      await coco.ops.melt.execute(op.id)
+    } catch {
+      // Another driver may hold the operation lock, or the op moved on
+      // already — the watcher owns it from here either way.
+    }
+  }
 
   void (async () => {
     const deadline = Date.now() + RESUME_TIMEOUT_MS
