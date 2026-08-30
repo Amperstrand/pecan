@@ -172,33 +172,38 @@ shape the design; each was learned the hard way:
    locked (burned) its proofs at the mint (make_payment flips the ticket to
    `pending`). Deferring the melt until the teller settles deadlocks the
    counter flow.
-2. **The mint burns inputs at the melt POST** — even while the quote is
-   UNPAID — and returns the overpay as change (blinded signatures) in that
-   response.
-3. **Change signatures are one-time knowledge.** Quote state checks cannot
-   re-fetch them: cdk-mintd 0.18.0-rc.0's custom-method check omits
-   `change` (master's `check_melt_quote` re-serves it from the
-   `blind_signature` table — verify before relying on that). A melt
-   response lost to a page reload loses the overpay forever.
+2. **The melt must be ASYNC (NUT-05 `prefer_async`).** A synchronous melt
+   POST blocks until a human settles — minutes — leaving the operation in
+   `executing` limbo the whole time (coco's saga model assumes the bolt11
+   shape: setup returns promptly, settlement is observed by polling). cdk's
+   make_payment comment says it plainly: "the mint keeps the melt pending
+   (and polls check_outgoing_payment) until the operator confirms". With
+   `prefer_async: true` the mint returns immediately after setup — inputs
+   burned, quote PENDING — which is both the teller's fund-lock and the
+   signal to release the code (execute resolves in ~100ms).
+3. **Change signatures are one-time knowledge.** The mint burns inputs at
+   melt setup and defers change on async melts; quote state checks cannot
+   re-fetch them: cdk-mintd 0.18.0-rc.0's custom-method check response type
+   has no `change` field at all (verified in custom_handlers.rs; master
+   re-serves it from the `blind_signature` table — re-check when upgrading).
+   Hence `MeltBranchHandler.needsSwapFor` swaps to EXACT amounts on any
+   overshoot: exact melts carry no change, so there is nothing to lose when
+   a response dies. A lost SWAP response is recoverable because swap outputs
+   are deterministic and re-fetchable from the mint (restore path in coco's
+   executing-recovery).
 4. **Reloads land anywhere in prepare → swap → melt.** Prepared melt ops
    are NOT auto-driven by coco (upstream leaves them for manual rollback),
    so the wallet's `resumePendingOperations` executes them once after a
    reload; pending/executing ops are driven by the settlement watcher.
 
-**Design consequence**: `MeltBranchHandler.needsSwapFor` (coco ≥1.0.10
-hook) returns swap-on-any-overshoot. Proof granularity (e.g. a single
-512-cent proof for a 500-cent melt) would otherwise mint change; swapping
-to exact amounts first means the melt returns NO change — nothing to lose
-when a response dies. A lost SWAP response is recoverable because swap
-outputs are deterministic and re-fetchable from the mint (restore path in
-coco's executing-recovery).
-
 **Postmortem (2026-08-30)**: every reload-saga e2e run lost €0.12 of a
 €5.12 melt. Mint DB showed 512-in/500-melted with the change never claimed.
-Fixed by the exact-amount swap + prepared-op resume; suite 9/9 twice. The
-e2e helper now polls the ticket out of `waiting` before settling (the
-swap-then-melt needs two mint round trips), and `readBalance` waits out
-the `… €` placeholder.
+Fixed by the exact-amount swap + prepared-op resume + (the real alignment)
+async melts. The e2e helper polls the ticket out of `waiting` before
+settling, `readBalance` waits out the `… €` placeholder, and the suite
+asserts on the wallet's debug ring buffer: no warn entries per test, zero
+change on finalized teller melts (IDB), fund-lock entry with state
+`pending`. Suite 9/9 repeatedly in ~55s.
 
 **Residual window**: a page death during the finalize-time melt of an
 exact amount loses nothing (no change), but a death during the SWAP

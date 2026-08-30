@@ -2,11 +2,15 @@ import { test, expect, type Page } from "@playwright/test"
 import {
   apiLogin,
   expectNoWalletErrors,
+  expectNoWalletWarnsSince,
+  finalizedMeltChange,
+  fundLockReleaseEntry,
   matchAndSettle,
   payLightningInvoice,
   readBalance,
   readTellerCode,
   readWalletDb,
+  readWalletLog,
   sendOnchainFromExternal,
   trackWalletErrors,
   waitForDepositFormReset,
@@ -36,18 +40,34 @@ test.beforeAll(async ({ browser }) => {
   walletErrors = trackWalletErrors(sharedPage)
 })
 
+// Warn-gate cursor: warns are only attributed to the test that produced
+// them (timestamp-based so the ring buffer's 400-entry wrap cannot create
+// a false window).
+let warnCursorT = 0
+
 test.afterEach(async ({}, testInfo) => {
-  if (testInfo.status === testInfo.expectedStatus) return
   if (!sharedPage) return
-  const log = await sharedPage
-    .evaluate(() =>
-      (window as { __pecanWalletLog?: () => unknown[] }).__pecanWalletLog?.() ?? [],
-    )
-    .catch(() => [])
-  await testInfo.attach("wallet-log", {
-    body: JSON.stringify(log, null, 2),
-    contentType: "application/json",
-  })
+  const failed = testInfo.status !== testInfo.expectedStatus
+  let warnError: Error | null = null
+  if (!failed) {
+    try {
+      await expectNoWalletWarnsSince(sharedPage, warnCursorT)
+    } catch (e) {
+      warnError = e as Error
+    }
+  }
+  if (failed || warnError) {
+    const log = await readWalletLog(sharedPage).catch(() => [])
+    await testInfo.attach("wallet-log", {
+      body: JSON.stringify(log, null, 2),
+      contentType: "application/json",
+    })
+    if (warnError) throw warnError
+  }
+  const entries = await readWalletLog(sharedPage).catch(() => [])
+  if (entries.length > 0) {
+    warnCursorT = Math.max(warnCursorT, entries[entries.length - 1].t)
+  }
 })
 
 test.afterAll(async () => {
@@ -195,6 +215,14 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     expectNoWalletErrors(walletErrors)
 
     await waitForOpState(page, "melt", code, "finalized")
+    const lock = await fundLockReleaseEntry(page, code)
+    expect(lock, "fund-lock entry for this withdraw").toBeDefined()
+    expect(lock!.data?.state).toBe("pending")
+    const meltChange = await finalizedMeltChange(page, code)
+    expect(
+      meltChange,
+      "teller melts settle with zero change (exact-amount pre-swap)",
+    ).toBe(0)
     const db = await readWalletDb(page)
     expect(db.spendableSum).toBeLessThan(before * 100)
   })
@@ -229,6 +257,15 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     await waitForOpState(page, "melt", code, "finalized", 90_000)
     await waitForBalance(page, before - DEPOSIT_AMOUNT, 90_000)
     expectNoWalletErrors(walletErrors)
+
+    // The fund-lock log entry fired pre-reload and the ring buffer is page
+    // memory; the code being readable before the reload already proves the
+    // lock completed (the code renders only after createWithdraw resolves).
+    const sagaChange = await finalizedMeltChange(page, code)
+    expect(
+      sagaChange,
+      "reload-saga melt settles with zero change",
+    ).toBe(0)
   })
 
   test("self-custody state persists across reload", async () => {
