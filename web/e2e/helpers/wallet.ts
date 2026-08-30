@@ -178,6 +178,89 @@ export async function waitForDepositFormReset(
 }
 
 // ---------------------------------------------------------------------------
+// Wallet log — invariant assertions over the debug ring buffer
+// ---------------------------------------------------------------------------
+
+export interface WalletLogEntry {
+  t: number
+  level: "debug" | "info" | "warn"
+  msg: string
+  data?: {
+    id?: string
+    quoteId?: string
+    state?: string
+    change?: string
+    fee?: string
+    waitedMs?: number
+    [k: string]: unknown
+  }
+}
+
+export async function readWalletLog(page: Page): Promise<WalletLogEntry[]> {
+  return page.evaluate(
+    () =>
+      (window as { __pecanWalletLog?: () => unknown[] }).__pecanWalletLog?.() ??
+      [],
+  )
+}
+
+/**
+ * Fails when warn-level wallet entries appeared since `sinceT` (epoch ms).
+ * Warns mark silent degradations a green run must not contain: background
+ * melt failures, fund-lock wait timeouts, failed prepared-op resumes.
+ */
+export async function expectNoWalletWarnsSince(
+  page: Page,
+  sinceT: number,
+): Promise<void> {
+  const warns = (await readWalletLog(page)).filter(
+    (e) => e.t > sinceT && e.level === "warn",
+  )
+  if (warns.length > 0) {
+    throw new Error(
+      `wallet warn entries:\n${warns.map((e) => `  - ${new Date(e.t).toISOString()} ${e.msg} ${JSON.stringify(e.data ?? {})}`).join("\n")}`,
+    )
+  }
+}
+
+/**
+ * Change (subunit units) the finalized melt for a teller code settled with,
+ * from the authoritative IDB operation row — pins the exact-amount policy:
+ * teller melts must finalize with zero change. NaN when the op has not
+ * finalized yet.
+ */
+export async function finalizedMeltChange(
+  page: Page,
+  tellerCode: string,
+): Promise<number> {
+  const db = await readWalletDb(page)
+  const op = db.meltOps.find(
+    (o) => o.quoteTail === tellerCode && o.state === "finalized",
+  )
+  if (!op) return Number.NaN
+  return Number(op.change ?? Number.NaN)
+}
+
+/**
+ * The fund-lock entry for a withdraw: proves the teller code was withheld
+ * until the async melt's setup completed (inputs burned, quote PENDING).
+ */
+export async function fundLockReleaseEntry(
+  page: Page,
+  tellerCode: string,
+): Promise<WalletLogEntry | undefined> {
+  const tail = tellerCode.toLowerCase()
+  const entries = await readWalletLog(page)
+  return entries.find(
+    (e) =>
+      e.msg === "withdraw fund-lock result" &&
+      typeof e.data?.quoteId === "string" &&
+      e.data.quoteId.toLowerCase().endsWith(tail),
+  )
+}
+
+
+// ---------------------------------------------------------------------------
 // Console/page error gate — the wallet itself must run clean
 // ---------------------------------------------------------------------------
 
@@ -206,7 +289,13 @@ interface IdbProofState {
   /** Sum of proofs not marked spent — spent proofs stay in the store as history. */
   spendableSum: number
   mintOps: Array<{ state: string; quoteTail: string }>
-  meltOps: Array<{ state: string; quoteTail: string }>
+  meltOps: Array<{
+    state: string
+    quoteTail: string
+    /** Serialized Amount strings, present once the op finalized. */
+    change?: string
+    fee?: string
+  }>
 }
 
 export async function readWalletDb(page: Page): Promise<IdbProofState> {
@@ -252,6 +341,8 @@ export async function readWalletDb(page: Page): Promise<IdbProofState> {
       meltOps: meltOps.map((o) => ({
         state: o.state,
         quoteTail: o.quoteId.slice(-6).toUpperCase(),
+        ...(typeof o.changeAmount === "string" ? { change: o.changeAmount } : {}),
+        ...(typeof o.effectiveFee === "string" ? { fee: o.effectiveFee } : {}),
       })),
     }
   })

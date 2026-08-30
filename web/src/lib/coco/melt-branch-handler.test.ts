@@ -82,11 +82,12 @@ describe("MeltBranchHandler.createRemoteQuote", () => {
 })
 
 describe("MeltBranchHandler.executeMelt", () => {
-  it("maps mint error 20005 (payment pending) to a PENDING quote state", async () => {
-    const ctx = {
+  const executingCtx = (meltFailing?: (preview: unknown) => never) =>
+    ({
       wallet: {
-        meltProofs: vi.fn(async () => {
-          throw new MintOperationError(20005, "transaction pending")
+        completeMelt: vi.fn(async (preview: unknown) => {
+          if (meltFailing) meltFailing(preview)
+          return { quote: { state: "PENDING" }, change: [] }
         }),
       },
       operation: {
@@ -95,27 +96,36 @@ describe("MeltBranchHandler.executeMelt", () => {
         amount: Amount.from(500),
         unit: "nok",
       },
-    } as unknown as ExecuteContext<"branch">
+    }) as unknown as ExecuteContext<"branch">
 
+  it("requests an async melt (NUT-05 prefer_async) carrying the prepared inputs and change outputs", async () => {
+    const ctx = executingCtx()
+    await new TestableMeltHandler().callExecuteMelt(ctx, [], [], "q1")
+    const completeMelt = ctx.wallet.completeMelt as unknown as {
+      mock: { calls: Array<[unknown, unknown, { preferAsync?: boolean }]> }
+    }
+    expect(completeMelt.mock.calls).toHaveLength(1)
+    const [preview, privkey, options] = completeMelt.mock.calls[0]
+    expect(options).toEqual({ preferAsync: true })
+    expect(privkey).toBeUndefined()
+    expect(preview).toMatchObject({
+      method: "branch",
+      quote: { quote: "q1", amount: Amount.from(500) },
+    })
+  })
+
+  it("maps mint error 20005 (payment pending) to a PENDING quote state", async () => {
+    const ctx = executingCtx(() => {
+      throw new MintOperationError(20005, "transaction pending")
+    })
     const result = await new TestableMeltHandler().callExecuteMelt(ctx, [], [], "q1")
     expect(result).toEqual({ state: "PENDING" })
   })
 
   it("rethrows non-pending mint errors", async () => {
-    const ctx = {
-      wallet: {
-        meltProofs: vi.fn(async () => {
-          throw new MintOperationError(20003, "insufficient funds")
-        }),
-      },
-      operation: {
-        id: "op1",
-        mintUrl: "https://mint.example",
-        amount: Amount.from(500),
-        unit: "nok",
-      },
-    } as unknown as ExecuteContext<"branch">
-
+    const ctx = executingCtx(() => {
+      throw new MintOperationError(20003, "insufficient funds")
+    })
     await expect(
       new TestableMeltHandler().callExecuteMelt(ctx, [], [], "q1"),
     ).rejects.toMatchObject({ code: 20003 })

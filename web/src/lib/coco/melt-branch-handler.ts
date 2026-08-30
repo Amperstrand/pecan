@@ -66,25 +66,35 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
     // Eager by design: the teller may only dispense cash once the wallet has
     // locked (burned) its proofs — the mint's make_payment marks the ticket
     // submitted, which mark-paid requires ("waiting for the wallet to lock
-    // funds"). The mint persists the melt's change signatures with the quote,
-    // so a response lost to a reload is recoverable via checkMeltQuote.
+    // funds"). But ASYNC per NUT-05: prefer_async makes the mint return
+    // immediately after setup (inputs burned, PENDING) instead of blocking
+    // the response until a human settles minutes later — the shape coco's
+    // saga model assumes. Change is deferred on async melts and this mint's
+    // custom state checks never re-serve it, so the exact-amount pre-swap
+    // keeps the overpay at zero.
+    const preview = {
+      method: "branch",
+      inputs: proofsToMelt,
+      outputData: changeOutputs,
+      keysetId: proofsToMelt[0]?.id ?? "",
+      quote: {
+        quote: quoteId,
+        amount: ctx.operation.amount,
+      },
+    } as Parameters<typeof ctx.wallet.completeMelt>[0]
     try {
-      const res = await ctx.wallet.meltProofs(
-        "branch",
-        {
-          quote: quoteId,
-          amount: ctx.operation.amount,
-          request: "",
-          unit: ctx.operation.unit,
-        } as BranchMeltQuoteResponse,
-        proofsToMelt,
-        undefined,
-        { type: "custom", data: changeOutputs },
-      )
+      const res = await ctx.wallet.completeMelt(preview, undefined, {
+        preferAsync: true,
+      })
+      // completeMelt's response quote is typed narrowly, but the mint's
+      // full melt response (state, preimage) is merged into it at runtime.
+      const q = res.quote as { state?: string; payment_preimage?: string | null }
+      const state =
+        q.state === "PAID" || q.state === "PENDING" ? q.state : "UNPAID"
       return {
-        state: res.quote.state,
+        state,
         change: proofsToSerializedChange(res.change),
-        payment_preimage: res.quote.payment_preimage,
+        payment_preimage: q.payment_preimage,
       }
     } catch (err) {
       if (err instanceof MintOperationError && err.code === 20005) {

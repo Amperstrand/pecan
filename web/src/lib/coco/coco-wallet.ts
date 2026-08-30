@@ -192,24 +192,31 @@ export async function createWithdraw(amountInput: number, recipient: string): Pr
   })
 
   const prepared = await coco.ops.melt.prepare({ quote })
-  void coco.ops.melt.execute(prepared.id).catch((err: unknown) => {
-    console.warn("melt execute background:", err)
-    walletLog("warn", "melt execute background failed", String(err))
-  })
 
   // The teller can only pay out once this wallet has locked funds at the
-  // mint, so the code must not appear before that. The lock happens INSIDE
-  // the melt POST — which long-polls until the teller settles — so the op
-  // stays 'executing' and cannot signal it. The mint quote can: UNPAID →
-  // PENDING means the ticket flipped to submitted (funds locked). Poll the
-  // quote state directly; touches no coco locks, so the in-flight melt is
-  // undisturbed.
+  // mint, so the code must not appear before that. The melt is async
+  // (NUT-05 prefer_async): execute resolves as soon as the mint's setup
+  // completes — inputs burned, quote PENDING — which IS the lock.
   const lockStarted = Date.now()
-  await waitForMeltQuoteLock(quote.quoteId)
-  walletLog("info", "withdraw code released after fund-lock wait", {
-    quoteId: quote.quoteId,
-    waitedMs: Date.now() - lockStarted,
-  })
+  const settled = await Promise.race([
+    coco.ops.melt
+      .execute(prepared.id)
+      .then((op) => ({ state: op.state, error: null }))
+      .catch((err: unknown) => ({ state: "error", error: String(err) })),
+    new Promise<{ state: "timeout"; error: null }>((resolve) =>
+      setTimeout(() => resolve({ state: "timeout", error: null }), 30_000),
+    ),
+  ])
+  walletLog(
+    settled.state === "error" || settled.state === "timeout" ? "warn" : "info",
+    "withdraw fund-lock result",
+    {
+      quoteId: quote.quoteId,
+      state: settled.state,
+      waitedMs: Date.now() - lockStarted,
+      error: settled.error,
+    },
+  )
 
   return {
     quoteId: quote.quoteId,
@@ -217,33 +224,6 @@ export async function createWithdraw(amountInput: number, recipient: string): Pr
     amount,
     submitted: true,
   }
-}
-
-async function waitForMeltQuoteLock(quoteId: string): Promise<void> {
-  const deadline = Date.now() + 30_000
-  let lastState = "unknown"
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${MINT_URL()}/v1/melt/quote/branch/${quoteId}`)
-      if (res.ok) {
-        const q = (await res.json()) as { state?: string }
-        if (q.state !== lastState) {
-          lastState = q.state ?? "?"
-          walletLog("debug", "melt quote state", { quoteId, state: lastState })
-        }
-        if (q.state === "PENDING" || q.state === "PAID") {
-          return
-        }
-      }
-    } catch {
-      // transient network error — retry until the deadline
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300))
-  }
-  walletLog("warn", "fund-lock wait timed out (code released anyway)", {
-    quoteId,
-    lastState,
-  })
 }
 
 export async function pollWithdraw(quoteId: string): Promise<string | null> {
