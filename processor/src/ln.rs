@@ -32,7 +32,7 @@ const RATE_TTL_SECS: u64 = 300;
 const POLL_INTERVAL_SECS: u64 = 3;
 /// Invoice lifetime on the node; the mint's quote TTL stays the wallet-facing
 /// deadline, so keep the invoice alive at least that long.
-pub const INVOICE_EXPIRY_SECS: u64 = 300;
+pub const INVOICE_EXPIRY_SECS: u64 = 60;
 
 /// NOK øre → invoice sats, rounded up, markup applied first so the mint
 /// always receives at least the quoted NOK value at the quoted rate.
