@@ -1,5 +1,14 @@
 # Pecan — NOK Cashu giftcard mint (pecan processor + coco 2 web wallet)
 
+## Branch ownership
+
+`main` belongs to **upstream** (zeugmaster/pecan). We do NOT merge our
+deployment branch into it — that would overwrite upstream's direction.
+Our work lives on `deployment` (or topic branches that upstream could
+cherry-pick from). If we want to contribute back, we create clean
+topic branches against upstream and submit PRs — we never force our
+deployment state into main.
+
 Cashu mint at https://giftcard.cashu.exchange (inr2, 46.224.104.12) running:
 `giftcard-mint-mintd-1` (cdk-mintd 0.18.0-rc.0, :8089), `pecan-pecan-1`
 (Rust teller/processor + embedded web dist, :50054/:9091), `pecan-sandbox-1`,
