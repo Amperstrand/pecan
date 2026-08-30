@@ -103,6 +103,27 @@ export function payLightningInvoiceFromHub(invoice: string): string {
 }
 
 /** Sends on-chain sats to a deposit address from the hub node's wallet. */
+/** Sends on-chain sats from the VLS node — a genuinely external wallet. */
+export function sendOnchainFromVls(address: string, sat: number): string {
+  return sendOnchainFrom("cln-vls-signet", address, sat)
+}
+
+function sendOnchainFrom(node: string, address: string, sat: number): string {
+  let out: string
+  try {
+    out = execSync(
+      `ssh root@46.224.104.12 "docker exec ${node} lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
+      { timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString()
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
+    throw new Error(`onchain withdraw from ${node} failed: ${stderr.slice(0, 300)}`)
+  }
+  const match = out.match(/"txid":\s*"([0-9a-f]+)"/)
+  if (!match) throw new Error(`withdraw produced no txid: ${out.slice(0, 300)}`)
+  return match[1]
+}
+
 export function sendOnchainToAddress(address: string, sat: number): string {
   let out: string
   try {

@@ -64,6 +64,12 @@ these without spending LLM tokens on browser driving.
 
 ## Gotchas
 
+- `scripts/check-sensitive.sh` blocks phone-number-like data from being
+  committed. Run it before pushing; wire as a pre-commit hook:
+  `ln -s ../../scripts/check-sensitive.sh .git/hooks/pre-commit`.
+  Test data uses dummies like `44000001` or `e2e-recipient` — never real
+  phone numbers, emails, or names.
+
 - `web/package-lock.json` is LINUX-generated (`scripts/gen-web-lockfile.sh`,
   run it whenever web/package.json or web/vendor changes): macOS npm drops
   the linux rolldown bindings (npm/cli#4828) and `npm ci` in the Docker

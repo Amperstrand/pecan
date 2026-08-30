@@ -96,25 +96,28 @@ export async function getHistory(limit = 15): Promise<HistoryRow[]> {
   return entries.map(mapHistoryEntry).filter((row): row is HistoryRow => row !== null)
 }
 
+const STALE_AFTER_MS = 45 * 60 * 1000 // mint quotes expire at 30 min
+
 export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
   const createdAt = entry.createdAt
+  const stale = Date.now() - createdAt > STALE_AFTER_MS
   if (entry.type === "mint") {
     if (entry.state === "failed") return null
     return {
       type: "deposit",
       amount_ore: Number(entry.amount.toBigInt()),
-      description: "Deposit",
+      description: stale && entry.state !== "finalized" ? "Expired" : "Deposit",
       created_at: createdAt,
-      pending: entry.state !== "finalized",
+      pending: entry.state !== "finalized" && !stale,
     }
   }
   if (entry.type === "melt") {
     return {
       type: "withdraw",
       amount_ore: Number(entry.amount.toBigInt()),
-      description: "Withdraw",
+      description: stale && entry.state !== "finalized" ? "Expired" : "Withdraw",
       created_at: createdAt,
-      pending: entry.state !== "finalized",
+      pending: entry.state !== "finalized" && !stale,
     }
   }
   return null
