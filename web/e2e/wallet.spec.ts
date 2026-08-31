@@ -285,6 +285,10 @@ function registerEurExtras(ctx: SuiteContext): void {
     await page.getByRole("button", { name: "Send", exact: true }).click()
     await page.waitForTimeout(4000)
     expect(swapKilled, "the swap request reached the mint").toBe(true)
+    // Disarm the killer BEFORE any later swap: the post-restore withdraw
+    // may itself need a pre-swap (the restored odd coin overshoots), and
+    // an armed route would kill it too.
+    await page.unroute("**/v1/swap")
 
     // Reload: recovery must detect the spent swap inputs and restore the
     // outputs from the mint (NUT-06 restore) instead of losing them.
