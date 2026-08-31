@@ -41,9 +41,9 @@ ssh "$SERVER" "docker restart giftcard-mint-mintd-1 >/dev/null 2>&1 && echo 'min
 rm -f /tmp/pecan-eur.tar.gz
 
 sleep 6
-BUNDLE=$(curl -s -m 10 "$URL/console/wallet" | grep -o 'index-[^"]*\.js' | head -1)
+BUNDLE=$(curl -s -m 10 "$URL/eur-console/wallet" | grep -o 'index-[^"]*\.js' | head -1)
 if [ -z "$BUNDLE" ]; then
-  echo "!! deploy verification failed: no bundle found at $URL/console/wallet" >&2
+  echo "!! deploy verification failed: no bundle found at $URL/eur-console/wallet" >&2
   exit 1
 fi
 echo "==> deployed: $BUNDLE"

@@ -17,7 +17,7 @@ import {
   waitForOpState,
 } from "./helpers/wallet"
 
-const WALLET = "/console/wallet"
+const WALLET = "/eur-console/wallet"
 const DEPOSIT_AMOUNT = 5
 
 async function waitForBalance(page: Page, expected: number, timeout = 45_000) {
@@ -87,14 +87,14 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
 
   test("teller deposit: quote → teller settle → auto-claim", async () => {
     const page = sharedPage!
-    await apiLogin(page)
+    await apiLogin(page, EUR_BASE)
 
     const before = await readBalance(page)
     await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT))
     await page.getByRole("button", { name: "Create deposit quote" }).click()
 
     const code = await readTellerCode(page)
-    const ticket = await matchAndSettle(page, code, "E2E teller deposit")
+    const ticket = await matchAndSettle(page, code, "E2E teller deposit", EUR_BASE)
     expect(ticket.status).toBe("paid")
     expect(ticket.kind).toBe("incoming")
     expect(ticket.amount).toBe(DEPOSIT_AMOUNT * 100)
@@ -197,7 +197,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
 
   test("withdraw: melt → teller payout → finalized, proofs released", async () => {
     const page = sharedPage!
-    await apiLogin(page)
+    await apiLogin(page, EUR_BASE)
 
     const before = await readBalance(page)
     test.skip(before < DEPOSIT_AMOUNT, "insufficient balance for withdraw")
@@ -207,7 +207,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     await page.getByRole("button", { name: "Send", exact: true }).click()
 
     const code = await readTellerCode(page)
-    const ticket = await matchAndSettle(page, code, "E2E payout")
+    const ticket = await matchAndSettle(page, code, "E2E payout", EUR_BASE)
     expect(ticket.status).toBe("paid")
     expect(ticket.kind).toBe("outgoing")
 
@@ -229,7 +229,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
 
   test("withdraw survives reload (durable saga)", async () => {
     const page = sharedPage!
-    await apiLogin(page)
+    await apiLogin(page, EUR_BASE)
     const start = await readBalance(page)
 
     await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT)).catch(() => {})
@@ -238,7 +238,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
       await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT))
       await page.getByRole("button", { name: "Create deposit quote" }).click()
       const depCode = await readTellerCode(page)
-      await matchAndSettle(page, depCode, "E2E reload-saga funding")
+      await matchAndSettle(page, depCode, "E2E reload-saga funding", EUR_BASE)
       await waitForBalance(page, start + DEPOSIT_AMOUNT)
     }
 
@@ -251,7 +251,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     await page.reload()
     await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
 
-    const ticket = await matchAndSettle(page, code, "E2E payout after reload")
+    const ticket = await matchAndSettle(page, code, "E2E payout after reload", EUR_BASE)
     expect(ticket.status).toBe("paid")
 
     await waitForOpState(page, "melt", code, "finalized", 90_000)
@@ -295,7 +295,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
 
   test("lost swap response recovers via mint restore", async () => {
     const page = sharedPage!
-    await apiLogin(page)
+    await apiLogin(page, EUR_BASE)
 
     // Every denomination in circulation is an even power of two, so an
     // odd-cent amount is unreachable by any subset sum: the €5.99 withdraw
@@ -338,7 +338,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
       const code = ((await killCode.textContent()) ?? "").trim()
       if (/^[A-Z0-9]{6}$/.test(code)) {
         const match = await page.request
-          .post("/api/quotes/match", {
+          .post(`${EUR_BASE}/api/quotes/match`, {
             headers: { "Content-Type": "application/json" },
             data: { code },
           })
@@ -346,7 +346,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
           .catch(() => null)
         if (match?.id) {
           await page.request
-            .post(`/api/tickets/${match.id}/mark-failed`, {
+            .post(`${EUR_BASE}/api/tickets/${match.id}/mark-failed`, {
               headers: { "Content-Type": "application/json" },
               data: { notes: "E2E swap-kill cleanup" },
             })
@@ -359,7 +359,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     await page.getByPlaceholder("1.00").fill("5")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     const code = await readTellerCode(page)
-    const ticket = await matchAndSettle(page, code, "E2E payout after restore")
+    const ticket = await matchAndSettle(page, code, "E2E payout after restore", EUR_BASE)
     expect(ticket.status).toBe("paid")
     await waitForOpState(page, "melt", code, "finalized", 90_000)
     await waitForBalance(page, before - 5, 90_000)

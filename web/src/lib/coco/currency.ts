@@ -1,10 +1,10 @@
 // Multi-currency registry: each currency is a full (mintd + pecan) pair
-// behind this one origin (issue #4). EUR owns the root paths — existing
-// proofs and mint URLs must never move; later currencies get path prefixes
-// that caddy strips before proxying to their stack:
-//   {origin}/v1/*           -> mintd-eur :8089     (console at /console/*)
-//   {origin}/usd/v1/*       -> mintd-usd :8097     (console at /usd-console/*)
-// The customer wallet talks to mint URLs directly; pecan-scoped endpoints
+// behind this one origin (issue #4), path convention {currency}/v1/* for
+// the mint and {currency}-console/* for its pecan:
+//   {origin}/eur/v1/*  -> mintd-eur :8089   (console /eur-console/*)
+//   {origin}/usd/v1/*  -> mintd-usd :8097   (console /usd-console/*)
+// The ROOT /v1 and /console are reserved for a future sats pair. The
+// customer wallet talks to mint URLs directly; pecan-scoped endpoints
 // (onchain-status, teller login) use the console path per currency.
 
 export type Currency = "eur" | "usd"
@@ -19,7 +19,7 @@ export interface CurrencyConfig {
 }
 
 export const CURRENCIES: Record<Currency, CurrencyConfig> = {
-  eur: { mintPath: "", consolePath: "", symbol: "€", label: "EUR" },
+  eur: { mintPath: "/eur", consolePath: "/eur-console", symbol: "€", label: "EUR" },
   usd: { mintPath: "/usd", consolePath: "/usd-console", symbol: "$", label: "USD" },
 }
 
