@@ -1,0 +1,202 @@
+<!doctype html>
+<!--
+  Operator aggregator over both pecan consoles (EUR + USD) + reconcile status.
+  Served by caddy at /ops/* from /opt/pecan-tools/ (repo copy: ops/index.html).
+
+  Both consoles set the SAME session cookie name (branch_session, Path=/), so
+  the page logs in and fetches each console SEQUENTIALLY within a refresh
+  cycle — the last login wins the cookie, but each console's data is already
+  captured. Logout after fetch keeps sessions.json from accumulating.
+  Passwords never leave the operator's browser (localStorage).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pecan ops</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 ui-sans-serif, system-ui, sans-serif;
+         background: #0b0e11; color: #d7dce2; padding: 16px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  .muted { color: #7b8590; font-size: 12px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+  .card { background: #12161b; border: 1px solid #232a32; border-radius: 10px; padding: 14px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; color: #9fb0c0; text-transform: uppercase; letter-spacing: .06em; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .ok  { background: #10331d; color: #4ade80; }
+  .bad { background: #3a1414; color: #f87171; }
+  .warn{ background: #332a10; color: #fbbf24; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { text-align: left; padding: 3px 6px 3px 0; vertical-align: top; }
+  th { color: #7b8590; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: end; }
+  label { display: grid; gap: 3px; font-size: 11px; color: #7b8590; }
+  input { background: #12161b; border: 1px solid #232a32; color: #d7dce2;
+          border-radius: 6px; padding: 6px 8px; font: inherit; }
+  button { background: #1d4ed8; border: 0; color: #fff; border-radius: 6px;
+           padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.ghost { background: #232a32; font-weight: 500; }
+  a { color: #7ab2ff; text-decoration: none; }
+  .summary-line { color: #9fb0c0; font-size: 12px; margin-bottom: 8px; }
+  ul { margin: 0; padding-left: 18px; color: #9fb0c0; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pecan ops</h1>
+  <span class="muted">giftcard.cashu.exchange · EUR + USD pairs</span>
+  <span id="refreshed" class="muted"></span>
+  <span style="margin-left:auto"><button class="ghost" id="toggle">pause</button></span>
+</header>
+
+<form id="cred">
+  <label>user <input id="user" value="admin" size="8"></label>
+  <label>EUR admin password <input id="pw-eur" type="password" size="16" autocomplete="off"></label>
+  <label>USD admin password <input id="pw-usd" type="password" size="16" autocomplete="off"></label>
+  <button>save &amp; refresh</button>
+  <span class="muted" style="align-self:center">stays in this browser</span>
+</form>
+
+<div class="cards">
+  <div class="card" id="reconcile-card">
+    <h2>reconcile <span class="muted">(hourly cron)</span></h2>
+    <div id="reconcile">loading…</div>
+  </div>
+  <div class="card">
+    <h2>EUR console <span id="pill-eur"></span></h2>
+    <div id="eur">—</div>
+  </div>
+  <div class="card">
+    <h2>USD console <span id="pill-usd"></span></h2>
+    <div id="usd">—</div>
+  </div>
+</div>
+
+<script>
+"use strict"
+const CONSOLES = [
+  { key: "eur", path: "/eur-console", sym: "€" },
+  { key: "usd", path: "/usd-console", sym: "$" },
+]
+const $ = (id) => document.getElementById(id)
+const fmt = (cents, sym) => (cents / 100).toFixed(2) + " " + sym
+const ago = (unix) => {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - unix))
+  if (s < 90) return s + "s"
+  if (s < 5400) return Math.round(s / 60) + "m"
+  return (s / 3600).toFixed(1) + "h"
+}
+
+function pill(el, cls, text) {
+  el.innerHTML = `<span class="pill ${cls}">${text}</span>`
+}
+
+function renderConsole(c, app) {
+  const sym = app ? c.sym : ""
+  const oq = (app && app.open_quotes) || []
+  const rd = (app && app.recent_done) || []
+  const sum = app && app.summary
+  let html = ""
+  if (sum) {
+    html += `<div class="summary-line">${sum.mint_count} mints · ${sum.melt_count} melts · ` +
+      `net issued <b>${fmt(sum.net_issued, sym)}</b></div>`
+  }
+  html += `<table><tr><th>open</th><th></th><th class="num">amount</th><th>state</th><th>age</th></tr>`
+  if (oq.length === 0) html += `<tr><td colspan="5" class="muted">no open quotes</td></tr>`
+  for (const q of oq) {
+    html += `<tr><td class="mono">${q.prefix}</td><td>${q.kind === "outgoing" ? "↗" : "↘"}</td>` +
+      `<td class="num">${fmt(q.amount, c.sym)}</td><td>${q.status_label}</td>` +
+      `<td class="muted">${ago(q.created_at)}</td></tr>`
+  }
+  html += `</table>`
+  if (rd.length) {
+    html += `<table style="margin-top:8px"><tr><th>recent</th><th class="num">amount</th><th>state</th></tr>`
+    for (const t of rd.slice(0, 4)) {
+      html += `<tr><td class="mono">${t.short_id}</td><td class="num">${fmt(t.amount, c.sym)}</td>` +
+        `<td class="muted">${t.status_label}</td></tr>`
+    }
+    html += `</table>`
+  }
+  html += `<div style="margin-top:8px"><a href="${c.path}/" target="_blank">open console ↗</a></div>`
+  $(c.key).innerHTML = html
+}
+
+function renderReconcile(st) {
+  if (!st) { $("reconcile").innerHTML = `<span class="muted">status unavailable</span>`; return }
+  const pairs = st.pairs || {}
+  const row = (k) => {
+    const v = pairs[k]
+    const cls = v === "clean" ? "ok" : "bad"
+    return `<span class="pill ${cls}">${k.toUpperCase()} ${v}</span>`
+  }
+  const drift = st.drift
+    ? `<span class="pill bad">DRIFT</span>`
+    : `<span class="pill ok">no drift</span>`
+  $("reconcile").innerHTML =
+    `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${row("eur")}${row("usd")}${drift}</div>
+     <div class="muted" style="margin-top:6px">last run ${st.last_run} · log: /var/log/pecan-reconcile.log</div>
+     <ul style="margin-top:6px">
+       <li>PAID ticket vs unsettled quote → double-spend risk</li>
+       <li>settled quote vs unpaid ticket → user loss</li>
+     </ul>`
+}
+
+async function fetchConsole(c, user, pass) {
+  const login = await fetch(`${c.path}/api/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: user, password: pass }),
+  })
+  if (!login.ok) return { err: login.status === 401 ? "login failed" : "http " + login.status }
+  const app = await fetch(`${c.path}/api/app`)
+  if (!app.ok) return { err: "app http " + app.status }
+  const data = await app.json()
+  await fetch(`${c.path}/api/logout`, { method: "POST" }).catch(() => {})
+  return { data }
+}
+
+async function refresh() {
+  const user = $("user").value.trim() || "admin"
+  for (const c of CONSOLES) {
+    const pass = $("pw-" + c.key).value
+    const el = $(c.key), pl = $("pill-" + c.key)
+    if (!pass) { pill(pl, "warn", "no password"); el.innerHTML = `<span class="muted">enter the ${c.key.toUpperCase()} admin password above</span>`; continue }
+    el.innerHTML = `<span class="muted">refreshing…</span>`
+    const r = await fetchConsole(c, user, pass)
+    if (r.err) { pill(pl, "bad", r.err); el.innerHTML = "" }
+    else { pill(pl, "ok", "live"); renderConsole(c, r.data) }
+  }
+  try {
+    const st = await (await fetch("/ops/reconcile-status.json")).json()
+    renderReconcile(st)
+  } catch { renderReconcile(null) }
+  $("refreshed").textContent = "updated " + new Date().toLocaleTimeString()
+}
+
+let timer = null
+function start() { timer = setInterval(refresh, 60_000); refresh() }
+function stop() { clearInterval(timer); timer = null }
+
+$("cred").addEventListener("submit", (e) => {
+  e.preventDefault()
+  localStorage.setItem("ops-user", $("user").value)
+  localStorage.setItem("ops-eur-pass", $("pw-eur").value)
+  localStorage.setItem("ops-usd-pass", $("pw-usd").value)
+  refresh()
+})
+$("toggle").addEventListener("click", () => {
+  if (timer) { stop(); $("toggle").textContent = "resume" }
+  else { start(); $("toggle").textContent = "pause" }
+})
+$("user").value = localStorage.getItem("ops-user") || "admin"
+$("pw-eur").value = localStorage.getItem("ops-eur-pass") || ""
+$("pw-usd").value = localStorage.getItem("ops-usd-pass") || ""
+start()
+</script>
+</body>
+</html>
