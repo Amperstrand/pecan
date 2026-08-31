@@ -185,6 +185,83 @@ function registerEurExtras(ctx: SuiteContext): void {
     expectNoWalletErrors(ctx.walletErrors())
   })
 
+  test("cancelled invoice can be replaced; deposits run concurrently across rails", async () => {
+    const page = ctx.page()
+    await apiLogin(page, ctx.consoleBase)
+
+    const before = await readBalance(page)
+
+    // Invoice A (€2) — then cancel its card.
+    await page.getByRole("button", { name: "Lightning", exact: true }).click()
+    await page.getByPlaceholder("5.00").fill("2")
+    await page.getByRole("button", { name: "Create lightning invoice" }).click()
+    const cardA = page.locator('[data-testid="deposit-card"]').filter({
+      hasText: "Pay this lightning invoice",
+    })
+    await cardA.waitFor({ state: "visible", timeout: 30_000 })
+    const invoiceA = (await cardA.locator("p.font-mono.select-all").textContent())?.trim()
+    await cardA.getByRole("button", { name: "Cancel" }).click()
+    await expect(cardA).toHaveCount(0)
+
+    // Invoice B (€1) — a DIFFERENT amount, immediately after the cancel.
+    await page.getByPlaceholder("5.00").fill("1")
+    await page.getByRole("button", { name: "Create lightning invoice" }).click()
+    const cardB = page.locator('[data-testid="deposit-card"]').filter({
+      hasText: "Pay this lightning invoice",
+    })
+    await cardB.waitFor({ state: "visible", timeout: 30_000 })
+    const invoiceB = (await cardB.locator("p.font-mono.select-all").textContent())?.trim()
+    expect(invoiceB).toBeTruthy()
+    expect(invoiceB).not.toBe(invoiceA)
+    expect(invoiceB!.startsWith("lntbs")).toBeTruthy()
+
+    // While invoice B is still pending, open a teller deposit (€5) —
+    // two cards from different rails coexist.
+    await page.getByRole("button", { name: "Teller", exact: true }).click()
+    await page.getByPlaceholder("5.00").fill("5")
+    await page.getByRole("button", { name: "Create deposit quote" }).click()
+    const tellerCard = page.locator('[data-testid="deposit-card"]').filter({
+      hasText: "Give this code to the teller",
+    })
+    await tellerCard.waitFor({ state: "visible", timeout: 30_000 })
+    await expect(page.locator('[data-testid="deposit-card"]')).toHaveCount(2)
+    const code = ((await tellerCard.locator("p.font-mono.text-3xl").textContent()) ?? "").trim()
+
+    // Settle both in parallel: pay the invoice, settle the teller quote.
+    const preimage = payLightningInvoice(invoiceB!)
+    expect(preimage).toHaveLength(64)
+    await matchAndSettle(page, code, "E2E concurrent teller", ctx.consoleBase)
+
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before + 6, 2)
+    await expect(page.locator('[data-testid="deposit-card"]')).toHaveCount(0)
+    expectNoWalletErrors(ctx.walletErrors())
+  })
+
+  test("cancelled card stays cancelled across a reload", async () => {
+    const page = ctx.page()
+
+    await page.getByRole("button", { name: "Lightning", exact: true }).click()
+    await page.getByPlaceholder("5.00").fill("1")
+    await page.getByRole("button", { name: "Create lightning invoice" }).click()
+    const card = page.locator('[data-testid="deposit-card"]').filter({
+      hasText: "Pay this lightning invoice",
+    })
+    await card.waitFor({ state: "visible", timeout: 30_000 })
+    await card.getByRole("button", { name: "Cancel" }).click()
+    await expect(card).toHaveCount(0)
+
+    await page.reload()
+    await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
+    // The cancelled quote must not come back as a pending card.
+    await page.waitForTimeout(2500)
+    await expect(
+      page.locator('[data-testid="deposit-card"]'),
+    ).toHaveCount(0)
+    expectNoWalletErrors(ctx.walletErrors())
+  })
+
   test("lost swap response recovers via mint restore", async () => {
     const page = ctx.page()
     await apiLogin(page, ctx.consoleBase)

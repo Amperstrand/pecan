@@ -4,13 +4,15 @@ import { IndexedDbRepositories } from "@cashu/coco-indexeddb"
 
 import type { DepositMethod } from "./branch-methods"
 import {
+  CURRENCIES,
   activeCurrency,
+  currencyOfMint,
   mintUrl,
   type Currency,
 } from "./currency"
-import { CURRENCIES } from "./currency"
 import type { CoreEvents } from "@cashu/coco-core"
 import { subscribeWalletLogging, walletLog } from "./wallet-log"
+import { migrateLegacyMintUrls } from "./wallet-migration"
 
 export type { DepositMethod }
 import { MeltBranchHandler } from "./melt-branch-handler"
@@ -34,6 +36,8 @@ export interface DepositQuote {
   amount: number
   /** btc: the sats the payer must send, from the processor via extra. */
   expectedSat?: number
+  /** The pair this quote lives at — cards and polls are currency-scoped. */
+  currency: Currency
 }
 
 export interface WithdrawResult {
@@ -44,6 +48,39 @@ export interface WithdrawResult {
 }
 
 const SEED_STORAGE_KEY = "giftcard-coco-seed-v1"
+
+const CANCELLED_QUOTES_KEY = "pecan-cancelled-quotes"
+
+/**
+ * Cancelling a pending deposit is a wallet-side decision: the quote
+ * simply expires unpaid server-side, but the operation row stays pending
+ * in IndexedDB — without a tombstone, getPendingDeposits would restore
+ * the cancelled card on every reload.
+ */
+export function cancelDepositQuote(quoteId: string): void {
+  try {
+    const list = JSON.parse(
+      window.localStorage.getItem(CANCELLED_QUOTES_KEY) ?? "[]",
+    ) as string[]
+    const next = [quoteId, ...list.filter((id) => id !== quoteId)].slice(0, 50)
+    window.localStorage.setItem(CANCELLED_QUOTES_KEY, JSON.stringify(next))
+    walletLog("info", "deposit cancelled by user", { quoteId })
+  } catch {
+    // storage unavailable — worst case the card restores on next load
+  }
+}
+
+function isCancelledQuote(quoteId: string | undefined): boolean {
+  if (!quoteId) return false
+  try {
+    const list = JSON.parse(
+      window.localStorage.getItem(CANCELLED_QUOTES_KEY) ?? "[]",
+    ) as string[]
+    return list.includes(quoteId)
+  } catch {
+    return false
+  }
+}
 
 let cocoInstance: Promise<Manager> | null = null
 
@@ -75,6 +112,10 @@ function loadSeed(): Uint8Array {
 export function getCoco(): Promise<Manager> {
   if (cocoInstance === null) {
     cocoInstance = (async () => {
+      // Pre-{currency}/v1 wallets keep every row keyed to the origin root,
+      // which now 404s — re-key to the active currency's mint before coco
+      // opens the database.
+      await migrateLegacyMintUrls(window.location.origin, mintUrl("eur"))
       const repo = new IndexedDbRepositories({ name: "giftcard-coco-wallet" })
       const coco = await initializeCoco({
         repo,
@@ -178,14 +219,18 @@ export async function createDepositQuote(
     tail: quote.quoteId.slice(-6).toUpperCase(),
     request: quote.request,
     amount,
+    currency,
     ...(expectedSat !== undefined ? { expectedSat } : {}),
   }
 }
 
-export async function pollAndMint(quoteId: string): Promise<boolean> {
+export async function pollAndMint(
+  quoteId: string,
+  currency: Currency = activeCurrency(),
+): Promise<boolean> {
   const coco = await getCoco()
   const operations = await coco.ops.mint.listByQuote({
-    mintUrl: mintUrl(),
+    mintUrl: mintUrl(currency),
     quoteId,
   })
   const operation = operations[0]
@@ -419,38 +464,47 @@ async function resumeStrandedWithdrawQuotes(
  * the pending card after a page reload — the user shouldn't lose visual
  * context just because they refreshed.
  */
-export async function getPendingDeposit(): Promise<DepositQuote | null> {
+/**
+ * Every in-flight deposit across ALL currencies — the wallet supports
+ * concurrent deposits on any rail/currency pair; cards render with their
+ * own currency's symbol regardless of the active one.
+ */
+export async function getPendingDeposits(): Promise<DepositQuote[]> {
   const coco = await getCoco()
   const ops = await coco.ops.mint.listInFlight()
   const staleCutoff = Date.now() - 45 * 60 * 1000
-  const op = ops.find(
+  const live = ops.filter(
     (o) =>
       (o.state === "pending" || o.state === "executing") &&
-      o.unit === activeCurrency() &&
-      o.createdAt > staleCutoff,
+      o.createdAt > staleCutoff &&
+      !isCancelledQuote(o.quoteId),
   )
-  if (!op || !op.quoteId) return null
-
-  const quote = await coco.quotes.mint.get({
-    mintUrl: mintUrl(),
-    quoteId: op.quoteId,
-  })
-  if (!quote) return null
-
-  const expectedSat = (
-    quote as { quoteData?: { expected_sat?: number } }
-  ).quoteData?.expected_sat
-
-  return {
-    method: op.method as DepositMethod,
-    quoteId: op.quoteId,
-    tail: op.quoteId.slice(-6).toUpperCase(),
-    request: quote.request,
-    amount: Number(
-      (quote as { amount?: { toBigInt(): bigint } }).amount?.toBigInt?.() ?? 0,
-    ),
-    ...(expectedSat !== undefined ? { expectedSat } : {}),
+  const cards: DepositQuote[] = []
+  for (const op of live) {
+    if (!op.quoteId) continue
+    const currency = currencyOfMint(op.mintUrl)
+    if (!currency) continue
+    const quote = await coco.quotes.mint
+      .get({ mintUrl: op.mintUrl, quoteId: op.quoteId })
+      .catch(() => null)
+    if (!quote) continue
+    const expectedSat = (
+      quote as { quoteData?: { expected_sat?: number } }
+    ).quoteData?.expected_sat
+    cards.push({
+      method: op.method as DepositMethod,
+      quoteId: op.quoteId,
+      tail: op.quoteId.slice(-6).toUpperCase(),
+      request: quote.request,
+      amount: Number(
+        (quote as { amount?: { toBigInt(): bigint } }).amount?.toBigInt?.() ??
+          0,
+      ),
+      currency,
+      ...(expectedSat !== undefined ? { expectedSat } : {}),
+    })
   }
+  return cards
 }
 
 /**

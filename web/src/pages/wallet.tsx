@@ -27,7 +27,8 @@ import {
   createWithdraw,
   getBalanceCents,
   getHistory,
-  getPendingDeposit,
+  getPendingDeposits,
+  cancelDepositQuote,
   getPendingWithdraw,
   pollAndMint,
   pollWithdraw,
@@ -45,8 +46,6 @@ import {
 type DepositState =
   | { phase: "idle" }
   | { phase: "creating" }
-  | { phase: "pending"; quote: DepositQuote }
-  | { phase: "done"; receipt?: DepositReceipt }
   | { phase: "error"; message: string }
 
 interface DepositReceipt {
@@ -54,6 +53,7 @@ interface DepositReceipt {
   amount: number
   sat?: number
   address?: string
+  currency: Currency
 }
 
 type WithdrawState =
@@ -77,7 +77,13 @@ function QrCodeImg({ text, alt }: { text: string; alt: string }) {
   )
 }
 
-function OnchainStatus({ address }: { address: string }) {
+function OnchainStatus({
+  address,
+  currency,
+}: {
+  address: string
+  currency?: Currency
+}) {
   const [status, setStatus] = useState<{
     receivedSat: number
     confirmations: number
@@ -90,7 +96,7 @@ function OnchainStatus({ address }: { address: string }) {
     let cancelled = false
     const poll = async () => {
       try {
-        const res = await fetch(`${consoleUrl()}/api/onchain-status/${address}`)
+        const res = await fetch(`${consoleUrl(currency)} /api/onchain-status/${address}`)
         if (!res.ok) return
         const data: {
           tip: number
@@ -254,6 +260,10 @@ export function WalletPage() {
   const [withdrawAmount, setWithdrawAmount] = useState("")
   const [withdrawRecipient, setWithdrawRecipient] = useState("")
   const [depositState, setDepositState] = useState<DepositState>({ phase: "idle" })
+  const [pendingDeposits, setPendingDeposits] = useState<DepositQuote[]>([])
+  const pendingRef = useRef<DepositQuote[]>([])
+  pendingRef.current = pendingDeposits
+  const [depositReceipt, setDepositReceipt] = useState<DepositReceipt | null>(null)
   const [withdrawState, setWithdrawState] = useState<WithdrawState>({ phase: "idle" })
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -289,29 +299,14 @@ export function WalletPage() {
       .then(async () => {
         refresh()
 
-        // Restore any in-flight deposit/withdraw cards so a page reload
-        // doesn't lose visual context (the operations complete either way,
-        // but the user shouldn't see a blank form).
-        const pendingDeposit = await getPendingDeposit()
-        if (pendingDeposit) {
-          setDepositState({ phase: "pending", quote: pendingDeposit })
-          pollRef.current = setInterval(async () => {
-            const done = await pollAndMint(pendingDeposit.quoteId)
-            if (done) {
-              if (pollRef.current) clearInterval(pollRef.current)
-              pollRef.current = null
-              setDepositState({
-                phase: "done",
-                receipt: {
-                  method: pendingDeposit.method,
-                  amount: pendingDeposit.amount,
-                  sat: pendingDeposit.expectedSat,
-                  address: pendingDeposit.method === "btc" ? pendingDeposit.request : undefined,
-                },
-              })
-              refresh()
-            }
-          }, 3000)
+        // Restore every in-flight deposit card (all currencies) so a page
+        // reload doesn't lose visual context — concurrent deposits on any
+        // rail/currency pair are supported.
+        const pending = await getPendingDeposits()
+        if (pending.length > 0) {
+          pendingRef.current = pending
+          setPendingDeposits(pending)
+          startDepositPolling()
         }
 
         const pendingWithdraw = await getPendingWithdraw()
@@ -344,33 +339,52 @@ export function WalletPage() {
     }
   }, [refresh])
 
-  const cancelDeposit = () => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-    setDepositState({ phase: "idle" })
+  const startDepositPolling = () => {
+    if (pollRef.current) return
+    pollRef.current = setInterval(async () => {
+      const live = await Promise.all(
+        pendingRef.current.map(async (q) => ({
+          quote: q,
+          done: await pollAndMint(q.quoteId, q.currency).catch(() => false),
+        })),
+      )
+      const settled = live.filter((x) => x.done)
+      if (settled.length > 0) {
+        const last = settled[settled.length - 1].quote
+        setPendingDeposits((prev) =>
+          prev.filter((q) => !settled.some((x) => x.quote.quoteId === q.quoteId)),
+        )
+        setDepositReceipt({
+          method: last.method,
+          amount: last.amount,
+          sat: last.expectedSat,
+          address: last.method === "btc" ? last.request : undefined,
+          currency: last.currency,
+        })
+        refresh()
+        setTimeout(() => setDepositReceipt(null), 5000)
+      }
+      if (pendingRef.current.every((q) => settled.some((x) => x.quote.quoteId === q.quoteId))) {
+        if (pollRef.current) clearInterval(pollRef.current)
+        pollRef.current = null
+      }
+    }, 3000)
+  }
+
+  const cancelDepositCard = (quoteId: string) => {
+    cancelDepositQuote(quoteId)
+    setPendingDeposits((prev) => prev.filter((q) => q.quoteId !== quoteId))
   }
 
   const startDeposit = async () => {
-    if (depositState.phase === "pending") return
     const amount = parseFloat(depositAmount)
     if (!amount || amount < 1 || amount > 1000) return
     setDepositState({ phase: "creating" })
     try {
       const quote = await createDepositQuote(amount, depositMethod)
-      setDepositState({ phase: "pending", quote })
-
-      pollRef.current = setInterval(async () => {
-        const done = await pollAndMint(quote.quoteId)
-        if (done) {
-          clearInterval(pollRef.current!)
-          pollRef.current = null
-          setDepositState({ phase: "done" })
-          refresh()
-          setTimeout(() => setDepositState({ phase: "idle" }), 3000)
-        }
-      }, 3000)
+      setDepositState({ phase: "idle" })
+      setPendingDeposits((prev) => [...prev, quote])
+      startDepositPolling()
     } catch (e) {
       console.error("deposit failed:", e)
       const msg = e instanceof Error ? e.message : String(e)
@@ -465,25 +479,26 @@ export function WalletPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
-          {depositState.phase === "done" && depositState.receipt ? (
+          {depositReceipt ? (
             <div className="grid gap-3 rounded-lg border border-green-200 bg-green-50 p-4 text-center dark:border-green-900 dark:bg-green-950">
               <div className="text-2xl">✓</div>
               <p className="font-medium text-green-700 dark:text-green-300">
                 Deposit confirmed
               </p>
               <p className="text-lg font-bold">
-                +{(depositState.receipt.amount / 100).toFixed(2)} {symbol}
+                +{(depositReceipt.amount / 100).toFixed(2)}{" "}
+                {CURRENCIES[depositReceipt.currency].symbol}
               </p>
               <div className="text-xs text-muted-foreground">
-                {depositState.receipt.method === "btc" && depositState.receipt.sat && (
-                  <p>{depositState.receipt.sat.toLocaleString()} sat on-chain</p>
+                {depositReceipt.method === "btc" && depositReceipt.sat && (
+                  <p>{depositReceipt.sat.toLocaleString()} sat on-chain</p>
                 )}
-                {depositState.receipt.method === "ln" && <p>Lightning payment</p>}
-                {depositState.receipt.method === "branch" && <p>Teller settlement</p>}
+                {depositReceipt.method === "ln" && <p>Lightning payment</p>}
+                {depositReceipt.method === "branch" && <p>Teller settlement</p>}
               </div>
-              {depositState.receipt.method === "btc" && depositState.receipt.address && (
+              {depositReceipt.method === "btc" && depositReceipt.address && (
                 <a
-                  href={`https://mempool.space/signet/address/${depositState.receipt.address}`}
+                  href={`https://mempool.space/signet/address/${depositReceipt.address}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-[10px] underline text-muted-foreground hover:text-foreground"
@@ -494,12 +509,12 @@ export function WalletPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setDepositState({ phase: "idle" })}
+                onClick={() => setDepositReceipt(null)}
               >
                 New deposit
               </Button>
             </div>
-          ) : depositState.phase === "idle" || depositState.phase === "done" ? (
+          ) : depositState.phase === "idle" ? (
             <>
               <div className="grid grid-cols-3 gap-1.5 rounded-lg bg-muted p-1 text-sm">
                 <button
@@ -543,9 +558,7 @@ export function WalletPage() {
                 />
               </div>
               <Button onClick={startDeposit} disabled={!depositAmount}>
-                {depositState.phase === "done"
-                  ? "✓ Deposited"
-                  : depositMethod === "ln"
+                {depositMethod === "ln"
                     ? "Create lightning invoice"
                     : depositMethod === "btc"
                       ? "Create on-chain address"
@@ -556,95 +569,95 @@ export function WalletPage() {
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" /> Creating quote…
             </div>
-          ) : depositState.phase === "pending" ? (
-            depositState.quote.method === "ln" ? (
-              <div className="grid gap-3 text-center">
+          ) : (
+            <p className="text-sm text-destructive">{depositState.message}</p>
+          )}
+
+          {pendingDeposits.map((q) => {
+            const cardSymbol = CURRENCIES[q.currency].symbol
+            return (
+              <div
+                key={q.quoteId}
+                className="grid gap-3 rounded-lg border p-4 text-center"
+                data-testid="deposit-card"
+              >
+                {q.currency !== currency && (
+                  <p className="text-xs text-muted-foreground">
+                    {CURRENCIES[q.currency].label} deposit
+                  </p>
+                )}
+                {q.method === "ln" ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      Pay this lightning invoice (signet):
+                    </p>
+                    <div className="flex justify-center">
+                      <QrCodeImg text={q.request} alt="Lightning invoice QR" />
+                    </div>
+                    <p className="max-h-24 overflow-y-auto break-all rounded-md bg-muted p-2 font-mono text-xs select-all">
+                      {q.request}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => navigator.clipboard.writeText(q.request)}
+                    >
+                      Copy invoice
+                    </Button>
+                  </>
+                ) : q.method === "btc" ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      Send {q.expectedSat ?? "…"} sat (signet) to:
+                    </p>
+                    <div className="flex justify-center">
+                      <QrCodeImg text={q.request} alt="Bitcoin address QR" />
+                    </div>
+                    <p className="break-all rounded-md bg-muted p-2 font-mono text-xs select-all">
+                      {q.request}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => navigator.clipboard.writeText(q.request)}
+                    >
+                      Copy address
+                    </Button>
+                    <OnchainStatus address={q.request} currency={q.currency} />
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      Give this code to the teller:
+                    </p>
+                    <div className="flex justify-center">
+                      <QrCodeImg
+                        text={q.quoteId}
+                        alt="Teller code QR — encodes the bare quote id"
+                      />
+                    </div>
+                    <p className="font-mono text-3xl font-bold tracking-widest select-all">
+                      {q.tail}
+                    </p>
+                  </>
+                )}
                 <p className="text-sm text-muted-foreground">
-                  Pay this lightning invoice (signet):
+                  {(q.amount / 100).toFixed(2)} {cardSymbol} — waiting…
                 </p>
-                <div className="flex justify-center">
-                  <QrCodeImg text={depositState.quote.request} alt="Lightning invoice QR" />
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Polling for payment
                 </div>
-                <p className="max-h-24 overflow-y-auto break-all rounded-md bg-muted p-2 font-mono text-xs select-all">
-                  {depositState.quote.request}
-                </p>
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => navigator.clipboard.writeText(depositState.quote.request)}
+                  onClick={() => cancelDepositCard(q.quoteId)}
                 >
-                  Copy invoice
-                </Button>
-                <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amount / 100).toFixed(2)} {symbol} — waiting…
-                </p>
-                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-                  <Loader2 className="size-3 animate-spin" />
-                  Polling for payment
-                </div>
-                <Button variant="outline" size="sm" onClick={cancelDeposit}>
-                  Cancel
-                </Button>
-              </div>
-            ) : depositState.quote.method === "btc" ? (
-              <div className="grid gap-3 text-center">
-                <p className="text-sm text-muted-foreground">
-                  Send {depositState.quote.expectedSat ?? "…"} sat (signet) to:
-                </p>
-                <div className="flex justify-center">
-                  <QrCodeImg text={depositState.quote.request} alt="Bitcoin address QR" />
-                </div>
-                <p className="break-all rounded-md bg-muted p-2 font-mono text-xs select-all">
-                  {depositState.quote.request}
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => navigator.clipboard.writeText(depositState.quote.request)}
-                >
-                  Copy address
-                </Button>
-                <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amount / 100).toFixed(2)} {symbol} — waiting…
-                </p>
-                <OnchainStatus address={depositState.quote.request} />
-                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-                  <Loader2 className="size-3 animate-spin" />
-                  Polling for payment
-                </div>
-                <Button variant="outline" size="sm" onClick={cancelDeposit}>
-                  Cancel
-                </Button>
-              </div>
-            ) : (
-              <div className="grid gap-3 text-center">
-                <p className="text-sm text-muted-foreground">
-                  Give this code to the teller:
-                </p>
-                <div className="flex justify-center">
-                  <QrCodeImg
-                    text={depositState.quote.quoteId}
-                    alt="Teller code QR — encodes the bare quote id"
-                  />
-                </div>
-                <p className="font-mono text-3xl font-bold tracking-widest select-all">
-                  {depositState.quote.tail}
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amount / 100).toFixed(2)} {symbol} — waiting…
-                </p>
-                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-                  <Loader2 className="size-3 animate-spin" />
-                  Polling for payment
-                </div>
-                <Button variant="outline" size="sm" onClick={cancelDeposit}>
                   Cancel
                 </Button>
               </div>
             )
-          ) : (
-            <p className="text-sm text-destructive">{depositState.message}</p>
-          )}
+          })}
         </CardContent>
       </Card>
 
