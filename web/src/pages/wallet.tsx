@@ -34,7 +34,13 @@ import {
   resumePendingOperations,
 } from "@/lib/coco/coco-wallet"
 import { getCoco } from "@/lib/coco/coco-wallet"
-import { UNIT } from "@/lib/coco/branch-methods"
+import {
+  CURRENCIES,
+  activeCurrency,
+  consoleUrl,
+  setActiveCurrency,
+  type Currency,
+} from "@/lib/coco/currency"
 
 type DepositState =
   | { phase: "idle" }
@@ -84,7 +90,7 @@ function OnchainStatus({ address }: { address: string }) {
     let cancelled = false
     const poll = async () => {
       try {
-        const res = await fetch(`/api/onchain-status/${address}`)
+        const res = await fetch(`${consoleUrl()}/api/onchain-status/${address}`)
         if (!res.ok) return
         const data: {
           tip: number
@@ -240,6 +246,7 @@ function OnchainStatus({ address }: { address: string }) {
 }
 
 export function WalletPage() {
+  const [currency, setCurrencyState] = useState<Currency>(activeCurrency)
   const [balance, setBalance] = useState<number | null>(null)
   const [history, setHistory] = useState<HistoryRow[]>([])
   const [depositAmount, setDepositAmount] = useState("")
@@ -250,15 +257,30 @@ export function WalletPage() {
   const [withdrawState, setWithdrawState] = useState<WithdrawState>({ phase: "idle" })
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (c?: Currency) => {
+    const currency = c ?? activeCurrency()
     try {
-      const [balance, hist] = await Promise.all([getBalanceCents(), getHistory(15)])
+      const [balance, hist] = await Promise.all([
+        getBalanceCents(currency),
+        getHistory(15),
+      ])
       setBalance(balance)
       setHistory(hist)
     } catch {
       // wallet not initialized yet
     }
   }, [])
+
+  const switchCurrency = useCallback(
+    (next: Currency) => {
+      setActiveCurrency(next)
+      setCurrencyState(next)
+      setDepositState({ phase: "idle" })
+      setWithdrawState({ phase: "idle" })
+      void refresh(next)
+    },
+    [refresh],
+  )
 
   useEffect(() => {
     let withdrawPollRef: ReturnType<typeof setInterval> | null = null
@@ -362,7 +384,7 @@ export function WalletPage() {
           "This quote no longer exists on the mint (it may have expired or the mint was restarted). Please create a new deposit."
       } else if (msg.includes("Unit mismatch") || msg.includes("Unsupported unit")) {
         helpful =
-          `The mint doesn't support the currency unit this wallet is configured for. Expected: ${UNIT}. The mint may have been re-denominated.`
+          `The mint doesn't support the currency unit this wallet is configured for. Expected: ${activeCurrency().toUpperCase()}. The mint may have been re-denominated.`
       }
       setDepositState({ phase: "error", message: helpful })
     }
@@ -395,7 +417,8 @@ export function WalletPage() {
     }
   }
 
-  const balanceEur = balance !== null ? (balance / 100).toFixed(2) : "…"
+  const balanceText = balance !== null ? (balance / 100).toFixed(2) : "…"
+  const symbol = CURRENCIES[currency].symbol
   const isDark = document.documentElement.classList.contains("dark")
 
   return (
@@ -403,16 +426,31 @@ export function WalletPage() {
       <div className="flex items-center gap-2">
         <WalletIcon className="size-5" />
         <h1 className="text-lg font-semibold">Wallet</h1>
-        <span className="ml-auto text-xs text-muted-foreground">
-          {window.location.hostname}
-        </span>
+        <div className="ml-auto flex items-center gap-1" role="tablist" aria-label="Currency">
+          {(Object.keys(CURRENCIES) as Currency[]).map((c) => (
+            <button
+              key={c}
+              role="tab"
+              aria-selected={c === currency}
+              onClick={() => switchCurrency(c)}
+              className={
+                "rounded-md px-2 py-1 text-xs font-medium " +
+                (c === currency
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-muted")
+              }
+            >
+              {CURRENCIES[c].label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <Card>
         <CardHeader>
           <CardDescription>Balance</CardDescription>
           <CardTitle className="text-4xl tabular-nums">
-            {balanceEur} <span className="text-base font-normal text-muted-foreground">€</span>
+            {balanceText} <span className="text-base font-normal text-muted-foreground">{symbol}</span>
           </CardTitle>
         </CardHeader>
       </Card>
@@ -434,7 +472,7 @@ export function WalletPage() {
                 Deposit confirmed
               </p>
               <p className="text-lg font-bold">
-                +{(depositState.receipt.amount / 100).toFixed(2)} €
+                +{(depositState.receipt.amount / 100).toFixed(2)} {symbol}
               </p>
               <div className="text-xs text-muted-foreground">
                 {depositState.receipt.method === "btc" && depositState.receipt.sat && (
@@ -488,11 +526,11 @@ export function WalletPage() {
               </div>
               {depositMethod === "btc" && (
                 <p className="text-xs text-muted-foreground">
-                  Minimum 50 € — on-chain deposits pay for dust and chain fees.
+                  Minimum 50 {symbol} — on-chain deposits pay for dust and chain fees.
                 </p>
               )}
               <div className="grid gap-1.5">
-                <Label htmlFor="dep-amt">Amount (€)</Label>
+                <Label htmlFor="dep-amt">Amount ({symbol})</Label>
                 <Input
                   id="dep-amt"
                   type="number"
@@ -538,7 +576,7 @@ export function WalletPage() {
                   Copy invoice
                 </Button>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amount / 100).toFixed(2)} € — waiting…
+                  {(depositState.quote.amount / 100).toFixed(2)} {symbol} — waiting…
                 </p>
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
@@ -567,7 +605,7 @@ export function WalletPage() {
                   Copy address
                 </Button>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amount / 100).toFixed(2)} € — waiting…
+                  {(depositState.quote.amount / 100).toFixed(2)} {symbol} — waiting…
                 </p>
                 <OnchainStatus address={depositState.quote.request} />
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
@@ -593,7 +631,7 @@ export function WalletPage() {
                   {depositState.quote.tail}
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {(depositState.quote.amount / 100).toFixed(2)} € — waiting…
+                  {(depositState.quote.amount / 100).toFixed(2)} {symbol} — waiting…
                 </p>
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
@@ -633,7 +671,7 @@ export function WalletPage() {
                 />
               </div>
               <div className="grid gap-1.5">
-                <Label htmlFor="wd-amt">Amount (€)</Label>
+                <Label htmlFor="wd-amt">Amount ({symbol})</Label>
                 <Input
                   id="wd-amt"
                   type="number"
@@ -705,7 +743,7 @@ export function WalletPage() {
                     className={`font-mono tabular-nums ${h.pending ? "text-muted-foreground" : ""}`}
                   >
                     {h.type === "deposit" ? "+" : "−"}
-                    {(h.amount / 100).toFixed(2)} €
+                    {(h.amount / 100).toFixed(2)} {symbol}
                   </span>
                 </div>
               ))}

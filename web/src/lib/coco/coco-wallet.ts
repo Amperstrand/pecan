@@ -2,7 +2,13 @@ import { Amount } from "@cashu/cashu-ts"
 import { initializeCoco, type HistoryEntry, type Manager } from "@cashu/coco-core"
 import { IndexedDbRepositories } from "@cashu/coco-indexeddb"
 
-import { MINT_URL, UNIT, type DepositMethod } from "./branch-methods"
+import type { DepositMethod } from "./branch-methods"
+import {
+  activeCurrency,
+  mintUrl,
+  type Currency,
+} from "./currency"
+import { CURRENCIES } from "./currency"
 import type { CoreEvents } from "@cashu/coco-core"
 import { subscribeWalletLogging, walletLog } from "./wallet-log"
 
@@ -79,24 +85,39 @@ export function getCoco(): Promise<Manager> {
       coco.registerMintMethod("ln", new MintBranchHandler("ln", coco.keyRingService))
       coco.registerMintMethod("btc", new MintBranchHandler("btc", coco.keyRingService))
       subscribeWalletLogging(coco)
-      await coco.mint.addMint(MINT_URL(), { trusted: true })
+      for (const currency of Object.keys(CURRENCIES) as Currency[]) {
+        await coco.mint.addMint(mintUrl(currency), { trusted: true })
+      }
       return coco
     })()
   }
   return cocoInstance
 }
 
-export async function getBalanceCents(): Promise<number> {
+export async function getBalanceCents(
+  currency: Currency = activeCurrency(),
+): Promise<number> {
   const coco = await getCoco()
-  const balances = await coco.wallet.balances.byUnit({ mintUrls: [MINT_URL()] })
-  const nok = balances[UNIT]
-  return Number(nok?.spendable.toBigInt() ?? 0n)
+  const balances = await coco.wallet.balances.byUnit({
+    mintUrls: [mintUrl(currency)],
+  })
+  const unit = balances[currency]
+  return Number(unit?.spendable.toBigInt() ?? 0n)
 }
 
-export async function getHistory(limit = 15): Promise<HistoryRow[]> {
+export async function getHistory(
+  limit = 15,
+  currency: Currency = activeCurrency(),
+): Promise<HistoryRow[]> {
   const coco = await getCoco()
-  const entries = await coco.history.getPaginatedHistory(0, limit)
-  return entries.map(mapHistoryEntry).filter((row): row is HistoryRow => row !== null)
+  const entries = await coco.history.getPaginatedHistory(0, limit * 2)
+  // Rows carry no unit — filter by mint so amounts always match the
+  // displayed symbol (each currency is its own mint).
+  return entries
+    .filter((e) => e.mintUrl === mintUrl(currency))
+    .map(mapHistoryEntry)
+    .filter((row): row is HistoryRow => row !== null)
+    .slice(0, limit)
 }
 
 const STALE_AFTER_MS = 45 * 60 * 1000 // mint quotes expire at 30 min
@@ -129,15 +150,16 @@ export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
 export async function createDepositQuote(
   amountInput: number,
   method: DepositMethod = "branch",
+  currency: Currency = activeCurrency(),
 ): Promise<DepositQuote> {
   const coco = await getCoco()
   const amount = Math.round(amountInput * 100)
 
   const quote = await coco.quotes.mint.create({
-    mintUrl: MINT_URL(),
+    mintUrl: mintUrl(currency),
     method,
     amount: amount,
-    unit: UNIT,
+    unit: currency,
     description: "Wallet deposit",
     locked: true,
   })
@@ -163,7 +185,7 @@ export async function createDepositQuote(
 export async function pollAndMint(quoteId: string): Promise<boolean> {
   const coco = await getCoco()
   const operations = await coco.ops.mint.listByQuote({
-    mintUrl: MINT_URL(),
+    mintUrl: mintUrl(),
     quoteId,
   })
   const operation = operations[0]
@@ -180,15 +202,19 @@ export async function pollAndMint(quoteId: string): Promise<boolean> {
   }
 }
 
-export async function createWithdraw(amountInput: number, recipient: string): Promise<WithdrawResult> {
+export async function createWithdraw(
+  amountInput: number,
+  recipient: string,
+  currency: Currency = activeCurrency(),
+): Promise<WithdrawResult> {
   const coco = await getCoco()
   const amount = Math.round(amountInput * 100)
 
   const quote = await coco.quotes.melt.create({
-    mintUrl: MINT_URL(),
+    mintUrl: mintUrl(currency),
     method: "branch",
     methodData: { amount: Amount.from(amount), description: recipient },
-    unit: UNIT,
+    unit: currency,
   })
 
   const prepared = await coco.ops.melt.prepare({ quote })
@@ -229,7 +255,7 @@ export async function createWithdraw(amountInput: number, recipient: string): Pr
 export async function pollWithdraw(quoteId: string): Promise<string | null> {
   const coco = await getCoco()
   const operation = await coco.ops.melt.getByQuote({
-    mintUrl: MINT_URL(),
+    mintUrl: mintUrl(),
     quoteId,
   })
   if (!operation) return null
@@ -359,7 +385,7 @@ async function resumeStrandedWithdrawQuotes(
   try {
     stranded = (await coco.quotes.melt.listPending()).filter(
       (q) =>
-        q.mintUrl === MINT_URL() &&
+        q.mintUrl === mintUrl() &&
         q.method === "branch" &&
         q.quoteId &&
         !known.has(q.quoteId) &&
@@ -397,13 +423,13 @@ export async function getPendingDeposit(): Promise<DepositQuote | null> {
   const op = ops.find(
     (o) =>
       (o.state === "pending" || o.state === "executing") &&
-      o.unit === UNIT &&
+      o.unit === activeCurrency() &&
       o.createdAt > staleCutoff,
   )
   if (!op || !op.quoteId) return null
 
   const quote = await coco.quotes.mint.get({
-    mintUrl: MINT_URL(),
+    mintUrl: mintUrl(),
     quoteId: op.quoteId,
   })
   if (!quote) return null
@@ -437,7 +463,7 @@ export async function getPendingWithdraw(): Promise<{
   const op = ops.find(
     (o) =>
       (o.state === "executing" || o.state === "pending") &&
-      o.unit === UNIT &&
+      o.unit === activeCurrency() &&
       o.createdAt > staleCutoff,
   )
   if (!op || !op.quoteId) return null
@@ -487,9 +513,9 @@ export async function exportWalletDump(): Promise<WalletDump> {
     })
   return {
     exportedAt: new Date().toISOString(),
-    unit: UNIT,
+    unit: activeCurrency(),
     seed: window.localStorage.getItem(SEED_STORAGE_KEY),
-    mintUrl: MINT_URL(),
+    mintUrl: mintUrl(),
     proofs: stringify(await getAll("coco_cashu_proofs")),
     mintOperations: stringify(await getAll("coco_cashu_mint_operations")),
     meltOperations: stringify(await getAll("coco_cashu_melt_operations")),

@@ -5,7 +5,7 @@ import { expect, type Page } from "@playwright/test"
 // Teller API helpers (operator side of the branch method)
 // ---------------------------------------------------------------------------
 
-export async function apiLogin(page: Page): Promise<void> {
+export async function apiLogin(page: Page, base = ""): Promise<void> {
   const password = process.env.PECAN_ADMIN_PASSWORD
   if (!password) {
     throw new Error(
@@ -13,7 +13,7 @@ export async function apiLogin(page: Page): Promise<void> {
         "(scripts/e2e.sh does this) before running the suite",
     )
   }
-  const resp = await page.request.post(`/api/login`, {
+  const resp = await page.request.post(`${base}/api/login`, {
     headers: { "Content-Type": "application/json" },
     data: { username: "admin", password },
   })
@@ -24,8 +24,15 @@ export async function matchAndSettle(
   page: Page,
   tellerCode: string,
   notes: string,
-): Promise<{ id: string; kind: string; status: string; amount: number }> {
-  const matchResp = await page.request.post(`/api/quotes/match`, {
+  base = "",
+): Promise<{
+  id: string
+  kind: string
+  status: string
+  amount: number
+  unit?: string
+}> {
+  const matchResp = await page.request.post(`${base}/api/quotes/match`, {
     headers: { "Content-Type": "application/json" },
     data: { code: tellerCode },
   })
@@ -41,7 +48,7 @@ export async function matchAndSettle(
   const deadline = Date.now() + 30_000
   while (ticket.status === "waiting" && Date.now() < deadline) {
     await page.waitForTimeout(500)
-    const poll = await page.request.post(`/api/quotes/match`, {
+    const poll = await page.request.post(`${base}/api/quotes/match`, {
       headers: { "Content-Type": "application/json" },
       data: { code: tellerCode },
     })
@@ -51,7 +58,9 @@ export async function matchAndSettle(
     throw new Error(`ticket ${match.id} never left 'waiting' (wallet did not lock funds)`)
   }
 
-  const settleResp = await page.request.post(`/api/tickets/${match.id}/mark-paid`, {
+  const settleResp = await page.request.post(
+    `${base}/api/tickets/${match.id}/mark-paid`,
+    {
     headers: { "Content-Type": "application/json" },
     data: { notes },
   })
