@@ -124,6 +124,14 @@ export async function migrateLegacyMintUrls(
   if (window.localStorage.getItem(MIGRATION_FLAG)) return
   window.localStorage.setItem(MIGRATION_FLAG, "1")
   try {
+    // Never CREATE the database here: an empty version-1 shell would break
+    // Dexie's versioned upgrades on first open. Only migrate an existing one.
+    const exists = await indexedDB
+      .databases()
+      .then((dbs) => dbs.some((d) => d.name === "giftcard-coco-wallet"))
+      .catch(() => true)
+    if (!exists) return
+
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       const req = indexedDB.open("giftcard-coco-wallet")
       req.onsuccess = () => resolve(req.result)
