@@ -297,15 +297,12 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     const page = sharedPage!
     await apiLogin(page)
 
-    // €6 deposits split as 512+64+16+8 — no exact-500 subset exists, so a
-    // €5 withdraw MUST take the pre-swap path. This test runs last and
-    // inherits the suite's accumulated balance — assert relatively.
+    // Every denomination in circulation is an even power of two, so an
+    // odd-cent amount is unreachable by any subset sum: the €5.99 withdraw
+    // MUST overshoot and take the pre-swap path, whatever the inherited
+    // balance happens to be. This test runs last — assert relatively.
     const before = await readBalance(page)
-    await page.getByPlaceholder("5.00").fill("6")
-    await page.getByRole("button", { name: "Create deposit quote" }).click()
-    const depCode = await readTellerCode(page)
-    await matchAndSettle(page, depCode, "E2E swap-recovery funding")
-    await waitForBalance(page, before + 6)
+    expect(before).toBeGreaterThanOrEqual(6)
 
     // Let the mint process the swap, but never deliver the response — the
     // exact shape of a page death mid-swap: inputs burned and outputs
@@ -318,16 +315,21 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     })
 
     await page.getByPlaceholder("Phone or reference").fill("swap-kill")
-    await page.getByPlaceholder("1.00").fill("5")
+    await page.getByPlaceholder("1.00").fill("5.99")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     await page.waitForTimeout(4000)
     expect(swapKilled, "the swap request reached the mint").toBe(true)
 
     // Reload: recovery must detect the spent swap inputs and restore the
     // outputs from the mint (NUT-06 restore) instead of losing them.
+    // The deliberate abort above logged a net::ERR_FAILED console error —
+    // drop it before the error gate judges the wallet.
+    for (let i = walletErrors.length - 1; i >= 0; i--) {
+      if (walletErrors[i].includes("net::ERR_FAILED")) walletErrors.splice(i, 1)
+    }
     await page.reload()
     await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
-    await waitForBalance(page, before + 6, 90_000)
+    await waitForBalance(page, before, 90_000)
 
     // The aborted withdraw's ticket waits forever — void it so the ledger
     // stays clean, then prove a normal withdraw still works end to end.
@@ -360,7 +362,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     const ticket = await matchAndSettle(page, code, "E2E payout after restore")
     expect(ticket.status).toBe("paid")
     await waitForOpState(page, "melt", code, "finalized", 90_000)
-    await waitForBalance(page, before + 1, 90_000)
+    await waitForBalance(page, before - 5, 90_000)
     const change = await finalizedMeltChange(page, code)
     expect(change, "post-restore melt settles with zero change").toBe(0)
     expectNoWalletErrors(walletErrors)
