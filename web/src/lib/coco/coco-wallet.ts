@@ -445,6 +445,13 @@ async function resumeStrandedWithdrawQuotes(
   }
   for (const q of stranded) {
     try {
+      // A quote with ANY tracked operation (including rolled_back/failed)
+      // is not stranded — re-binding would double-track it.
+      const existing = await coco.ops.melt.listByQuote({
+        mintUrl: q.mintUrl,
+        quoteId: q.quoteId,
+      })
+      if (existing.length > 0) continue
       const op = await coco.ops.melt.prepare({
         quote: { mintUrl: q.mintUrl, quoteId: q.quoteId, method: "branch" },
       })
