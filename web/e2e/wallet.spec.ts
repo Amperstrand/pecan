@@ -18,6 +18,7 @@ import {
 } from "./helpers/wallet"
 
 const WALLET = "/eur-console/wallet"
+const EUR_BASE = "/eur-console"
 const DEPOSIT_AMOUNT = 5
 
 async function waitForBalance(page: Page, expected: number, timeout = 45_000) {
