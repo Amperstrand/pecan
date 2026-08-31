@@ -32,9 +32,11 @@ pub(crate) fn default_rate_url(unit: &str) -> String {
 }
 const RATE_TTL_SECS: u64 = 300;
 const POLL_INTERVAL_SECS: u64 = 3;
-/// Invoice lifetime on the node; the mint's quote TTL stays the wallet-facing
-/// deadline, so keep the invoice alive at least that long.
-pub const INVOICE_EXPIRY_SECS: u64 = 60;
+/// Invoice lifetime on the node; the mint's quote TTL (30 min) stays the
+/// wallet-facing deadline, so keep the invoice alive at least that long.
+/// A 60 s invoice expired before users could open a wallet and pay
+/// (prod: USD quote 01a05950, $100, expired unpaid after 60 s).
+pub const INVOICE_EXPIRY_SECS: u64 = 1800;
 
 /// NOK cents → invoice sats, rounded up, markup applied first so the mint
 /// always receives at least the quoted NOK value at the quoted rate.
