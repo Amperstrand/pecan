@@ -18,6 +18,9 @@ import {
 const WALLET = "/console/wallet"
 const USD_BASE = "/usd-console"
 
+const USD_PASSWORD =
+  process.env.PECAN_USD_ADMIN_PASSWORD ?? process.env.PECAN_ADMIN_PASSWORD
+
 let sharedPage: Page | null = null
 let walletErrors: string[] = []
 
@@ -50,7 +53,7 @@ test.describe("USD wallet E2E (teller + lightning)", () => {
 
   test("teller deposit: quote → teller settle → auto-claim", async () => {
     const page = sharedPage!
-    await apiLogin(page, USD_BASE)
+    await apiLogin(page, USD_BASE, USD_PASSWORD)
 
     const before = await readBalance(page)
     await page.getByPlaceholder("5.00").fill("5")
@@ -98,7 +101,7 @@ test.describe("USD wallet E2E (teller + lightning)", () => {
 
   test("withdraw: melt → teller payout → finalized, zero change", async () => {
     const page = sharedPage!
-    await apiLogin(page, USD_BASE)
+    await apiLogin(page, USD_BASE, USD_PASSWORD)
 
     const before = await readBalance(page)
     test.skip(before < 5, "insufficient USD balance for withdraw")

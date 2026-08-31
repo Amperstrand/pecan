@@ -5,14 +5,18 @@ import { expect, type Page } from "@playwright/test"
 // Teller API helpers (operator side of the branch method)
 // ---------------------------------------------------------------------------
 
-export async function apiLogin(page: Page, base = ""): Promise<void> {
-  const password = process.env.PECAN_ADMIN_PASSWORD
+export async function apiLogin(
+  page: Page,
+  base = "",
+  password = process.env.PECAN_ADMIN_PASSWORD,
+): Promise<void> {
   if (!password) {
     throw new Error(
       "PECAN_ADMIN_PASSWORD is not set — fetch the generated admin password " +
         "(scripts/e2e.sh does this) before running the suite",
     )
   }
+  void password
   const resp = await page.request.post(`${base}/api/login`, {
     headers: { "Content-Type": "application/json" },
     data: { username: "admin", password },

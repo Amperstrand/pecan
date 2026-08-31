@@ -15,4 +15,9 @@ if [ -z "$PW" ]; then
   exit 1
 fi
 export PECAN_ADMIN_PASSWORD="$PW"
+USD_PW=$(ssh root@46.224.104.12 \
+  "cat /opt/pecan-usd-config/initial-admin-password.txt 2>/dev/null" || true)
+if [ -n "$USD_PW" ]; then
+  export PECAN_USD_ADMIN_PASSWORD="$USD_PW"
+fi
 exec npx playwright test "$@"
