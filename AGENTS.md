@@ -9,10 +9,15 @@ cherry-pick from). If we want to contribute back, we create clean
 topic branches against upstream and submit PRs — we never force our
 deployment state into main.
 
-Cashu mint at https://giftcard.cashu.exchange (inr2, 46.224.104.12) running:
-`giftcard-mint-mintd-1` (cdk-mintd 0.18.0-rc.0, :8089), `pecan-pecan-1`
-(Rust teller/processor + embedded web dist, :50054/:9091), `pecan-sandbox-1`,
-caddy :443. Unit `eur`; amounts in cents internally, displayed as €.
+Cashu mint at https://giftcard.cashu.exchange (inr2, 46.224.104.12), TWO
+currency pairs behind one domain (issue #4): EUR at the root paths —
+`giftcard-mint-mintd-1` (cdk-mintd 0.18.0-rc.0, :8089) + `pecan-pecan-1`
+(:50054/:9091, console /console) — and USD at path prefixes —
+`giftcard-mint-usd-mintd-1` (:8097) + `pecan-usd-pecan-1` (:50055/:9093,
+mint /usd/v1/*, console /usd-console). Plus `pecan-sandbox-1`, caddy :443.
+Amounts are cents internally; one unit per pair (cdk rc.0 allows a single
+gRPC processor per mintd). NOTE: inr2 ports 8090/8094/8095 are squatted by
+an unrelated service — pick fresh ports for new pairs carefully.
 
 THREE minting rails, ONE processor (cdk-mintd allows a single gRPC
 processor; methods come from its get_settings): `branch` (teller code at
@@ -42,7 +47,12 @@ these without spending LLM tokens on browser driving.
   match-and-settle happen through the real HTTP API, waiting for the
   wallet's fund lock before paying out). With signet 0-conf the full suite
   runs in ~1 min; the onchain test adapts its timeout to block cadence if
-  confirmations are ever required again. The processor generates a RANDOM
+  confirmations are ever required again. The suite also gates on the
+  wallet's debug ring buffer (`web/src/lib/coco/wallet-log.ts`): no
+  warn-level entries per test, zero change on finalized teller melts, and
+  fund-lock release entries — failures attach the buffer as a Playwright
+  artifact; enable the console mirror with `?debug=1` or localStorage
+  `pecan-debug`. The processor generates a RANDOM
   admin password on first boot and persists it to
   /opt/pecan-config/initial-admin-password.txt (0600; delete after first
   login). /api/login is throttled: 10 failures per (IP, username) per 60s.
