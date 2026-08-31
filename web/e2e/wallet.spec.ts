@@ -1,149 +1,54 @@
-import { test, expect, type Page } from "@playwright/test"
+import { test, expect } from "@playwright/test"
 import {
   apiLogin,
   expectNoWalletErrors,
-  expectNoWalletWarnsSince,
   finalizedMeltChange,
-  fundLockReleaseEntry,
   matchAndSettle,
   payLightningInvoice,
   readBalance,
   readTellerCode,
   readWalletDb,
-  readWalletLog,
   sendOnchainFromExternal,
-  trackWalletErrors,
-  waitForDepositFormReset,
   waitForOpState,
 } from "./helpers/wallet"
+import {
+  DEPOSIT_AMOUNT,
+  defineWalletSuite,
+  type SuiteContext,
+} from "./helpers/wallet-suite"
 
-const WALLET = "/eur-console/wallet"
+// EUR deep tests: on-chain rail, one-way-mint guarantees, and the durable
+// saga scenarios (reload mid-withdraw, lost swap response) — currency-
+// independent wallet machinery exercised through the EUR pair.
 const EUR_BASE = "/eur-console"
-const DEPOSIT_AMOUNT = 5
 
-async function waitForBalance(page: Page, expected: number, timeout = 45_000) {
-  await expect
-    .poll(async () => readBalance(page), { timeout })
-    .toBeCloseTo(expected, 2)
-}
+defineWalletSuite(
+  {
+    currency: "eur",
+    consoleBase: EUR_BASE,
+    password: process.env.PECAN_ADMIN_PASSWORD ?? "",
+    name: "EUR wallet E2E (teller + lightning + on-chain)",
+  },
+  registerEurExtras,
+)
 
-let sharedPage: Page | null = null
-let walletErrors: string[] = []
-
-test.beforeAll(async ({ browser }) => {
-  const context = await browser.newContext({ ignoreHTTPSErrors: true })
-  await context.addInitScript(() => {
-    // mirror the wallet debug ring buffer into the console during e2e;
-    // console.debug does not trip the console-error gate
-    window.localStorage.setItem("pecan-debug", "1")
-  })
-  sharedPage = await context.newPage()
-  walletErrors = trackWalletErrors(sharedPage)
-})
-
-// Warn-gate cursor: warns are only attributed to the test that produced
-// them (timestamp-based so the ring buffer's 400-entry wrap cannot create
-// a false window).
-let warnCursorT = 0
-
-test.afterEach(async ({}, testInfo) => {
-  if (!sharedPage) return
-  const failed = testInfo.status !== testInfo.expectedStatus
-  let warnError: Error | null = null
-  if (!failed) {
-    try {
-      await expectNoWalletWarnsSince(sharedPage, warnCursorT)
-    } catch (e) {
-      warnError = e as Error
-    }
-  }
-  if (failed || warnError) {
-    const log = await readWalletLog(sharedPage).catch(() => [])
-    await testInfo.attach("wallet-log", {
-      body: JSON.stringify(log, null, 2),
-      contentType: "application/json",
-    })
-    if (warnError) throw warnError
-  }
-  const entries = await readWalletLog(sharedPage).catch(() => [])
-  if (entries.length > 0) {
-    warnCursorT = Math.max(warnCursorT, entries[entries.length - 1].t)
-  }
-})
-
-test.afterAll(async () => {
-  expectNoWalletErrors(walletErrors)
-  if (sharedPage) await sharedPage.close()
-})
-
-test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
-  test.describe.configure({ mode: "serial" })
-
-  test("fresh wallet loads (new browser context = fresh IndexedDB)", async () => {
-    const page = sharedPage!
-    await page.goto(WALLET)
-    await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
-    await readBalance(page)
-  })
-
-  test("teller deposit: quote → teller settle → auto-claim", async () => {
-    const page = sharedPage!
-    await apiLogin(page, EUR_BASE)
-
-    const before = await readBalance(page)
-    await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT))
-    await page.getByRole("button", { name: "Create deposit quote" }).click()
-
-    const code = await readTellerCode(page)
-    const ticket = await matchAndSettle(page, code, "E2E teller deposit", EUR_BASE)
-    expect(ticket.status).toBe("paid")
-    expect(ticket.kind).toBe("incoming")
-    expect(ticket.amount).toBe(DEPOSIT_AMOUNT * 100)
-
-    await waitForBalance(page, before + DEPOSIT_AMOUNT)
-    await waitForDepositFormReset(page)
-    expectNoWalletErrors(walletErrors)
-
-    await waitForOpState(page, "mint", code, "finalized")
-    const db = await readWalletDb(page)
-    expect(db.spendableSum).toBeGreaterThanOrEqual((before + DEPOSIT_AMOUNT) * 100)
-  })
-
-  test("lightning deposit: invoice → paid by hub node → auto-claim", async () => {
-    const page = sharedPage!
-    const before = await readBalance(page)
-
-    await page.getByRole("button", { name: "Lightning", exact: true }).click()
-    await page.getByPlaceholder("5.00").fill("1")
-    await page.getByRole("button", { name: "Create lightning invoice" }).click()
-
-    const invoiceBox = page.locator('p.font-mono:has-text("lntbs")')
-    await invoiceBox.waitFor({ state: "visible", timeout: 30_000 })
-    const invoice = (await invoiceBox.textContent())?.trim() ?? ""
-    expect(invoice.startsWith("lntbs")).toBeTruthy()
-
-    const preimage = payLightningInvoice(invoice)
-    expect(preimage).toHaveLength(64)
-
-    await waitForBalance(page, before + 1, 60_000)
-    await waitForDepositFormReset(page, "Create lightning invoice")
-    expectNoWalletErrors(walletErrors)
-  })
-
+function registerEurExtras(ctx: SuiteContext): void {
   test("onchain deposit: external wallet → mempool → settled → receipt", async () => {
+    const page = ctx.page()
     // Signet blocks can take 5-30+ minutes; adapt timeout to current cadence
-    const blocks = await sharedPage!.request.get(
-      "https://mempool.space/signet/api/blocks",
-    ).then((r) => r.json());
-    const now = Math.floor(Date.now() / 1000);
-    const intervals = blocks.slice(0, 3).map((b: { timestamp: number }, i: number) =>
-      i === 0 ? now - b.timestamp : blocks[i - 1].timestamp - b.timestamp,
-    );
-    const avgInterval = intervals.reduce((a: number, b: number) => a + b, 0) / intervals.length;
-    const timeout = Math.min(Math.ceil((avgInterval * 3) / 60) * 60_000, 1_800_000);
-    test.setTimeout(timeout + 60_000);
-    console.log(`  signet avg block interval: ${Math.round(avgInterval)}s → timeout ${Math.round(timeout / 1000)}s`);
-    const page = sharedPage!
+    const blocks = await page.request
+      .get("https://mempool.space/signet/api/blocks")
+      .then((r) => r.json())
+    const now = Math.floor(Date.now() / 1000)
+    const intervals = blocks.slice(0, 3).map(
+      (b: { timestamp: number }, i: number) =>
+        i === 0 ? now - b.timestamp : blocks[i - 1].timestamp - b.timestamp,
+    )
+    const avgInterval =
+      intervals.reduce((a: number, b: number) => a + b, 0) / intervals.length
+    const timeout = Math.min(Math.ceil((avgInterval * 3) / 60) * 60_000, 1_800_000)
+    test.setTimeout(timeout + 60_000)
+
     const before = await readBalance(page)
 
     await page.getByRole("button", { name: "On-chain", exact: true }).click()
@@ -167,8 +72,8 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     // At 0 required confirmations the rail settles on mempool visibility and
     // the deposit card can go straight to claimed — the "detected in mempool"
     // toast only reliably exists while confirmations are actually required.
-    const rail = await sharedPage!
-      .request.get(`/api/onchain-status/${address}`)
+    const rail = await page.request
+      .get(`${ctx.consoleBase}/api/onchain-status/${address}`)
       .then((r) => r.json())
     if (rail.required_confirmations >= 1) {
       await expect(
@@ -176,71 +81,48 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
       ).toBeVisible({ timeout: 30_000 })
     }
 
-    await waitForBalance(page, before + 50, timeout)
-    expectNoWalletErrors(walletErrors)
+    await expect
+      .poll(async () => readBalance(page), { timeout })
+      .toBeCloseTo(before + 50, 2)
+    expectNoWalletErrors(ctx.walletErrors())
   })
 
   test("one-way mint: ln and btc melt quotes are refused", async () => {
-    const page = sharedPage!
+    const page = ctx.page()
 
-    const lnMelt = await page.request.post("/v1/melt/quote/ln", {
+    const lnMelt = await page.request.post("/eur/v1/melt/quote/ln", {
       headers: { "Content-Type": "application/json" },
       data: { unit: "eur", amount: 500, request: "lntbs1test", rail: "ln" },
     })
     expect(lnMelt.status()).toBeGreaterThanOrEqual(400)
 
-    const btcMelt = await page.request.post("/v1/melt/quote/btc", {
+    const btcMelt = await page.request.post("/eur/v1/melt/quote/btc", {
       headers: { "Content-Type": "application/json" },
       data: { unit: "eur", amount: 500, request: "tb1qtest", rail: "btc" },
     })
     expect(btcMelt.status()).toBeGreaterThanOrEqual(400)
   })
 
-  test("withdraw: melt → teller payout → finalized, proofs released", async () => {
-    const page = sharedPage!
-    await apiLogin(page, EUR_BASE)
-
-    const before = await readBalance(page)
-    test.skip(before < DEPOSIT_AMOUNT, "insufficient balance for withdraw")
-
-    await page.getByPlaceholder("Phone or reference").fill("e2e-recipient")
-    await page.getByPlaceholder("1.00").fill(String(DEPOSIT_AMOUNT))
-    await page.getByRole("button", { name: "Send", exact: true }).click()
-
-    const code = await readTellerCode(page)
-    const ticket = await matchAndSettle(page, code, "E2E payout", EUR_BASE)
-    expect(ticket.status).toBe("paid")
-    expect(ticket.kind).toBe("outgoing")
-
-    await waitForBalance(page, before - DEPOSIT_AMOUNT, 60_000)
-    expectNoWalletErrors(walletErrors)
-
-    await waitForOpState(page, "melt", code, "finalized")
-    const lock = await fundLockReleaseEntry(page, code)
-    expect(lock, "fund-lock entry for this withdraw").toBeDefined()
-    expect(lock!.data?.state).toBe("pending")
-    const meltChange = await finalizedMeltChange(page, code)
-    expect(
-      meltChange,
-      "teller melts settle with zero change (exact-amount pre-swap)",
-    ).toBe(0)
-    const db = await readWalletDb(page)
-    expect(db.spendableSum).toBeLessThan(before * 100)
-  })
-
   test("withdraw survives reload (durable saga)", async () => {
-    const page = sharedPage!
-    await apiLogin(page, EUR_BASE)
+    const page = ctx.page()
+    await apiLogin(page, ctx.consoleBase)
+
     const start = await readBalance(page)
 
     await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT)).catch(() => {})
-    // fund if needed
     if (start < DEPOSIT_AMOUNT * 2) {
       await page.getByPlaceholder("5.00").fill(String(DEPOSIT_AMOUNT))
       await page.getByRole("button", { name: "Create deposit quote" }).click()
       const depCode = await readTellerCode(page)
-      await matchAndSettle(page, depCode, "E2E reload-saga funding", EUR_BASE)
-      await waitForBalance(page, start + DEPOSIT_AMOUNT)
+      await matchAndSettle(
+        page,
+        depCode,
+        "E2E reload-saga funding",
+        ctx.consoleBase,
+      )
+      await expect
+        .poll(async () => readBalance(page), { timeout: 45_000 })
+        .toBeCloseTo(start + DEPOSIT_AMOUNT, 2)
     }
 
     const before = await readBalance(page)
@@ -252,12 +134,19 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     await page.reload()
     await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
 
-    const ticket = await matchAndSettle(page, code, "E2E payout after reload", EUR_BASE)
+    const ticket = await matchAndSettle(
+      page,
+      code,
+      "E2E payout after reload",
+      ctx.consoleBase,
+    )
     expect(ticket.status).toBe("paid")
 
     await waitForOpState(page, "melt", code, "finalized", 90_000)
-    await waitForBalance(page, before - DEPOSIT_AMOUNT, 90_000)
-    expectNoWalletErrors(walletErrors)
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before - DEPOSIT_AMOUNT, 2)
+    expectNoWalletErrors(ctx.walletErrors())
 
     // The fund-lock log entry fired pre-reload and the ring buffer is page
     // memory; the code being readable before the reload already proves the
@@ -270,7 +159,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
   })
 
   test("self-custody state persists across reload", async () => {
-    const page = sharedPage!
+    const page = ctx.page()
     const before = await readBalance(page)
 
     await page.reload()
@@ -281,22 +170,24 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
 
     const db = await readWalletDb(page)
     expect(db.spendableSum).toBe(before * 100)
-    expectNoWalletErrors(walletErrors)
+    expectNoWalletErrors(ctx.walletErrors())
   })
 
   test("history shows finalized transactions without pending tags", async () => {
-    const page = sharedPage!
+    const page = ctx.page()
     const history = page.locator("div.flex.items-center.justify-between.py-1")
     await expect(history.first()).toBeVisible()
     const rows = await history.allTextContents()
-    expect(rows.some((r) => r.includes("Deposit") && !r.includes("pending"))).toBeTruthy()
+    expect(
+      rows.some((r) => r.includes("Deposit") && !r.includes("pending")),
+    ).toBeTruthy()
     expect(rows.some((r) => r.includes("Withdraw"))).toBeTruthy()
-    expectNoWalletErrors(walletErrors)
+    expectNoWalletErrors(ctx.walletErrors())
   })
 
   test("lost swap response recovers via mint restore", async () => {
-    const page = sharedPage!
-    await apiLogin(page, EUR_BASE)
+    const page = ctx.page()
+    await apiLogin(page, ctx.consoleBase)
 
     // Every denomination in circulation is an even power of two, so an
     // odd-cent amount is unreachable by any subset sum: the €5.99 withdraw
@@ -305,9 +196,6 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     const before = await readBalance(page)
     expect(before).toBeGreaterThanOrEqual(6)
 
-    // Let the mint process the swap, but never deliver the response — the
-    // exact shape of a page death mid-swap: inputs burned and outputs
-    // issued server-side, everything after lost.
     let swapKilled = false
     await page.route("**/v1/swap", async (route) => {
       await route.fetch()
@@ -325,12 +213,16 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     // outputs from the mint (NUT-06 restore) instead of losing them.
     // The deliberate abort above logged a net::ERR_FAILED console error —
     // drop it before the error gate judges the wallet.
-    for (let i = walletErrors.length - 1; i >= 0; i--) {
-      if (walletErrors[i].includes("net::ERR_FAILED")) walletErrors.splice(i, 1)
+    for (let i = ctx.walletErrors().length - 1; i >= 0; i--) {
+      if (ctx.walletErrors()[i].includes("net::ERR_FAILED")) {
+        ctx.walletErrors().splice(i, 1)
+      }
     }
     await page.reload()
     await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
-    await waitForBalance(page, before, 90_000)
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before, 2)
 
     // The aborted withdraw's ticket waits forever — void it so the ledger
     // stays clean, then prove a normal withdraw still works end to end.
@@ -339,7 +231,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
       const code = ((await killCode.textContent()) ?? "").trim()
       if (/^[A-Z0-9]{6}$/.test(code)) {
         const match = await page.request
-          .post(`${EUR_BASE}/api/quotes/match`, {
+          .post(`${ctx.consoleBase}/api/quotes/match`, {
             headers: { "Content-Type": "application/json" },
             data: { code },
           })
@@ -347,7 +239,7 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
           .catch(() => null)
         if (match?.id) {
           await page.request
-            .post(`${EUR_BASE}/api/tickets/${match.id}/mark-failed`, {
+            .post(`${ctx.consoleBase}/api/tickets/${match.id}/mark-failed`, {
               headers: { "Content-Type": "application/json" },
               data: { notes: "E2E swap-kill cleanup" },
             })
@@ -360,12 +252,19 @@ test.describe("EUR wallet E2E (teller + lightning + on-chain)", () => {
     await page.getByPlaceholder("1.00").fill("5")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     const code = await readTellerCode(page)
-    const ticket = await matchAndSettle(page, code, "E2E payout after restore", EUR_BASE)
+    const ticket = await matchAndSettle(
+      page,
+      code,
+      "E2E payout after restore",
+      ctx.consoleBase,
+    )
     expect(ticket.status).toBe("paid")
     await waitForOpState(page, "melt", code, "finalized", 90_000)
-    await waitForBalance(page, before - 5, 90_000)
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before - 5, 2)
     const change = await finalizedMeltChange(page, code)
     expect(change, "post-restore melt settles with zero change").toBe(0)
-    expectNoWalletErrors(walletErrors)
+    expectNoWalletErrors(ctx.walletErrors())
   })
-})
+}

@@ -91,12 +91,25 @@ export function subscribeWalletLogging(
   for (const event of OP_EVENTS) {
     bus.on(event, (payload) => {
       const op = payload as {
-        operation?: { id?: string; state?: string }
+        operation?: {
+          id?: string
+          quoteId?: string
+          state?: string
+          changeAmount?: { toString(): string }
+          effectiveFee?: { toString(): string }
+        }
         quote?: { quoteId?: string; state?: string }
       }
-      const id = op?.operation?.id ?? op?.quote?.quoteId
-      const state = op?.operation?.state ?? op?.quote?.state
-      walletLog("debug", event satisfies OpEvent, id ? { id, state } : payload)
+      const o = op?.operation
+      walletLog("debug", event satisfies OpEvent, {
+        id: o?.id,
+        quoteId: o?.quoteId ?? op?.quote?.quoteId,
+        state: o?.state ?? op?.quote?.state,
+        ...(o?.changeAmount != null
+          ? { change: String(o.changeAmount) }
+          : {}),
+        ...(o?.effectiveFee != null ? { fee: String(o.effectiveFee) } : {}),
+      })
     })
   }
 }

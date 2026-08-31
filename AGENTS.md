@@ -9,15 +9,23 @@ cherry-pick from). If we want to contribute back, we create clean
 topic branches against upstream and submit PRs — we never force our
 deployment state into main.
 
-Cashu mint at https://giftcard.cashu.exchange (inr2, 46.224.104.12), TWO
-currency pairs behind one domain (issue #4): EUR at the root paths —
-`giftcard-mint-mintd-1` (cdk-mintd 0.18.0-rc.0, :8089) + `pecan-pecan-1`
-(:50054/:9091, console /console) — and USD at path prefixes —
-`giftcard-mint-usd-mintd-1` (:8097) + `pecan-usd-pecan-1` (:50055/:9093,
-mint /usd/v1/*, console /usd-console). Plus `pecan-sandbox-1`, caddy :443.
-Amounts are cents internally; one unit per pair (cdk rc.0 allows a single
-gRPC processor per mintd). NOTE: inr2 ports 8090/8094/8095 are squatted by
-an unrelated service — pick fresh ports for new pairs carefully.
+Cashu mint at https://giftcard.cashu.exchange (inr2, 46.224.104.12).
+Multi-currency (issue #4): one (mintd + pecan) pair per currency, all
+behind one domain with the path convention `{currency}/v1/*` for the mint
+and `{currency}-console/*` for its pecan console:
+
+| Pair | Mintd | Pecan | Paths |
+|---|---|---|---|
+| EUR | `giftcard-mint-mintd-1` :8089 | `pecan-pecan-1` :50054/:9091 | `/eur/v1/*`, `/eur-console/*` |
+| USD | `giftcard-mint-usd-mintd-1` :8097 | `pecan-usd-pecan-1` :50055/:9093 | `/usd/v1/*`, `/usd-console/*` |
+
+The ROOT `/v1` and `/console` are RESERVED for a future sats pair
+(`/v1/*` answers 404 until then). Amounts are cents internally; one unit
+per pair (cdk rc.0 allows a single gRPC processor per mintd). Adding a
+currency = mintd (own mnemonic, `config init --work-dir`) + pecan
+(INITIAL_UNIT env) + two caddy handles + one `CURRENCIES` entry in
+`web/src/lib/coco/currency.ts`. NOTE: inr2 ports 8090/8094/8095 are
+squatted by an unrelated service — pick fresh ports for new pairs.
 
 THREE minting rails, ONE processor (cdk-mintd allows a single gRPC
 processor; methods come from its get_settings): `branch` (teller code at
@@ -42,10 +50,14 @@ MUST end up as a Playwright test under `web/e2e/` (helpers in
 MUST end up as a script under `scripts/`. Future sessions (and CI) re-run
 these without spending LLM tokens on browser driving.
 
-- Browser wallet tests: `scripts/e2e.sh` (fetches the generated admin
-  password from the server and runs Playwright against prod; teller
-  match-and-settle happen through the real HTTP API, waiting for the
-  wallet's fund lock before paying out). With signet 0-conf the full suite
+- Browser wallet tests: `scripts/e2e.sh` (fetches BOTH generated admin
+  passwords — EUR and USD — from the server and runs Playwright against
+  prod; teller match-and-settle happen through the real HTTP API, waiting
+  for the wallet's fund lock before paying out). The per-currency core
+  (teller/lightning deposits, zero-change withdraw) lives in
+  `web/e2e/helpers/wallet-suite.ts` and runs once per currency via
+  `defineWalletSuite`; deep saga tests (onchain, reload, swap-kill) are
+  EUR extras in `wallet.spec.ts`; USD adds the switcher check. With signet 0-conf the full suite
   runs in ~1 min; the onchain test adapts its timeout to block cadence if
   confirmations are ever required again. The suite also gates on the
   wallet's debug ring buffer (`web/src/lib/coco/wallet-log.ts`): no
@@ -92,8 +104,12 @@ these without spending LLM tokens on browser driving.
 - `web/vendor/` — pinned tarballs of the `Amperstrand/coco` fork
   (github.com/Amperstrand/coco, branch `main`, dist committed; see the
   fork README's branch table for the upstream-PR pipeline).
-- `web/src/pages/wallet.tsx` — coco wallet UI (`/console/wallet`);
-  `wallet-classic.tsx` — legacy cashu-ts wallet (`/console/wallet-classic`).
+- `web/src/lib/coco/currency.ts` — the currency registry: mint URL,
+  console path, and symbol derive from the active currency (localStorage
+  `pecan-currency`, default eur). Both mints are registered on one seed
+  (keyset-scoped derivation — no cross-mint secret reuse).
+- `web/src/pages/wallet.tsx` — coco wallet UI (`/eur-console/wallet`),
+  EUR/USD switcher in the header.
 - `processor/` — Rust cdk payment processor for `branch` (gRPC to mintd) +
   teller/operator web UI. SPA routes served from `processor/src/web.rs`.
   `processor/src/onchain.rs` — btc rail (esplora poller; pure

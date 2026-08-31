@@ -376,6 +376,9 @@ async function resumeStrandedWithdrawQuotes(
       .filter((id): id is string => typeof id === "string"),
   )
   const staleCutoff = Date.now() - 45 * 60 * 1000
+  const knownMints = new Set(
+    (Object.keys(CURRENCIES) as Currency[]).map((c) => mintUrl(c)),
+  )
   let stranded: Array<{
     mintUrl: string
     quoteId: string
@@ -385,7 +388,7 @@ async function resumeStrandedWithdrawQuotes(
   try {
     stranded = (await coco.quotes.melt.listPending()).filter(
       (q) =>
-        q.mintUrl === mintUrl() &&
+        knownMints.has(q.mintUrl) &&
         q.method === "branch" &&
         q.quoteId &&
         !known.has(q.quoteId) &&

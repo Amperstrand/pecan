@@ -162,6 +162,56 @@ The Lightning analogue of the static-pubkey idea — **BOLT-12 offers**
 offer id) — is the right place to use this pattern if the ln rail adopts
 bolt12 (cdk already implements it).
 
+## Multi-currency architecture (issue #4)
+
+One (cdk-mintd + pecan) pair per currency behind a single domain. cdk rc.0
+binds one gRPC processor per mintd and one unit per processor, so EUR and
+USD are separate stacks; coco 2 is multi-mint natively (one seed safely
+serves every mint — output secrets derive per (seed, counter, keysetId)
+and keyset IDs are mint-specific).
+
+Path convention — uniform for every currency, root reserved for sats:
+
+| | EUR pair | USD pair | (future) sats |
+|---|---|---|---|
+| Mint API | `/eur/v1/*` → :8089 | `/usd/v1/*` → :8097 | `/v1/*` (404 until it exists) |
+| Pecan console | `/eur-console/*` → :9091 | `/usd-console/*` → :9093 | `/console/*` |
+
+caddy strips the currency prefix before proxying, so each stack sees root
+paths and stays prefix-agnostic. The wallet SPA is served by whichever
+console you load (vite base `./` keeps assets prefix-relative); the wallet
+registry (`web/src/lib/coco/currency.ts`) maps currency → mint URL +
+console path + symbol, registers every mint on boot, and drives all
+unit-scoped calls (quotes, balances, history-by-mint, onchain-status).
+
+Unit itself stays spec-native throughout — NUT-02 keysets are unit-scoped,
+NUT-04/05 quotes carry `unit`, token v4 embeds it. The mint-URL-per-
+currency mapping is purely the cdk rc.0 constraint; a cdk upgrade allowing
+per-method units would collapse the pairs into one multi-keyset mint with
+no wallet-visible change (the switcher already thinks in currencies).
+
+Adding a currency: new mintd (own mnemonic; `config init --work-dir /data
+--file /data/mint.toml` on fresh data), new pecan compose (INITIAL_UNIT,
+own ports/dirs; the CLN socket and esplora are shared — invoices and
+addresses are currency-agnostic sats), two caddy handles, one CURRENCIES
+entry. Pick ports carefully: 8090/8094/8095 on inr2 are squatted by an
+unrelated service.
+
+Breaking-change note: moving a live pair to a new path orphans wallets
+that baked the old mint URL into their proofs (signet test money — the
+force-clear escape hatch exists, and re-adding the new URL sees the same
+balance via the unchanged keysets).
+
+**One wallet, not per-currency pages** (deliberate): a single origin means
+a single localStorage/IndexedDB and therefore a single seed backing every
+currency — "separate pages" would be cosmetic separation over shared
+state. The in-page switcher keeps one backup covering all balances, gives
+instant currency swaps, and the landing flow preserves the last-used
+currency (localStorage), so a USD user landing on `/` arrives in the
+wallet with USD already active. Cross-currency balance glanceability beats
+per-currency navigation; the cost (history/pending-cards filtered to the
+active currency) is documented above.
+
 ## Melt saga (teller withdraws)
 
 Withdraws are a durable saga across wallet reloads. Four hard constraints

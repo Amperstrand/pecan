@@ -72,7 +72,3 @@ declare module "@cashu/coco-core/operations/mint" {
 export const BRANCH_METHOD = "branch" as const
 export const LN_METHOD = "ln" as const
 export type DepositMethod = "branch" | "ln" | "btc"
-// Multi-currency: see ./currency.ts — mint URL and unit derive from the
-// active currency; these legacy exports remain for the classic wallet.
-export const MINT_URL = (): string => window.location.origin
-export const UNIT = "eur"
