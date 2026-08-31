@@ -15,7 +15,7 @@ import {
 // USD twin (issue #4): the same wallet UI against the /usd mint pair —
 // its pecan console lives under /usd-console. e2e.sh fetches the EUR admin
 // password; USD's lives at /opt/pecan-usd-config on the server.
-const WALLET = "/console/wallet"
+const WALLET = "/eur-console/wallet"
 const USD_BASE = "/usd-console"
 
 const USD_PASSWORD =
