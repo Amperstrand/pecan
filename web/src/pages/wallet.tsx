@@ -42,6 +42,10 @@ import {
   setActiveCurrency,
   type Currency,
 } from "@/lib/coco/currency"
+import {
+  validateDepositAmount,
+  validateWithdrawAmount,
+} from "@/lib/amount-validation"
 
 type DepositState =
   | { phase: "idle" }
@@ -377,8 +381,16 @@ export function WalletPage() {
   }
 
   const startDeposit = async () => {
+    const invalidAmount = validateDepositAmount(
+      depositAmount,
+      depositMethod,
+      CURRENCIES[currency].symbol,
+    )
+    if (invalidAmount) {
+      setDepositState({ phase: "error", message: invalidAmount })
+      return
+    }
     const amount = parseFloat(depositAmount)
-    if (!amount || amount < 1 || amount > 1000) return
     setDepositState({ phase: "creating" })
     try {
       const quote = await createDepositQuote(amount, depositMethod)
@@ -405,9 +417,23 @@ export function WalletPage() {
   }
 
   const startWithdraw = async () => {
+    const invalidAmount = validateWithdrawAmount(
+      withdrawAmount,
+      CURRENCIES[currency].symbol,
+      balance,
+    )
+    if (invalidAmount) {
+      setWithdrawState({ phase: "error", message: invalidAmount })
+      return
+    }
+    if (!withdrawRecipient.trim()) {
+      setWithdrawState({
+        phase: "error",
+        message: "Enter a phone number or reference for the teller.",
+      })
+      return
+    }
     const amount = parseFloat(withdrawAmount)
-    if (!amount || amount < 1) return
-    if (!withdrawRecipient.trim()) return
     setWithdrawState({ phase: "creating" })
     try {
       const result = await createWithdraw(amount, withdrawRecipient.trim())
@@ -427,7 +453,17 @@ export function WalletPage() {
       return () => clearInterval(interval)
     } catch (e) {
       console.error("withdraw failed:", e)
-      setWithdrawState({ phase: "error", message: String(e) })
+      const msg = e instanceof Error ? e.message : String(e)
+      // pass the server's message through, adding context only where cdk
+      // flattens it into something vague
+      let helpful = msg
+      if (msg.includes("Amount out of limit")) {
+        helpful = `The mint rejected this amount — withdrawals are limited to 1–1000 ${CURRENCIES[currency].symbol}.`
+      } else if (msg.toLowerCase().includes("insufficient")) {
+        helpful =
+          "Not enough funds for this withdrawal (the balance may be stale — try again)."
+      }
+      setWithdrawState({ phase: "error", message: helpful })
     }
   }
 
@@ -570,7 +606,15 @@ export function WalletPage() {
               <Loader2 className="size-4 animate-spin" /> Creating quote…
             </div>
           ) : (
-            <p className="text-sm text-destructive">{depositState.message}</p>
+            <div className="grid gap-2">
+              <p className="text-sm text-destructive">{depositState.message}</p>
+              <Button
+                variant="outline"
+                onClick={() => setDepositState({ phase: "idle" })}
+              >
+                Try again
+              </Button>
+            </div>
           )}
 
           {pendingDeposits.map((q) => {
@@ -724,7 +768,15 @@ export function WalletPage() {
               </div>
             </div>
           ) : (
-            <p className="text-sm text-destructive">{withdrawState.message}</p>
+            <div className="grid gap-2">
+              <p className="text-sm text-destructive">{withdrawState.message}</p>
+              <Button
+                variant="outline"
+                onClick={() => setWithdrawState({ phase: "idle" })}
+              >
+                Try again
+              </Button>
+            </div>
           )}
         </CardContent>
       </Card>

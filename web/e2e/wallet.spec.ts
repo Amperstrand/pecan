@@ -348,4 +348,26 @@ function registerEurExtras(ctx: SuiteContext): void {
     expect(change, "post-restore melt settles with zero change").toBe(0)
     expectNoWalletErrors(ctx.walletErrors())
   })
+
+  test("amount validation errors are visible client-side", async () => {
+    const page = ctx.page()
+
+    // above the mint max — used to fail silently (the 1231234 regression)
+    await page.getByPlaceholder("5.00").fill("1231234")
+    await page.getByRole("button", { name: "Create deposit quote" }).click()
+    await expect(page.getByText("not supported (mint limit)")).toBeVisible()
+
+    await page.getByRole("button", { name: "Try again" }).click()
+    await page.getByRole("button", { name: "On-chain", exact: true }).click()
+    await page.getByPlaceholder("5.00").fill("10")
+    await page.getByRole("button", { name: "Create on-chain address" }).click()
+    await expect(page.getByText("at least 50 €")).toBeVisible()
+
+    // refused client-side: no quote is created, no teller ticket appears
+    await page.getByRole("button", { name: "Try again" }).click()
+    await page.getByPlaceholder("Phone or reference").fill("e2e-validation")
+    await page.getByPlaceholder("1.00").fill("2000")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(page.getByText("not supported (mint limit)")).toBeVisible()
+  })
 }
