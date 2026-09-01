@@ -36,9 +36,25 @@ for payer in cln-hub-signet cln-vls-signet cln-nostr-signet; do
   amt=$need
   [ "$amt" -gt "$avail" ] && amt=$avail
   addr=$(docker exec "$payer" lightning-cli --network=signet newaddr bech32 |
-    python3 -c "import sys,json; print(json.load(sys.stdin)['bech32'])")
-  txid=$(docker exec cln-swap-signet lightning-cli --network=signet \
-    withdraw "$addr" "${amt}sat" normal |
-    python3 -c "import sys,json; print(json.load(sys.stdin)['txid'])")
+    python3 -c "import sys,json; print(json.load(sys.stdin)['bech32'])" 2>/dev/null) || addr=""
+  if [ -z "$addr" ]; then
+    echo "  $payer: no address from RPC — skipping"
+    continue
+  fi
+  # A failed withdraw (insufficient funds, RPC error) must skip the payer,
+  # not abort the whole refill loop — the reservoir keeps its remaining
+  # funds for the next cron pass.
+  txout=$(docker exec cln-swap-signet lightning-cli --network=signet \
+    withdraw "$addr" "${amt}sat" normal 2>&1) || txout=""
+  txid=$(printf '%s' "$txout" | python3 -c "
+import sys, json
+try:
+    print(json.load(sys.stdin)['txid'])
+except Exception:
+    print('')" 2>/dev/null)
+  if [ -z "$txid" ]; then
+    echo "  $payer: withdraw failed ($(printf '%s' "$txout" | head -c 160)) — skipping"
+    continue
+  fi
   echo "  topped $payer +${amt}sat (had $free) txid=$txid"
 done
