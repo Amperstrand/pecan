@@ -114,6 +114,16 @@ function loadSeed(): Uint8Array {
   return seed
 }
 
+/**
+ * Materializes the wallet seed in localStorage and returns it as hex.
+ * coco's seedGetter is lazy — an empty wallet never derives keys, so the
+ * seed only exists on disk once something calls this (backup export is
+ * the one place that must not depend on that laziness).
+ */
+export function ensureWalletSeed(): string {
+  return toHex(loadSeed())
+}
+
 export function getCoco(): Promise<Manager> {
   if (cocoInstance === null) {
     cocoInstance = (async () => {
@@ -552,15 +562,46 @@ export async function getPendingWithdraw(): Promise<{
 export const DEV_WALLET_TOOLS = true
 
 /**
- * Permanently deletes all wallet state (IndexedDB + localStorage seed).
- * The page must reload afterward — the wallet is unusable until then.
+ * Permanently deletes all wallet state (every IndexedDB store + the
+ * localStorage seed). The page must reload afterward — the wallet is
+ * unusable until then.
+ *
+ * Clears stores instead of deleteDatabase: an open Dexie connection
+ * blocks deletion (the resolve-on-blocked dance below would leave the
+ * deletion racing the next page's open — observed as a wallet that
+ * boots to a blank page under soak). Clearing through a parallel raw
+ * connection has no such race; the schema itself is harmless to keep.
  */
 export async function forceClearWallet(): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const req = indexedDB.deleteDatabase("giftcard-coco-wallet")
-    req.onsuccess = () => resolve()
-    req.onerror = () => resolve()
-    req.onblocked = () => resolve()
+  await getCoco()
+  await new Promise<void>((resolve, reject) => {
+    const req = indexedDB.open("giftcard-coco-wallet")
+    req.onsuccess = () => {
+      const db = req.result
+      const stores = Array.from(db.objectStoreNames)
+      if (stores.length === 0) {
+        db.close()
+        resolve()
+        return
+      }
+      const tx = db.transaction(stores, "readwrite")
+      tx.oncomplete = () => {
+        db.close()
+        resolve()
+      }
+      tx.onerror = () => {
+        db.close()
+        reject(tx.error ?? new Error("wallet clear failed"))
+      }
+      tx.onabort = () => {
+        db.close()
+        reject(tx.error ?? new Error("wallet clear aborted"))
+      }
+      for (const store of stores) {
+        tx.objectStore(store).clear()
+      }
+    }
+    req.onerror = () => reject(req.error ?? new Error("wallet storage did not open"))
   })
   window.localStorage.removeItem(SEED_STORAGE_KEY)
 }

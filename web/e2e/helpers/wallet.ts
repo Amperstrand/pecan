@@ -162,14 +162,6 @@ export function sendOnchainFromExternal(address: string, sat: number): string {
 // Wallet UI helpers (coco wallet at /console/wallet)
 // ---------------------------------------------------------------------------
 
-export async function clearWalletDb(page: Page): Promise<void> {
-  await page.evaluate(async () => {
-    indexedDB.deleteDatabase("giftcard-coco-wallet")
-    localStorage.removeItem("giftcard-coco-seed-v1")
-  })
-  await page.reload()
-}
-
 export async function readBalance(page: Page): Promise<number> {
   // Balance renders as a sibling of the "Balance" label inside a card header;
   // it shows "… €" until the wallet initializes, so retry until a number

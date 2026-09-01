@@ -13,7 +13,7 @@
 // skipped.
 
 import { activeCurrency, mintUrl } from "./currency"
-import { getCoco, SEED_STORAGE_KEY } from "./coco-wallet"
+import { ensureWalletSeed, getCoco, SEED_STORAGE_KEY } from "./coco-wallet"
 
 export interface WalletDump {
   formatVersion: 2
@@ -84,6 +84,10 @@ export function reviveRow(row: Record<string, unknown>): Record<string, unknown>
 }
 
 export async function exportWalletDump(): Promise<WalletDump> {
+  // Guarantees the Dexie schema exists (an export before first boot
+  // would otherwise hit a store-less database).
+  await getCoco()
+  const seed = ensureWalletSeed()
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open("giftcard-coco-wallet")
     req.onsuccess = () => resolve(req.result)
@@ -108,7 +112,7 @@ export async function exportWalletDump(): Promise<WalletDump> {
     formatVersion: 2,
     exportedAt: new Date().toISOString(),
     unit: activeCurrency(),
-    seed: window.localStorage.getItem(SEED_STORAGE_KEY),
+    seed,
     mintUrl: mintUrl(),
     stores,
   }
