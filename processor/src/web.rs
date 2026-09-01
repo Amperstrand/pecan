@@ -123,6 +123,7 @@ pub fn router(state: WebState) -> Router {
         .route("/events", get(sse_events))
         .route("/assets/{*path}", get(spa_asset))
         .route("/favicon.svg", get(spa_favicon))
+        .route("/manifest.webmanifest", get(spa_manifest))
         // Self-hosted fonts (embedded in the binary so the UI works offline / behind
         // content blockers).
         .route("/static/inter.woff2", get(font_inter))
@@ -242,6 +243,13 @@ async fn spa_favicon() -> Response {
     match read_spa_file("favicon.svg").await {
         Ok(bytes) => bytes_response(bytes, "image/svg+xml"),
         Err(_) => (StatusCode::NOT_FOUND, "asset not found").into_response(),
+    }
+}
+
+async fn spa_manifest() -> Response {
+    match read_spa_file("manifest.webmanifest").await {
+        Ok(bytes) => bytes_response(bytes, "application/manifest+json"),
+        Err(_) => (StatusCode::NOT_FOUND, "manifest not found").into_response(),
     }
 }
 
