@@ -419,4 +419,56 @@ function registerEurExtras(ctx: SuiteContext): void {
       .toBeCloseTo(before - 4, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
+
+  test("backup restores a wiped wallet", async () => {
+    const page = ctx.page()
+    const before = await readBalance(page)
+    expect(before).toBeGreaterThan(0)
+
+    const [backup] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Download backup (JSON)" }).click(),
+    ])
+    const backupPath = await backup.path()
+    expect(backupPath).toBeTruthy()
+
+    // The dev-tools force clear downloads its own dump first, then wipes
+    // IndexedDB + seed and reloads into a fresh wallet.
+    const [clearDump] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Force clear wallet" }).click(),
+    ])
+    await clearDump.path()
+    await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({
+      timeout: 30_000,
+    })
+    await expect
+      .poll(async () => readBalance(page), { timeout: 30_000 })
+      .toBe(0)
+
+    await page.setInputFiles("#restore-file", backupPath!)
+    await page.getByRole("button", { name: "Restore backup" }).click()
+    await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({
+      timeout: 30_000,
+    })
+    await expect
+      .poll(async () => readBalance(page), { timeout: 30_000 })
+      .toBeCloseTo(before, 2)
+
+    const db = await readWalletDb(page)
+    expect(db.spendableSum).toBe(before * 100)
+    expectNoWalletErrors(ctx.walletErrors())
+  })
+
+  test("opening the wallet in a second tab warns both tabs", async () => {
+    const page = ctx.page()
+    const page2 = await page.context().newPage()
+    await page2.goto(page.url())
+
+    await expect(page2.getByRole("alert")).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole("alert")).toBeVisible({ timeout: 15_000 })
+
+    await page2.close()
+    expectNoWalletErrors(ctx.walletErrors())
+  })
 }

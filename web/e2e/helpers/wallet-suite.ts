@@ -154,6 +154,9 @@ export function defineWalletSuite(
       const invoice = (await invoiceBox.textContent())?.trim() ?? ""
       expect(invoice.startsWith("lntbs")).toBeTruthy()
 
+      // The card shows the invoice's remaining life (30 min TTL).
+      await expect(page.getByText(/^Expires in \d+:\d{2}/)).toBeVisible()
+
       const preimage = payLightningInvoice(invoice)
       expect(preimage).toHaveLength(64)
 
