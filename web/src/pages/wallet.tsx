@@ -468,6 +468,11 @@ export function WalletPage() {
       } else if (msg.toLowerCase().includes("insufficient")) {
         helpful =
           "Not enough funds for this withdrawal (the balance may be stale — try again)."
+      } else if (msg.includes("Unit unsupported")) {
+        // cdk flattens any melt-quote refusal (including payout-rail
+        // gates) into this generic text — name the likely cause.
+        helpful =
+          "The mint refused this payout destination — the rail may not be enabled here. Try a plain destination for the teller."
       }
       setWithdrawState({ phase: "error", message: helpful })
     }

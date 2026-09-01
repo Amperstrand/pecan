@@ -48,6 +48,19 @@ for pair in eur usd; do
     fi
   done
 
+  # Payout-rail gate: an envelope naming a rail the deployment does not
+  # operate must refuse at quote time — state-free, no ticket can exist.
+  status=$(curl -sk -m 10 -o /dev/null -w "%{http_code}" \
+    -X POST "$URL/$pair/v1/melt/quote/branch" \
+    -H "Content-Type: application/json" \
+    -d "{\"unit\": \"$pair\", \"amount\": 500, \"request\": \"nonexistent-probe:x\", \"method\": \"branch\"}")
+  if [ "$status" -ge 400 ] 2>/dev/null; then
+    echo "  ok   unoperated payout rail refused ($status)"
+  else
+    echo "  FAIL unoperated payout rail — expected 4xx, got $status"
+    fail=$((fail + 1))
+  fi
+
   check "wallet SPA served" 200 "$(code "$URL/$pair-console/wallet")"
   ct=$(curl -sk -m 10 -o /dev/null -w "%{http_code} %{content_type}" \
     "$URL/$pair-console/manifest.webmanifest")

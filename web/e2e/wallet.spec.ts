@@ -10,6 +10,7 @@ import {
   readWalletDb,
   sendOnchainFromExternal,
   settleWithSimTeller,
+  settleWithPayoutSim,
   waitForOpState,
 } from "./helpers/wallet"
 import {
@@ -576,6 +577,74 @@ function registerEurExtras(ctx: SuiteContext): void {
       .poll(async () => readBalance(page), { timeout: 60_000 })
       .toBeCloseTo(eurBefore + 1, 2)
     await expect(page.locator('[data-testid="deposit-card"]')).toHaveCount(0)
+    expectNoWalletErrors(ctx.walletErrors())
+  })
+
+  test("generic payout rail: sim adapter settles its rail and only its rail", async () => {
+    test.setTimeout(180_000)
+    const page = ctx.page()
+    await apiLogin(page, ctx.consoleBase)
+    const before = await readBalance(page)
+    const origin = new URL(page.url()).origin
+
+    // Enveloped destination routes to the sim adapter, which settles it.
+    await page.getByPlaceholder("Phone or reference").fill("sim:e2e-rail-alias")
+    await page.getByPlaceholder("1.00").fill("2")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const railCode = await readTellerCode(page)
+    const settled = settleWithPayoutSim(railCode, origin, ctx.consoleBase, 5000)
+    expect(settled.result).toBe("settled")
+    expect(settled.destination).toBe("e2e-rail-alias")
+    await waitForOpState(page, "melt", railCode, "finalized", 90_000)
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before - 2, 2)
+
+    // The adapter must refuse a plain teller ticket (wrong rail, no
+    // action) — and a human can still settle what it abstained from.
+    await page.getByPlaceholder("Phone or reference").fill("e2e-plain-dest")
+    await page.getByPlaceholder("1.00").fill("1")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const plainCode = await readTellerCode(page)
+    const wrongRail = settleWithPayoutSim(plainCode, origin, ctx.consoleBase, 5000)
+    expect(wrongRail.result).toBe("wrong-rail")
+    expect(wrongRail.ticket_rail).toBeNull()
+    const ticket = await matchAndSettle(
+      page,
+      plainCode,
+      "human settles what the adapter refused",
+      ctx.consoleBase,
+    )
+    expect(ticket.status).toBe("paid")
+    await waitForOpState(page, "melt", plainCode, "finalized", 90_000)
+
+    // A rail the deployment does not operate is refused at quote time.
+    // The processor's reason is lost across the gRPC boundary (cdk
+    // flattens every melt-quote refusal into "Unit unsupported"), so the
+    // wallet maps that to a destination-refusal hint — and the real
+    // guarantees are behavioral: no ticket, no teller code, funds intact.
+    await page.getByPlaceholder("Phone or reference").fill("wire:e2e-disabled")
+    await page.getByPlaceholder("1.00").fill("1")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      page.getByText("the rail may not be enabled here"),
+    ).toBeVisible({ timeout: 30_000 })
+    await expect(page.locator("p.font-mono.text-3xl")).toHaveCount(0)
+    for (let i = ctx.walletErrors().length - 1; i >= 0; i--) {
+      // The deliberate refusal logs both the wallet's caught error and
+      // the browser's raw resource-400 line.
+      if (
+        ctx.walletErrors()[i].includes("Unit unsupported") ||
+        ctx.walletErrors()[i].includes("status of 400")
+      ) {
+        ctx.walletErrors().splice(i, 1)
+      }
+    }
+    await page.getByRole("button", { name: "Try again" }).click()
+
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before - 3, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
 }

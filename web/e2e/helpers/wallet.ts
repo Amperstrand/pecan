@@ -205,25 +205,73 @@ export function settleWithSimTeller(
   consoleBase: string,
   maxAmountCents: number,
 ): { result: string; amount?: number; reason?: string } {
-  const script = resolve(process.cwd(), "../payout/sim-teller.py")
+  return runPayoutModule("sim-teller.py", code, `${origin}${consoleBase}`, [
+    "--max-amount",
+    String(maxAmountCents),
+  ]) as { result: string; amount?: number; reason?: string }
+}
+
+/**
+ * Drives the generic sample payout-rail adapter (payout/payout-sim.py):
+ * claims only tickets whose payout_rail is "sim". Verdicts: "settled",
+ * "refused" (amount cap), or "wrong-rail" (a ticket the adapter must not
+ * touch — plain teller ticket or another rail's).
+ */
+export function settleWithPayoutSim(
+  code: string,
+  origin: string,
+  consoleBase: string,
+  maxAmountCents: number,
+): {
+  result: string
+  rail?: string
+  destination?: string
+  ticket_rail?: string | null
+  amount?: number
+  reason?: string
+} {
+  return runPayoutModule("payout-sim.py", code, `${origin}${consoleBase}`, [
+    "--max-amount",
+    String(maxAmountCents),
+  ]) as {
+    result: string
+    rail?: string
+    destination?: string
+    ticket_rail?: string | null
+    amount?: number
+    reason?: string
+  }
+}
+
+/**
+ * Shared runner for payout adapters: every module prints exactly one JSON
+ * verdict line and exits non-zero BY DESIGN for refusals and wrong-rail —
+ * read the verdict instead of throwing.
+ */
+function runPayoutModule(
+  scriptName: string,
+  code: string,
+  base: string,
+  extraArgs: string[],
+): Record<string, unknown> {
+  const script = resolve(process.cwd(), "../payout", scriptName)
   const args = [
     script,
-    "--base", `${origin}${consoleBase}`,
+    "--base", base,
     "--user", "admin",
     "--password", process.env.PECAN_ADMIN_PASSWORD ?? "",
     "--code", code,
-    "--max-amount", String(maxAmountCents),
+    ...extraArgs,
   ]
-  // Refusals exit non-zero BY DESIGN — read the verdict instead of throwing.
   const r = spawnSync("python3", args, { timeout: 120_000, encoding: "utf8" })
   const lines = (r.stdout ?? "").trim().split("\n")
   const verdict = lines[lines.length - 1]
   if (!verdict.startsWith("{")) {
     throw new Error(
-      `sim-teller produced no verdict (status ${r.status}): ${(r.stderr ?? "").slice(-300)}`,
+      `${scriptName} produced no verdict (status ${r.status}): ${(r.stderr ?? "").slice(-300)}`,
     )
   }
-  return JSON.parse(verdict)
+  return JSON.parse(verdict) as Record<string, unknown>
 }
 
 export async function waitForDepositFormReset(
