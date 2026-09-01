@@ -64,8 +64,18 @@
 
 <div class="cards">
   <div class="card" id="reconcile-card">
-    <h2>reconcile <span class="muted">(hourly cron)</span></h2>
+    <h2>reconcile <span class="muted">(5min cron)</span></h2>
     <div id="reconcile">loading…</div>
+  </div>
+  <div class="card" id="payers-card">
+    <h2>e2e payer liquidity <span class="muted">(signet)</span></h2>
+    <div id="payers">loading…</div>
+    <div class="muted" style="margin-top:8px">
+      mint metrics: <a href="/ops/metrics/eur" target="_blank">EUR</a> ·
+      <a href="/ops/metrics/usd" target="_blank">USD</a>
+      (basic auth — creds: /opt/pecan-tools/ops-metrics-creds.txt) ·
+      refill: /opt/pecan-tools/refill-payers.sh (6h cron)
+    </div>
   </div>
   <div class="card">
     <h2>EUR console <span id="pill-eur"></span></h2>
@@ -146,6 +156,34 @@ function renderReconcile(st) {
      </ul>`
 }
 
+const PAYER_TARGET = 80000
+const RESERVOIR_RESERVE = 150000
+const SATS = (n) => n < 0 ? "unreachable" : n.toLocaleString() + " sat"
+
+function renderPayers(st) {
+  const el = $("payers")
+  if (!st) { el.innerHTML = `<span class="muted">status unavailable</span>`; return }
+  const res = st.reservoir
+  const resPill = res >= RESERVOIR_RESERVE * 2
+    ? `<span class="pill ok">reservoir ${SATS(res)}</span>`
+    : res >= RESERVOIR_RESERVE
+      ? `<span class="pill warn">reservoir ${SATS(res)} (near reserve)</span>`
+      : `<span class="pill bad">reservoir ${SATS(res)} below reserve</span>`
+  let html = `<div style="margin-bottom:8px">${resPill}</div>`
+  html += `<table><tr><th>payer</th><th class="num">free</th><th class="num">reserved</th><th></th></tr>`
+  for (const p of st.payers || []) {
+    const cls = p.free < 0 ? "bad" : p.free >= PAYER_TARGET ? "ok" : "warn"
+    const note = p.free < 0 ? "unreachable" : p.free >= PAYER_TARGET ? "ok" : "low"
+    html += `<tr><td class="mono">${p.name}</td>` +
+      `<td class="num">${p.free < 0 ? "—" : p.free.toLocaleString()}</td>` +
+      `<td class="num muted">${p.reserved < 0 ? "—" : p.reserved.toLocaleString()}</td>` +
+      `<td><span class="pill ${cls}">${note}</span></td></tr>`
+  }
+  html += `</table>`
+  html += `<div class="muted" style="margin-top:6px">snapshot ${st.last_run} · target ${PAYER_TARGET.toLocaleString()} sat/payer · a full e2e run moves ~57k sat</div>`
+  el.innerHTML = html
+}
+
 async function fetchConsole(c, user, pass) {
   const login = await fetch(`${c.path}/api/login`, {
     method: "POST",
@@ -175,6 +213,10 @@ async function refresh() {
     const st = await (await fetch("/ops/reconcile-status.json")).json()
     renderReconcile(st)
   } catch { renderReconcile(null) }
+  try {
+    const st = await (await fetch("/ops/payer-status.json")).json()
+    renderPayers(st)
+  } catch { renderPayers(null) }
   $("refreshed").textContent = "updated " + new Date().toLocaleTimeString()
 }
 
