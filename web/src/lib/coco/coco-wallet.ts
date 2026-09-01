@@ -38,6 +38,8 @@ export interface DepositQuote {
   expectedSat?: number
   /** The pair this quote lives at — cards and polls are currency-scoped. */
   currency: Currency
+  /** Wall-clock ms when the quote was created — drives the expiry countdown. */
+  createdAt: number
 }
 
 export interface WithdrawResult {
@@ -47,7 +49,10 @@ export interface WithdrawResult {
   submitted: boolean
 }
 
-const SEED_STORAGE_KEY = "giftcard-coco-seed-v1"
+export const SEED_STORAGE_KEY = "giftcard-coco-seed-v1"
+
+/** Lightning invoice / mint quote TTL — 30 min (see commit e47ce32). */
+export const DEPOSIT_EXPIRY_MS = 30 * 60 * 1000
 
 const CANCELLED_QUOTES_KEY = "pecan-cancelled-quotes"
 
@@ -220,6 +225,7 @@ export async function createDepositQuote(
     request: quote.request,
     amount,
     currency,
+    createdAt: Date.now(),
     ...(expectedSat !== undefined ? { expectedSat } : {}),
   }
 }
@@ -508,6 +514,7 @@ export async function getPendingDeposits(): Promise<DepositQuote[]> {
           0,
       ),
       currency,
+      createdAt: op.createdAt,
       ...(expectedSat !== undefined ? { expectedSat } : {}),
     })
   }
@@ -539,65 +546,10 @@ export async function getPendingWithdraw(): Promise<{
 
 // ---------------------------------------------------------------------------
 // Developer tools (signet/test only — never enable on a value-carrying mint)
+// Backup export/restore lives in ./wallet-backup.ts.
 // ---------------------------------------------------------------------------
 
 export const DEV_WALLET_TOOLS = true
-
-export interface WalletDump {
-  exportedAt: string
-  unit: string
-  seed: string | null
-  mintUrl: string
-  proofs: Array<Record<string, unknown>>
-  mintOperations: Array<Record<string, unknown>>
-  meltOperations: Array<Record<string, unknown>>
-  history: Array<Record<string, unknown>>
-}
-
-export async function exportWalletDump(): Promise<WalletDump> {
-  const db = await new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open("giftcard-coco-wallet")
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  })
-  const getAll = (store: string) =>
-    new Promise<Array<Record<string, unknown>>>((resolve) => {
-      const tx = db.transaction(store, "readonly")
-      const req = tx.objectStore(store).getAll()
-      req.onsuccess = () => resolve(req.result as Array<Record<string, unknown>>)
-      req.onerror = () => resolve([])
-    })
-  const stringify = (rows: Array<Record<string, unknown>>) =>
-    rows.map((row) => {
-      const out: Record<string, unknown> = {}
-      for (const [k, v] of Object.entries(row)) {
-        out[k] = v instanceof Uint8Array ? Array.from(v) : v
-      }
-      return out
-    })
-  return {
-    exportedAt: new Date().toISOString(),
-    unit: activeCurrency(),
-    seed: window.localStorage.getItem(SEED_STORAGE_KEY),
-    mintUrl: mintUrl(),
-    proofs: stringify(await getAll("coco_cashu_proofs")),
-    mintOperations: stringify(await getAll("coco_cashu_mint_operations")),
-    meltOperations: stringify(await getAll("coco_cashu_melt_operations")),
-    history: stringify(await getAll("coco_cashu_history")),
-  }
-}
-
-export function downloadWalletDump(dump: WalletDump): void {
-  const blob = new Blob([JSON.stringify(dump, null, 2)], {
-    type: "application/json",
-  })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement("a")
-  a.href = url
-  a.download = `giftcard-wallet-dump-${dump.exportedAt.replace(/[:.]/g, "-")}.json`
-  a.click()
-  URL.revokeObjectURL(url)
-}
 
 /**
  * Permanently deletes all wallet state (IndexedDB + localStorage seed).

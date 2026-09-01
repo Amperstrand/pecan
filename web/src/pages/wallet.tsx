@@ -19,8 +19,6 @@ import {
   type DepositQuote,
   type DepositMethod,
   DEV_WALLET_TOOLS,
-  downloadWalletDump,
-  exportWalletDump,
   forceClearWallet,
   type HistoryRow,
   createDepositQuote,
@@ -34,6 +32,13 @@ import {
   pollWithdraw,
   resumePendingOperations,
 } from "@/lib/coco/coco-wallet"
+import { downloadWalletDump, exportWalletDump } from "@/lib/coco/wallet-backup"
+import { BackupCard } from "@/components/wallet/backup-card"
+import { ExpiryCountdown } from "@/components/wallet/expiry-countdown"
+import {
+  MultiTabBanner,
+  useMultiTabWarning,
+} from "@/components/wallet/multi-tab-banner"
 import { getCoco } from "@/lib/coco/coco-wallet"
 import {
   CURRENCIES,
@@ -100,7 +105,7 @@ function OnchainStatus({
     let cancelled = false
     const poll = async () => {
       try {
-        const res = await fetch(`${consoleUrl(currency)} /api/onchain-status/${address}`)
+        const res = await fetch(`${consoleUrl(currency)}/api/onchain-status/${address}`)
         if (!res.ok) return
         const data: {
           tip: number
@@ -270,6 +275,7 @@ export function WalletPage() {
   const [depositReceipt, setDepositReceipt] = useState<DepositReceipt | null>(null)
   const [withdrawState, setWithdrawState] = useState<WithdrawState>({ phase: "idle" })
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const multiTab = useMultiTabWarning()
 
   const refresh = useCallback(async (c?: Currency) => {
     const currency = c ?? activeCurrency()
@@ -496,6 +502,8 @@ export function WalletPage() {
         </div>
       </div>
 
+      <MultiTabBanner visible={multiTab} />
+
       <Card>
         <CardHeader>
           <CardDescription>Balance</CardDescription>
@@ -635,6 +643,7 @@ export function WalletPage() {
                     <p className="text-sm text-muted-foreground">
                       Pay this lightning invoice (signet):
                     </p>
+                    <ExpiryCountdown createdAt={q.createdAt} />
                     <div className="flex justify-center">
                       <QrCodeImg text={q.request} alt="Lightning invoice QR" />
                     </div>
@@ -783,6 +792,8 @@ export function WalletPage() {
           )}
         </CardContent>
       </Card>
+
+      <BackupCard />
 
       {history.length > 0 && (
         <Card>
