@@ -64,6 +64,9 @@ def main() -> int:
     except urllib.error.HTTPError as e:
         return emit({"result": "api-error", "path": e.url,
                      "status": e.code}, 4)
+    except urllib.error.URLError as e:
+        return emit({"result": "api-error", "stage": "transport",
+                     "error": str(e.reason)}, 4)
 
     if not t.get("id"):
         return emit({"result": "match-failed", "code": a.code}, 4)
@@ -92,6 +95,10 @@ def main() -> int:
     except urllib.error.HTTPError as e:
         return emit({"result": "api-error", "id": tid,
                      "stage": "mark-paid", "status": e.code}, 4)
+    except urllib.error.URLError as e:
+        return emit({"result": "api-error", "id": tid,
+                     "stage": "mark-paid-transport",
+                     "error": str(e.reason)}, 4)
     return emit({"result": "settled", "id": tid, "amount": amount,
                  "recipient": recipient,
                  "unit": t.get("unit"), "status": "paid"}, 0)
