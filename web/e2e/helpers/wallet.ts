@@ -244,6 +244,36 @@ export function settleWithPayoutSim(
 }
 
 /**
+ * Drives the simulated EU bank rails (payout/bank-sim.py): claims
+ * sepa/sepa-instant tickets, validates the IBAN, settles with a
+ * receipt reference (EndToEndId / UETR). Verdict fields: result, rail,
+ * destination, receipt.
+ */
+export function settleWithBankSim(
+  code: string,
+  origin: string,
+  consoleBase: string,
+  maxAmountCents: number,
+): {
+  result: string
+  rail?: string
+  destination?: string
+  receipt?: string
+  reason?: string
+} {
+  return runPayoutModule("bank-sim.py", code, `${origin}${consoleBase}`, [
+    "--max-amount",
+    String(maxAmountCents),
+  ]) as {
+    result: string
+    rail?: string
+    destination?: string
+    receipt?: string
+    reason?: string
+  }
+}
+
+/**
  * Shared runner for payout adapters: every module prints exactly one JSON
  * verdict line and exits non-zero BY DESIGN for refusals and wrong-rail —
  * read the verdict instead of throwing.

@@ -11,6 +11,7 @@ import {
   sendOnchainFromExternal,
   settleWithSimTeller,
   settleWithPayoutSim,
+  settleWithBankSim,
   waitForOpState,
 } from "./helpers/wallet"
 import {
@@ -645,6 +646,68 @@ function registerEurExtras(ctx: SuiteContext): void {
     await expect
       .poll(async () => readBalance(page), { timeout: 90_000 })
       .toBeCloseTo(before - 3, 2)
+    expectNoWalletErrors(ctx.walletErrors())
+  })
+
+  test("simulated EU bank rails: sepa and sepa-instant settle with receipt references", async () => {
+    test.setTimeout(180_000)
+    const page = ctx.page()
+    await apiLogin(page, ctx.consoleBase)
+    const before = await readBalance(page)
+    const origin = new URL(page.url()).origin
+
+    // SEPA credit transfer: valid IBAN settles, receipt is an
+    // EndToEndId-style reference.
+    await page
+      .getByPlaceholder("Phone or reference")
+      .fill("sepa:NL33INGB0000000881")
+    await page.getByPlaceholder("1.00").fill("2")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const sctCode = await readTellerCode(page)
+    const sct = settleWithBankSim(sctCode, origin, ctx.consoleBase, 5000)
+    expect(sct.result).toBe("settled")
+    expect(sct.rail).toBe("sepa")
+    expect(sct.receipt).toMatch(/^E2E-\d{6}-[0-9A-F]{8}$/)
+    await waitForOpState(page, "melt", sctCode, "finalized", 90_000)
+
+    // SEPA instant: same addressing, receipt is a UETR (UUID).
+    await page
+      .getByPlaceholder("Phone or reference")
+      .fill("sepa-instant:DE96370205000003292912")
+    await page.getByPlaceholder("1.00").fill("1")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const instCode = await readTellerCode(page)
+    const inst = settleWithBankSim(instCode, origin, ctx.consoleBase, 5000)
+    expect(inst.result).toBe("settled")
+    expect(inst.rail).toBe("sepa-instant")
+    expect(inst.receipt).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    )
+    await waitForOpState(page, "melt", instCode, "finalized", 90_000)
+
+    // An invalid IBAN is refused without action — and a human can still
+    // settle the ticket, which carries the malformed destination.
+    await page
+      .getByPlaceholder("Phone or reference")
+      .fill("sepa:ES57018223704000185702009")
+    await page.getByPlaceholder("1.00").fill("1")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const badCode = await readTellerCode(page)
+    const refused = settleWithBankSim(badCode, origin, ctx.consoleBase, 5000)
+    expect(refused.result).toBe("refused")
+    expect(refused.reason).toContain("not a valid IBAN")
+    const ticket = await matchAndSettle(
+      page,
+      badCode,
+      "human settles what the bank rail refused",
+      ctx.consoleBase,
+    )
+    expect(ticket.status).toBe("paid")
+    await waitForOpState(page, "melt", badCode, "finalized", 90_000)
+
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before - 4, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
 }

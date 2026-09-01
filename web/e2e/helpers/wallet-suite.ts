@@ -32,6 +32,7 @@ import {
  *   teller withdraw, zero change        suite             suite
  *   one-way mint: ln/btc melt refused   wallet.spec EUR   usd.spec
  *   generic payout rail (sim adapter)   wallet.spec EUR   —
+ *   simulated EU bank rails (sepa)      wallet.spec EUR   —
  *   cross-currency concurrency          wallet.spec EUR   —
  *   currency-switcher isolation         (from USD side)   usd.spec
  *

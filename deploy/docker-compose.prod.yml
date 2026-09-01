@@ -42,8 +42,9 @@ services:
       # Payout rails (see docs/payout-modules.md): melt destinations
       # written as `rail:destination` route to that rail's adapter;
       # envelopes naming anything else are refused at quote time.
-      # `sim` is the synthetic sample adapter (payout/payout-sim.py).
-      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim"
+      # `sim` = synthetic sample; `sepa`/`sepa-instant` = the simulated
+      # EU bank rails (payout/bank-sim.py) with receipt references.
+      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim,sepa,sepa-instant"
     logging:
       driver: json-file
       options:
