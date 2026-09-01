@@ -37,20 +37,12 @@ defineWalletSuite(
 
 function registerEurExtras(ctx: SuiteContext): void {
   test("onchain deposit: external wallet → mempool → settled → receipt", async () => {
+    // Signet runs 0-conf by design (CDK_BRANCH_PROCESSOR_ONCHAIN_
+    // CONFIRMATIONS=0): the rail settles on mempool visibility and the
+    // test stays fast. If confirmations are ever raised again, this
+    // fails loudly instead of silently waiting minutes for blocks.
     const page = ctx.page()
-    // Signet blocks can take 5-30+ minutes; adapt timeout to current cadence
-    const blocks = await page.request
-      .get("https://mempool.space/signet/api/blocks")
-      .then((r) => r.json())
-    const now = Math.floor(Date.now() / 1000)
-    const intervals = blocks.slice(0, 3).map(
-      (b: { timestamp: number }, i: number) =>
-        i === 0 ? now - b.timestamp : blocks[i - 1].timestamp - b.timestamp,
-    )
-    const avgInterval =
-      intervals.reduce((a: number, b: number) => a + b, 0) / intervals.length
-    const timeout = Math.min(Math.ceil((avgInterval * 3) / 60) * 60_000, 1_800_000)
-    test.setTimeout(timeout + 60_000)
+    test.setTimeout(150_000)
 
     const before = await readBalance(page)
 
@@ -72,20 +64,16 @@ function registerEurExtras(ctx: SuiteContext): void {
     const txid = sendOnchainFromExternal(address, expectedSat)
     expect(txid).toHaveLength(64)
 
-    // At 0 required confirmations the rail settles on mempool visibility and
-    // the deposit card can go straight to claimed — the "detected in mempool"
-    // toast only reliably exists while confirmations are actually required.
     const rail = await page.request
       .get(`${ctx.consoleBase}/api/onchain-status/${address}`)
       .then((r) => r.json())
-    if (rail.required_confirmations >= 1) {
-      await expect(
-        page.getByText("Payment detected in mempool"),
-      ).toBeVisible({ timeout: 30_000 })
-    }
+    expect(
+      rail.required_confirmations,
+      "this deployment must run 0-conf onchain settlement on signet",
+    ).toBe(0)
 
     await expect
-      .poll(async () => readBalance(page), { timeout })
+      .poll(async () => readBalance(page), { timeout: 120_000 })
       .toBeCloseTo(before + 50, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
@@ -107,6 +95,9 @@ function registerEurExtras(ctx: SuiteContext): void {
   })
 
   test("withdraw survives reload (durable saga)", async () => {
+    // The polls below budget 90s; the default 60s cap turns the first
+    // slow rate fetch or cold mint into a false failure.
+    test.setTimeout(180_000)
     const page = ctx.page()
     await apiLogin(page, ctx.consoleBase)
 
@@ -266,6 +257,7 @@ function registerEurExtras(ctx: SuiteContext): void {
   })
 
   test("lost swap response recovers via mint restore", async () => {
+    test.setTimeout(180_000)
     const page = ctx.page()
     await apiLogin(page, ctx.consoleBase)
 
@@ -596,6 +588,9 @@ function registerEurExtras(ctx: SuiteContext): void {
     const settled = settleWithPayoutSim(railCode, origin, ctx.consoleBase, 5000)
     expect(settled.result).toBe("settled")
     expect(settled.destination).toBe("e2e-rail-alias")
+    await expect(page.getByText(`✓ Paid — ${settled.receipt}`)).toBeVisible({
+      timeout: 30_000,
+    })
     await waitForOpState(page, "melt", railCode, "finalized", 90_000)
     await expect
       .poll(async () => readBalance(page), { timeout: 90_000 })
@@ -657,7 +652,8 @@ function registerEurExtras(ctx: SuiteContext): void {
     const origin = new URL(page.url()).origin
 
     // SEPA credit transfer: valid IBAN settles, receipt is an
-    // EndToEndId-style reference.
+    // EndToEndId-style reference — shown to the wallet as the payment
+    // proof, exactly where Lightning displays its preimage.
     await page
       .getByPlaceholder("Phone or reference")
       .fill("sepa:NL33INGB0000000881")
@@ -668,6 +664,9 @@ function registerEurExtras(ctx: SuiteContext): void {
     expect(sct.result).toBe("settled")
     expect(sct.rail).toBe("sepa")
     expect(sct.receipt).toMatch(/^E2E-\d{6}-[0-9A-F]{8}$/)
+    await expect(page.getByText(`✓ Paid — ${sct.receipt}`)).toBeVisible({
+      timeout: 30_000,
+    })
     await waitForOpState(page, "melt", sctCode, "finalized", 90_000)
 
     // SEPA instant: same addressing, receipt is a UETR (UUID).
@@ -695,7 +694,7 @@ function registerEurExtras(ctx: SuiteContext): void {
     const badCode = await readTellerCode(page)
     const refused = settleWithBankSim(badCode, origin, ctx.consoleBase, 5000)
     expect(refused.result).toBe("refused")
-    expect(refused.reason).toContain("not a valid IBAN")
+    expect(refused.reason).toContain("not valid for rail sepa")
     const ticket = await matchAndSettle(
       page,
       badCode,
@@ -708,6 +707,44 @@ function registerEurExtras(ctx: SuiteContext): void {
     await expect
       .poll(async () => readBalance(page), { timeout: 90_000 })
       .toBeCloseTo(before - 4, 2)
+    expectNoWalletErrors(ctx.walletErrors())
+  })
+
+  test("mobile and retail fiat rails settle with scheme receipts", async () => {
+    test.setTimeout(240_000)
+    const page = ctx.page()
+    await apiLogin(page, ctx.consoleBase)
+    const before = await readBalance(page)
+    const origin = new URL(page.url()).origin
+
+    // Dummy destinations per scheme; each settles with the receipt
+    // format that scheme actually issues, shown as the payment proof.
+    const cases = [
+      { rail: "swish", destination: "+46700000001", receipt: /^[0-9a-f]{32}$/ },
+      { rail: "mobilepay", destination: "+45700000002", receipt: /^MP-\d{10}$/ },
+      { rail: "ideal", destination: "NL33INGB0000000881", receipt: /^\d{16}$/ },
+      { rail: "bizum", destination: "+34600000003", receipt: /^BZ\d{10}$/ },
+    ]
+    for (const c of cases) {
+      await page
+        .getByPlaceholder("Phone or reference")
+        .fill(`${c.rail}:${c.destination}`)
+      await page.getByPlaceholder("1.00").fill("1")
+      await page.getByRole("button", { name: "Send", exact: true }).click()
+      const code = await readTellerCode(page)
+      const settled = settleWithBankSim(code, origin, ctx.consoleBase, 5000)
+      expect(settled.result, c.rail).toBe("settled")
+      expect(settled.receipt, c.rail).toMatch(c.receipt)
+      await expect(
+        page.getByText(`✓ Paid — ${settled.receipt}`),
+        c.rail,
+      ).toBeVisible({ timeout: 30_000 })
+      await waitForOpState(page, "melt", code, "finalized", 90_000)
+    }
+
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before - cases.length, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
 }
