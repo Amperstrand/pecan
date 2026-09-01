@@ -35,15 +35,25 @@ rsync -az deploy/docker-compose.prod.yml "$SERVER:$COMPOSE_DIR/docker-compose.pr
 echo "==> recreate containers (no build on server)"
 ssh "$SERVER" "cd $COMPOSE_DIR && docker compose -f docker-compose.prod.yml up -d --force-recreate 2>&1 | tail -1"
 
-echo "==> restart mint (boot-order dependency)"
-ssh "$SERVER" "docker restart giftcard-mint-mintd-1 >/dev/null 2>&1 && echo 'mint restarted' || echo 'WARN: mint restart failed'"
+# The USD twin runs the same pecan:nok image out of its own compose dir —
+# without this step it silently keeps serving the previous bundle (bit us
+# during the soak hardening: EUR fixed, USD stale).
+ssh "$SERVER" "cd /opt/pecan-usd && docker compose up -d 2>&1 | tail -1"
+
+echo "==> restart mints (boot-order dependency)"
+ssh "$SERVER" "docker restart giftcard-mint-mintd-1 giftcard-mint-usd-mintd-1 >/dev/null 2>&1 && echo 'mints restarted' || echo 'WARN: mint restart failed'"
 
 rm -f /tmp/pecan-eur.tar.gz
 
 sleep 6
-BUNDLE=$(curl -s -m 10 "$URL/eur-console/wallet" | grep -o 'index-[^"]*\.js' | head -1)
-if [ -z "$BUNDLE" ]; then
-  echo "!! deploy verification failed: no bundle found at $URL/eur-console/wallet" >&2
-  exit 1
-fi
-echo "==> deployed: $BUNDLE"
+fail=0
+for pair in eur usd; do
+  BUNDLE=$(curl -s -m 10 "$URL/$pair-console/wallet" | grep -o 'index-[^"]*\.js' | head -1)
+  if [ -z "$BUNDLE" ]; then
+    echo "!! deploy verification failed: no bundle at $URL/$pair-console/wallet" >&2
+    fail=1
+  else
+    echo "==> deployed $pair: $BUNDLE"
+  fi
+done
+exit $fail
