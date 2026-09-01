@@ -62,6 +62,7 @@ Every payout module drives the same console API loop:
 | cash-teller | — (human) | human counts out cash | live |
 | sim-teller | — (claim sim) | simulates the human teller for plain branch melts | reference impl |
 | payout-sim | `sim` | simulated transfer to the enveloped destination | generic sample adapter |
+| bank-sim | `sepa`, `sepa-instant` | simulated SEPA credit / instant transfer to an IBAN, receipt reference on settlement | EU rails, lifted from the pleBank bill-payment model |
 | real-rail adapter | own id | real transfer via that rail's backend | future — plug in as a new rail id |
 
 - **sim-teller** simulates the *human teller* on plain branch melts
@@ -71,6 +72,16 @@ Every payout module drives the same console API loop:
   claims only `payout_rail == "sim"`, amount cap, simulated transfer, notes
   carrying the rail name. Copy it, change the rail id and the transfer step,
   enable the id in `PAYOUT_RAILS` — that is the whole integration.
+- **bank-sim** (`payout/bank-sim.py`) lifts the EU rail semantics from the
+  pleBank bill-payment system (creditor IBAN + remittance info, ISO
+  20022-style receipts) into simulated adapters: `sepa` settles after a
+  batch delay with an EndToEndId-style receipt (`E2E-YYMMDD-XXXXXXXX`);
+  `sepa-instant` settles immediately with a UETR (the identifier the real
+  instant scheme uses). Destinations are mod-97 IBAN-validated — stricter
+  than pleBank's length check, which carried an invalid ES fixture. The
+  receipt lands in the settled ticket's notes (audit trail) and the
+  adapter verdict; showing it in the wallet needs a proof-propagation
+  channel through the mint (open).
 - **A real adapter** (e.g. a mobile-payment or bank rail) is payout-sim with
   a real transfer call and its own rail id; the deployment adds the id to
   `CDK_BRANCH_PROCESSOR_PAYOUT_RAILS` and the wallet needs no changes — the
