@@ -23,6 +23,7 @@ mod clients;
 mod config;
 mod ln;
 mod onchain;
+mod payout;
 mod sessions;
 mod state;
 mod users;
@@ -352,6 +353,9 @@ async fn main() -> Result<()> {
         app_config.method.clone(),
         ln_rail,
         onchain_rail,
+        payout::rails_from_config(
+            &std::env::var("CDK_BRANCH_PROCESSOR_PAYOUT_RAILS").unwrap_or_default(),
+        ),
     ));
     let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
         .map_err(|e| anyhow!("payment processor server init: {e}"))?;

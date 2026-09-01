@@ -71,6 +71,10 @@ pub struct Ticket {
     pub created_at: u64,
     pub paid_at: Option<u64>,
     pub description: Option<String>,
+    /// The payout rail that must fulfill this melt (`sim:destination`
+    /// envelope in the wallet's request). `None` = human teller.
+    #[serde(default)]
+    pub payout_rail: Option<String>,
     /// Free-form notes added by the operator.
     pub notes: Option<String>,
     /// Unix timestamp after which an unsettled ticket is dead. Mint tickets
@@ -106,6 +110,7 @@ impl Ticket {
             created_at: unix_now(),
             paid_at: None,
             description,
+            payout_rail: None,
             notes: None,
             expires_at,
             settled_by: None,
@@ -120,6 +125,7 @@ impl Ticket {
         amount: u64,
         unit: String,
         description: Option<String>,
+        payout_rail: Option<String>,
         expires_at: Option<u64>,
     ) -> Self {
         Self {
@@ -132,6 +138,7 @@ impl Ticket {
             created_at: unix_now(),
             paid_at: None,
             description,
+            payout_rail,
             notes: None,
             expires_at,
             settled_by: None,
@@ -698,7 +705,7 @@ mod tests {
     }
 
     fn outgoing(quote_id: &str, amount: u64) -> Ticket {
-        Ticket::new_outgoing(quote_id.into(), amount, "ora".into(), None, None)
+        Ticket::new_outgoing(quote_id.into(), amount, "ora".into(), None, None, None)
     }
 
     #[test]

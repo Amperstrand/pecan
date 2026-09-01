@@ -37,7 +37,9 @@ use tokio_stream::StreamExt;
 use crate::config::MELT_TICKET_TTL_SECS;
 use crate::ln::LnRail;
 use crate::onchain::OnchainRail;
+use crate::payout::parse_payout_envelope;
 use crate::state::{BranchState, Ticket};
+use std::collections::HashSet;
 
 /// Onchain deposits carry real chain weight; keep them well above dust.
 const MIN_ONCHAIN_ORE: u64 = 5_000;
@@ -55,6 +57,9 @@ pub struct BranchBackend {
     ln: Option<Arc<LnRail>>,
     /// Onchain-minting rail; `None` unless CDK_BRANCH_PROCESSOR_ONCHAIN=true.
     onchain: Option<Arc<OnchainRail>>,
+    /// Payout rails this deployment operates (enveloped melt destinations
+    /// naming anything else are refused at quote time). Empty = teller-only.
+    payout_rails: HashSet<String>,
     stream_active: AtomicBool,
     /// Unix seconds of the first `wait_payment_event` attach since this
     /// process started; 0 = never. Never cleared on client disconnect — it
@@ -81,6 +86,7 @@ impl BranchBackend {
         method: String,
         ln: Option<Arc<LnRail>>,
         onchain: Option<Arc<OnchainRail>>,
+        payout_rails: HashSet<String>,
     ) -> Self {
         Self {
             state,
@@ -88,6 +94,7 @@ impl BranchBackend {
             method,
             ln,
             onchain,
+            payout_rails,
             stream_active: AtomicBool::new(false),
             stream_attached_at: AtomicU64::new(0),
             last_settings_at: AtomicU64::new(0),
@@ -408,11 +415,28 @@ impl MintPayment for BranchBackend {
                     "" => None,
                     s => Some(s.to_string()),
                 };
+                // An enveloped destination (`rail:...`) routes to an
+                // automated payout adapter — refuse rails this deployment
+                // does not operate, at quote time, so no unsettleable
+                // ticket can exist. Plain memos stay human-teller tickets.
+                let payout = memo.as_deref().and_then(parse_payout_envelope);
+                if let Some(req) = &payout {
+                    if !self.payout_rails.contains(&req.rail) {
+                        return Err(Error::Custom(format!(
+                            "payout rail '{}' is not enabled on this mint",
+                            req.rail
+                        )));
+                    }
+                }
                 let ticket = Ticket::new_outgoing(
                     opts.quote_id.to_string(),
                     amount,
                     unit.to_string(),
-                    memo,
+                    payout
+                        .as_ref()
+                        .map(|req| req.destination.clone())
+                        .or(memo),
+                    payout.map(|req| req.rail),
                     Some(unix_now() + MELT_TICKET_TTL_SECS),
                 );
                 let ticket = self
@@ -611,5 +635,71 @@ mod tests {
         assert!(extra_names_rail(Some(r#"{"rail":"btc"}"#)));
         assert!(!extra_names_rail(Some(r#"{"rail":"branch"}"#)));
         assert!(!extra_names_rail(None));
+    }
+
+    #[tokio::test]
+    async fn melt_quote_gates_payout_rails() {
+        use cdk_common::payment::{CustomOutgoingPaymentOptions, MintPayment, OutgoingPaymentOptions};
+        use cdk_common::CurrencyUnit;
+
+        use crate::payout::rails_from_config;
+
+        async fn backend(rails: &str) -> BranchBackend {
+            let state = crate::state::BranchState::load(std::env::temp_dir().join(format!(
+                "pecan-payout-test-{}.json",
+                std::process::id()
+            )))
+            .await
+            .expect("in-memory state");
+            BranchBackend::new(
+                state,
+                Some(CurrencyUnit::Custom("eur".into())),
+                "branch".into(),
+                None,
+                None,
+                rails_from_config(rails),
+            )
+        }
+
+        fn outgoing(request: &str) -> OutgoingPaymentOptions {
+            OutgoingPaymentOptions::Custom(Box::new(CustomOutgoingPaymentOptions {
+                method: "branch".into(),
+                request: request.into(),
+                amount: Some(cdk_common::Amount::new(
+                    500,
+                    CurrencyUnit::Custom("eur".into()),
+                )),
+                max_fee_amount: None,
+                timeout_secs: None,
+                melt_options: None,
+                extra_json: None,
+                quote_id: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+            }))
+        }
+
+        let unit = CurrencyUnit::Custom("eur".into());
+
+        // Enabled rail: ticket carries the clean destination + the rail.
+        let b = backend("sim").await;
+        let quote = b
+            .get_payment_quote(&unit, outgoing("sim:ALIAS-9"))
+            .await
+            .expect("enabled rail quotes");
+        assert!(quote.request_lookup_id.is_some());
+
+        // Disabled rail: refused at quote time — no unsettleable ticket.
+        let b = backend("sim").await;
+        let err = b
+            .get_payment_quote(&unit, outgoing("wire:ACCOUNT-1"))
+            .await
+            .expect_err("disabled rail must refuse");
+        assert!(err.to_string().contains("payout rail 'wire' is not enabled"));
+
+        // No rails configured: every envelope refuses, plain memos quote.
+        let b = backend("").await;
+        assert!(b.get_payment_quote(&unit, outgoing("sim:X")).await.is_err());
+        b.get_payment_quote(&unit, outgoing("plain-recipient"))
+            .await
+            .expect("plain memo stays a teller ticket");
     }
 }

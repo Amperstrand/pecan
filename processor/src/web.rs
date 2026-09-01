@@ -459,6 +459,9 @@ struct ApiTicket {
     paid_at: Option<u64>,
     expires_at: Option<u64>,
     description: Option<String>,
+    /// Payout rail that must fulfill this melt; `None` = human teller.
+    /// Adapters refuse tickets whose rail is not theirs.
+    payout_rail: Option<String>,
     notes: Option<String>,
     settled_by: Option<String>,
     voided_by: Option<String>,
@@ -654,6 +657,7 @@ impl ApiTicket {
             paid_at: ticket.paid_at,
             expires_at: ticket.expires_at,
             description: ticket.description.clone(),
+            payout_rail: ticket.payout_rail.clone(),
             notes: ticket.notes.clone(),
             settled_by: ticket.settled_by.clone(),
             voided_by: ticket.voided_by.clone(),
