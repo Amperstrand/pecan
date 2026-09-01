@@ -20,4 +20,14 @@ USD_PW=$(ssh root@46.224.104.12 \
 if [ -n "$USD_PW" ]; then
   export PECAN_USD_ADMIN_PASSWORD="$USD_PW"
 fi
-exec npx playwright test "$@"
+
+# Not exec'd: the trailing verdict line lets agents and soak greps read
+# the outcome without scanning Playwright's full output.
+status=0
+npx playwright test "$@" || status=$?
+if [ "$status" -eq 0 ]; then
+  echo "E2E VERDICT: PASS"
+else
+  echo "E2E VERDICT: FAIL (exit $status)"
+fi
+exit "$status"
