@@ -50,6 +50,29 @@ MUST end up as a Playwright test under `web/e2e/` (helpers in
 MUST end up as a script under `scripts/`. Future sessions (and CI) re-run
 these without spending LLM tokens on browser driving.
 
+**Test ladder — always answer at the cheapest tier that can.** A full
+e2e cycle costs 2-3 wall minutes, ~57k sat of payer liquidity, and
+agent tokens to interpret; the tiers below answer most questions in
+seconds with zero side effects:
+
+1. `cd web && npm test` — pure wallet logic (parse, serialize, expiry).
+2. `cd processor && cargo test` — pure processor logic + settle
+   predicates.
+3. `scripts/api-smoke.sh` — read-only HTTP invariants against prod:
+   mint keys/info, one-way melt refusal (ln/btc, both pairs), console
+   health, manifest, metrics auth, reconcile drift. The "is the
+   deployment healthy" check — run after every deploy, before every
+   e2e cycle.
+4. Targeted e2e: `scripts/e2e.sh -g "cross-currency"` runs one test,
+   not 25. Iterate on failures here.
+5. Full suite: `scripts/e2e.sh` (verdict line at the end is greppable).
+6. `scripts/soak.sh N` — repetition under liquidity/reconcile guards.
+
+Coverage matrix (rail × currency, which file owns each cell, and which
+rows are deliberately EUR-only shared machinery) lives as a comment
+block atop `web/e2e/helpers/wallet-suite.ts` — keep it current when
+adding tests.
+
 - Browser wallet tests: `scripts/e2e.sh` (fetches BOTH generated admin
   passwords — EUR and USD — from the server and runs Playwright against
   prod; teller match-and-settle happen through the real HTTP API, waiting
@@ -71,7 +94,7 @@ these without spending LLM tokens on browser driving.
 - Unit tests: `cd web && npm test` (vitest). Fast inner loop — handler
   payload shapes, error mappings, and pure utils are pinned here; run these
   BEFORE deploying to iterate on logic without the e2e cycle.
-- Processor tests: `cd processor && cargo test` (61 tests, includes the
+- Processor tests: `cd processor && cargo test` (66 tests, includes the
   onchain settle predicate for both 0- and ≥1-conf modes). CI runs them,
   but ONLY on `main` pushes and PRs — run locally before pushing
   `deployment`.
@@ -167,3 +190,16 @@ these without spending LLM tokens on browser driving.
 - Wallet IndexedDB survives page reloads; force-clear button is the
   escape hatch (signet only). The EUR switch means old NOK operations in
   user browsers are inert (unit filter in getPendingDeposit skips them).
+
+- Lessons that shaped the tooling (first soak session): single green
+  runs hide ordering races — the two soak-found wallet bugs (backups
+  exported in the boot window carrying `seed: null` because coco's
+  seedGetter is lazy, and force-clear's deleteDatabase resolving on
+  blocked, leaving the deletion racing the next page's open into a
+  blank boot) were invisible to five consecutive passing runs. A config
+  surface in a binary is not wiring (cdk-mintd rc.0 compiled
+  cdk-prometheus but never started it; rc.3 needs DB-backed
+  `config apply`, and ignores the CDK_MINTD_* listen env). Money in
+  flight is invisible to confirmed-only balance reads: refill top-ups
+  sit unconfirmed for one signet block, so liquidity guards must count
+  pending outputs or freshly-refilled payers read as dry.
