@@ -1,35 +1,33 @@
-// Wallet backup v1: the JSON dump is the wallet's seed plus the four
-// IndexedDB stores that carry money and state (proofs, mint operations,
-// melt operations, history). Serialization is type-tagged so Uint8Array
-// and Date values survive the JSON round-trip unambiguously — plain
-// number arrays stay arrays, byte arrays and dates come back as
-// themselves.
+// Wallet backup: the JSON dump is the wallet's seed plus EVERY IndexedDB
+// store coco's schema defines (v2; v1 carried only the four money stores —
+// its dumps still parse). Serialization is type-tagged so Uint8Array and
+// Date values survive the JSON round-trip unambiguously — plain number
+// arrays stay arrays, byte arrays and dates come back as themselves.
 //
 // Import semantics: clear() then put() through a raw connection opened
 // next to coco's Dexie connection. deleteDatabase is NOT used — an open
 // Dexie connection blocks it (the dev-tools force-clear only works
-// because the page reloads straight after). All four stores use in-line
+// because the page reloads straight after). Known stores use in-line
 // keys ([mintUrl+secret], id, ++id), so put() restores rows with their
-// original keys intact.
+// original keys intact; stores the running schema does not know are
+// skipped.
 
 import { activeCurrency, mintUrl } from "./currency"
 import { getCoco, SEED_STORAGE_KEY } from "./coco-wallet"
 
 export interface WalletDump {
+  formatVersion: 2
   exportedAt: string
   unit: string
   seed: string | null
   mintUrl: string
-  proofs: Array<Record<string, unknown>>
-  mintOperations: Array<Record<string, unknown>>
-  meltOperations: Array<Record<string, unknown>>
-  history: Array<Record<string, unknown>>
+  stores: Record<string, Array<Record<string, unknown>>>
 }
 
 /** A dump proven to carry a seed — only these can be restored. */
 export type RestorableDump = WalletDump & { seed: string }
 
-const BACKUP_STORES = [
+const V1_STORE_KEYS = [
   ["proofs", "coco_cashu_proofs"],
   ["mintOperations", "coco_cashu_mint_operations"],
   ["meltOperations", "coco_cashu_melt_operations"],
@@ -91,26 +89,29 @@ export async function exportWalletDump(): Promise<WalletDump> {
     req.onsuccess = () => resolve(req.result)
     req.onerror = () => reject(req.error)
   })
-  const getAll = (store: string) =>
-    new Promise<Array<Record<string, unknown>>>((resolve) => {
-      const tx = db.transaction(store, "readonly")
-      const req = tx.objectStore(store).getAll()
-      req.onsuccess = () => resolve(req.result as Array<Record<string, unknown>>)
-      req.onerror = () => resolve([])
-    })
-  const rows = (store: string) => getAll(store).then((list) => list.map(serializeRow))
-  const dump: WalletDump = {
+  const stores: Record<string, Array<Record<string, unknown>>> = {}
+  for (const store of Array.from(db.objectStoreNames)) {
+    stores[store] = await new Promise<Array<Record<string, unknown>>>(
+      (resolve) => {
+        const tx = db.transaction(store, "readonly")
+        const req = tx.objectStore(store).getAll()
+        req.onsuccess = () =>
+          resolve(
+            (req.result as Array<Record<string, unknown>>).map(serializeRow),
+          )
+        req.onerror = () => resolve([])
+      },
+    )
+  }
+  db.close()
+  return {
+    formatVersion: 2,
     exportedAt: new Date().toISOString(),
     unit: activeCurrency(),
     seed: window.localStorage.getItem(SEED_STORAGE_KEY),
     mintUrl: mintUrl(),
-    proofs: await rows("coco_cashu_proofs"),
-    mintOperations: await rows("coco_cashu_mint_operations"),
-    meltOperations: await rows("coco_cashu_melt_operations"),
-    history: await rows("coco_cashu_history"),
+    stores,
   }
-  db.close()
-  return dump
 }
 
 export function downloadWalletDump(dump: WalletDump): void {
@@ -130,8 +131,9 @@ function isRowList(value: unknown): value is Array<Record<string, unknown>> {
 }
 
 /**
- * Parses an untrusted backup file into a typed value. Throws Error with
- * an operator-readable message when the file is not a restorable dump.
+ * Parses an untrusted backup file into a typed value. Accepts v2 dumps
+ * (stores map) and v1 dumps (the four money-store fields). Throws Error
+ * with an operator-readable message when the file is not restorable.
  */
 export function parseWalletDump(raw: unknown): RestorableDump {
   if (!isRecord(raw)) {
@@ -147,29 +149,39 @@ export function parseWalletDump(raw: unknown): RestorableDump {
   if (typeof seed !== "string" || !/^[0-9a-f]{128}$/.test(seed)) {
     throw new Error("backup has no wallet seed — export a new backup instead")
   }
-  const rowList = (key: "proofs" | "mintOperations" | "meltOperations" | "history") => {
-    const value = raw[key]
-    if (!isRowList(value)) {
+  const header = { exportedAt, unit, seed, mintUrl: dumpMintUrl }
+  if (raw.formatVersion === 2 || isRecord(raw.stores)) {
+    if (!isRecord(raw.stores)) {
+      throw new Error("backup has a stores field that is not an object")
+    }
+    const stores: Record<string, Array<Record<string, unknown>>> = {}
+    for (const [store, rows] of Object.entries(raw.stores)) {
+      if (!isRowList(rows)) {
+        throw new Error(`backup store ${store} does not hold records`)
+      }
+      stores[store] = rows
+    }
+    if (stores["coco_cashu_proofs"] === undefined) {
+      throw new Error("backup has no proofs store — nothing to restore")
+    }
+    return { formatVersion: 2, ...header, stores }
+  }
+  const stores: Record<string, Array<Record<string, unknown>>> = {}
+  for (const [key, store] of V1_STORE_KEYS) {
+    const rows = raw[key]
+    if (!isRowList(rows)) {
       throw new Error(`backup is missing its ${key} records`)
     }
-    return value
+    stores[store] = rows
   }
-  return {
-    exportedAt,
-    unit,
-    seed,
-    mintUrl: dumpMintUrl,
-    proofs: rowList("proofs"),
-    mintOperations: rowList("mintOperations"),
-    meltOperations: rowList("meltOperations"),
-    history: rowList("history"),
-  }
+  return { formatVersion: 2, ...header, stores }
 }
 
 /**
- * Replaces this browser's wallet state with the dump's: the four stores
- * are cleared and re-filled, and the seed is overwritten. The page must
- * reload afterwards — the running wallet still holds the old state.
+ * Replaces this browser's wallet state with the dump's: every store the
+ * dump carries and the running schema knows is cleared and re-filled,
+ * and the seed is overwritten. The page must reload afterwards — the
+ * running wallet still holds the old state.
  */
 export async function importWalletDump(dump: RestorableDump): Promise<void> {
   // Guarantees the Dexie schema exists before the raw connection looks
@@ -180,11 +192,12 @@ export async function importWalletDump(dump: RestorableDump): Promise<void> {
     const req = indexedDB.open("giftcard-coco-wallet")
     req.onsuccess = () => {
       const db = req.result
-      const storeNames = BACKUP_STORES.map(([, store]) => store)
-      const missing = storeNames.filter((s) => !db.objectStoreNames.contains(s))
-      if (missing.length > 0) {
+      const storeNames = Object.keys(dump.stores).filter((store) =>
+        db.objectStoreNames.contains(store),
+      )
+      if (!storeNames.includes("coco_cashu_proofs")) {
         db.close()
-        reject(new Error(`wallet storage is missing stores: ${missing.join(", ")}`))
+        reject(new Error("wallet storage has no proofs store to restore into"))
         return
       }
       const tx = db.transaction(storeNames, "readwrite")
@@ -200,10 +213,10 @@ export async function importWalletDump(dump: RestorableDump): Promise<void> {
         db.close()
         reject(tx.error ?? new Error("restore transaction aborted"))
       }
-      for (const [key, store] of BACKUP_STORES) {
+      for (const store of storeNames) {
         const os = tx.objectStore(store)
         os.clear()
-        for (const row of dump[key]) {
+        for (const row of dump.stores[store] ?? []) {
           os.put(reviveRow(row))
         }
       }

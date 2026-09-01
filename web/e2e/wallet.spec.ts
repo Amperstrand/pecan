@@ -460,6 +460,52 @@ function registerEurExtras(ctx: SuiteContext): void {
     expectNoWalletErrors(ctx.walletErrors())
   })
 
+  test("backup restores into a fresh browser (new-device migration)", async () => {
+    const page = ctx.page()
+    const before = await readBalance(page)
+    expect(before).toBeGreaterThan(0)
+
+    const [backup] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Download backup (JSON)" }).click(),
+    ])
+    const backupPath = await backup.path()
+    expect(backupPath).toBeTruthy()
+
+    const browser = page.context().browser()
+    expect(browser).toBeTruthy()
+    const ctx2 = await browser!.newContext({ ignoreHTTPSErrors: true })
+    await ctx2.addInitScript(
+      (currency) => {
+        window.localStorage.setItem("pecan-debug", "1")
+        window.localStorage.setItem("pecan-currency", currency)
+      },
+      ctx.currency,
+    )
+    const page2 = await ctx2.newPage()
+    await page2.goto(page.url())
+    await expect(page2.getByRole("heading", { name: "Wallet" })).toBeVisible()
+
+    // A fresh browser is a fresh wallet — zero balance before restore.
+    await expect
+      .poll(async () => readBalance(page2), { timeout: 20_000 })
+      .toBe(0)
+
+    await page2.setInputFiles("#restore-file", backupPath!)
+    await page2.getByRole("button", { name: "Restore backup" }).click()
+    await expect(page2.getByRole("heading", { name: "Wallet" })).toBeVisible({
+      timeout: 30_000,
+    })
+    await expect
+      .poll(async () => readBalance(page2), { timeout: 30_000 })
+      .toBeCloseTo(before, 2)
+
+    const db = await readWalletDb(page2)
+    expect(db.spendableSum).toBe(before * 100)
+    await ctx2.close()
+    expectNoWalletErrors(ctx.walletErrors())
+  })
+
   test("opening the wallet in a second tab warns both tabs", async () => {
     const page = ctx.page()
     const page2 = await page.context().newPage()
@@ -468,7 +514,10 @@ function registerEurExtras(ctx: SuiteContext): void {
     await expect(page2.getByRole("alert")).toBeVisible({ timeout: 15_000 })
     await expect(page.getByRole("alert")).toBeVisible({ timeout: 15_000 })
 
+    // Web Lock liveness: closing the other tab clears the banner on
+    // this one within a poll interval.
     await page2.close()
+    await expect(page.getByRole("alert")).toBeHidden({ timeout: 10_000 })
     expectNoWalletErrors(ctx.walletErrors())
   })
 }

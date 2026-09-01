@@ -10,6 +10,26 @@ import {
 function rawDump(overrides: Record<string, unknown> = {}): unknown {
   return JSON.parse(
     JSON.stringify({
+      formatVersion: 2,
+      exportedAt: "2026-09-01T00:00:00.000Z",
+      unit: "eur",
+      seed: "ab".repeat(64),
+      mintUrl: "https://giftcard.cashu.exchange/eur",
+      stores: {
+        coco_cashu_proofs: [{ mintUrl: "https://x/eur", secret: "s1", amount: 500 }],
+        coco_cashu_mint_operations: [],
+        coco_cashu_melt_operations: [],
+        coco_cashu_history: [{ id: 1, type: "deposit", amount: 500 }],
+      },
+      ...overrides,
+    }),
+  )
+}
+
+/** A v1 dump: the four money stores as top-level fields, no version. */
+function rawV1Dump(overrides: Record<string, unknown> = {}): unknown {
+  return JSON.parse(
+    JSON.stringify({
       exportedAt: "2026-09-01T00:00:00.000Z",
       unit: "eur",
       seed: "ab".repeat(64),
@@ -17,7 +37,7 @@ function rawDump(overrides: Record<string, unknown> = {}): unknown {
       proofs: [{ mintUrl: "https://x/eur", secret: "s1", amount: 500 }],
       mintOperations: [],
       meltOperations: [],
-      history: [{ id: 1, type: "deposit", amount: 500 }],
+      history: [],
       ...overrides,
     }),
   )
@@ -43,10 +63,20 @@ function asDate(value: unknown): Date {
 }
 
 describe("parseWalletDump", () => {
-  it("accepts a well-formed dump", () => {
+  it("accepts a well-formed v2 dump", () => {
     const dump = parseWalletDump(rawDump())
     expect(dump.seed).toBe("ab".repeat(64))
-    expect(dump.proofs).toHaveLength(1)
+    expect(dump.formatVersion).toBe(2)
+    expect(dump.stores["coco_cashu_proofs"]).toHaveLength(1)
+    expect(Object.keys(dump.stores)).toContain("coco_cashu_history")
+  })
+
+  it("accepts a v1 dump and maps its fields into the stores map", () => {
+    const dump = parseWalletDump(rawV1Dump())
+    expect(dump.formatVersion).toBe(2)
+    expect(dump.stores["coco_cashu_proofs"]).toHaveLength(1)
+    expect(dump.stores["coco_cashu_melt_operations"]).toEqual([])
+    expect(dump.stores["coco_cashu_history"]).toEqual([])
   })
 
   it("rejects non-objects", () => {
@@ -61,12 +91,23 @@ describe("parseWalletDump", () => {
     expect(() => parseWalletDump(rawDump({ seed: "zz".repeat(64) }))).toThrow(/seed/)
   })
 
-  it("rejects dumps whose row lists are not arrays of records", () => {
-    expect(() => parseWalletDump(rawDump({ proofs: "nope" }))).toThrow(/proofs/)
-    expect(() => parseWalletDump(rawDump({ history: [1, 2, 3] }))).toThrow(/history/)
+  it("rejects v2 dumps whose stores hold non-records", () => {
     expect(() =>
-      parseWalletDump(rawDump({ mintOperations: [null] })),
-    ).toThrow(/mintOperations/)
+      parseWalletDump(rawDump({ stores: { coco_cashu_proofs: "nope" } })),
+    ).toThrow(/coco_cashu_proofs/)
+    expect(() =>
+      parseWalletDump(
+        rawDump({ stores: { coco_cashu_history: [1, 2, 3] } }),
+      ),
+    ).toThrow(/coco_cashu_history/)
+  })
+
+  it("rejects v2 dumps with no proofs store and v1 dumps missing row lists", () => {
+    expect(() =>
+      parseWalletDump(rawDump({ stores: { coco_cashu_history: [] } })),
+    ).toThrow(/proofs/)
+    expect(() => parseWalletDump(rawV1Dump({ proofs: "nope" }))).toThrow(/proofs/)
+    expect(() => parseWalletDump(rawV1Dump({ history: [null] }))).toThrow(/history/)
   })
 
   it("rejects dumps missing metadata fields", () => {
