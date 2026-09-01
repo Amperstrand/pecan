@@ -1,4 +1,4 @@
-import { execSync, execFileSync } from "node:child_process"
+import { execSync, spawnSync } from "node:child_process"
 import { resolve } from "node:path"
 import { expect, type Page } from "@playwright/test"
 
@@ -202,12 +202,16 @@ export function settleWithSimTeller(
     "--code", code,
     "--max-amount", String(maxAmountCents),
   ]
-  const out = execFileSync("python3", args, {
-    timeout: 120_000,
-    stdio: ["ignore", "pipe", "pipe"],
-  }).toString()
-  const lines = out.trim().split("\n")
-  return JSON.parse(lines[lines.length - 1])
+  // Refusals exit non-zero BY DESIGN — read the verdict instead of throwing.
+  const r = spawnSync("python3", args, { timeout: 120_000, encoding: "utf8" })
+  const lines = (r.stdout ?? "").trim().split("\n")
+  const verdict = lines[lines.length - 1]
+  if (!verdict.startsWith("{")) {
+    throw new Error(
+      `sim-teller produced no verdict (status ${r.status}): ${(r.stderr ?? "").slice(-300)}`,
+    )
+  }
+  return JSON.parse(verdict)
 }
 
 export async function waitForDepositFormReset(
