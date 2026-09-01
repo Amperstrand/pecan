@@ -190,7 +190,7 @@ impl BranchBackend {
         let rail = self.ln.as_ref().expect("caller checked the rail is enabled");
         let quote_id = opts.quote_id.to_string();
         let (bolt11, expires_at) = match rail
-            .create_invoice(&quote_id, amount.value(), amount.unit(), opts.description.clone())
+            .create_invoice(&quote_id, amount.value(), amount.unit())
             .await
         {
             Ok(created) => created,

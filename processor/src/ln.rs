@@ -49,6 +49,27 @@ pub fn subunit_to_sat(subunit: u64, fiat_per_btc: f64, markup_percent: f64) -> u
     (sat - 1e-6).ceil() as u64
 }
 
+/// The invoice description the payer sees in their wallet: what they are
+/// buying, what it costs in sats, and the effective rate including the
+/// markup — the conversion otherwise happens invisibly inside the quote.
+pub fn invoice_description(
+    unit: &str,
+    subunit: u64,
+    sat: u64,
+    markup_percent: f64,
+) -> String {
+    let amount = subunit as f64 / 100.0;
+    let fiat = unit.to_uppercase();
+    let rate = if subunit == 0 {
+        0.0
+    } else {
+        (sat as f64 / amount).round()
+    };
+    format!(
+        "{fiat} {amount:.2} -> {sat} sat @ {rate:.0} sat/{fiat} (incl. {markup_percent}% fee)"
+    )
+}
+
 pub(crate) struct Fx {
     /// Currency code (e.g. "eur", "nok") — drives the rate source.
     unit: String,
@@ -406,14 +427,21 @@ impl LnRail {
 
     /// Creates a CLN invoice for the quote and records it for settlement
     /// watching. Locked-quotes-only is enforced by the caller (backend).
+    /// The description always carries the exchange rate — the payer's
+    /// wallet is where the fiat→sat conversion needs explaining.
     pub async fn create_invoice(
         &self,
         quote_id: &str,
         amount_subunit: u64,
         unit: &CurrencyUnit,
-        description: Option<String>,
     ) -> Result<(String, Option<u64>), Error> {
         let sat = self.fx.quote_sat(amount_subunit).await?;
+        let description = invoice_description(
+            &self.fx.unit,
+            amount_subunit,
+            sat,
+            self.fx.markup_percent,
+        );
         let invoice: InvoiceResult = self
             .cln
             .call(
@@ -421,8 +449,7 @@ impl LnRail {
                 serde_json::json!({
                     "amount_msat": sat * 1000,
                     "label": quote_id,
-                    "description": description
-                        .unwrap_or_else(|| "giftcard.nok lightning mint".into()),
+                    "description": description,
                     "expiry": INVOICE_EXPIRY_SECS,
                 }),
             )
@@ -503,5 +530,29 @@ mod tests {
         // 5 NOK (500 cents) at a realistic 1.2M NOK/BTC with 10% markup:
         // 5.5 / 1_200_000 * 1e8 = 458.33 sat.
         assert_eq!(subunit_to_sat(500, 1_200_000.0, 10.0), 459);
+    }
+
+    #[test]
+    fn invoice_description_states_amount_sat_and_effective_rate() {
+        // 500 cents → 459 sat: effective rate 91.8 → 92 sat/unit.
+        assert_eq!(
+            invoice_description("eur", 500, 459, 10.0),
+            "EUR 5.00 -> 459 sat @ 92 sat/EUR (incl. 10% fee)"
+        );
+        // Even division: 10715 sat for 5.00 → exactly 2143.
+        assert_eq!(
+            invoice_description("usd", 500, 10_715, 10.0),
+            "USD 5.00 -> 10715 sat @ 2143 sat/USD (incl. 10% fee)"
+        );
+        // Fractional fiat amounts keep two decimals.
+        assert_eq!(
+            invoice_description("eur", 199, 183, 10.0),
+            "EUR 1.99 -> 183 sat @ 92 sat/EUR (incl. 10% fee)"
+        );
+        // Zero amount must not divide by zero.
+        assert_eq!(
+            invoice_description("eur", 0, 0, 10.0),
+            "EUR 0.00 -> 0 sat @ 0 sat/EUR (incl. 10% fee)"
+        );
     }
 }
