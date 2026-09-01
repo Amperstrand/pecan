@@ -9,6 +9,7 @@ import {
   readTellerCode,
   readWalletDb,
   sendOnchainFromExternal,
+  settleWithSimTeller,
   waitForOpState,
 } from "./helpers/wallet"
 import {
@@ -369,5 +370,53 @@ function registerEurExtras(ctx: SuiteContext): void {
     await page.getByPlaceholder("1.00").fill("2000")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     await expect(page.getByText("not supported (mint limit)")).toBeVisible()
+    // Leave the form usable for the next test on this shared page.
+    await page.getByRole("button", { name: "Try again" }).click()
+  })
+
+  test("sim-teller payout module auto-settles a withdraw", async () => {
+    test.setTimeout(180_000)
+    const page = ctx.page()
+    const before = await readBalance(page)
+    const origin = new URL(page.url()).origin
+
+    const retry = page.getByRole("button", { name: "Try again" })
+    if (await retry.isVisible().catch(() => false)) await retry.click()
+
+    await page.getByPlaceholder("Phone or reference").fill("202-555-0173")
+    await page.getByPlaceholder("1.00").fill("2")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const code = await readTellerCode(page)
+
+    const settled = settleWithSimTeller(code, origin, ctx.consoleBase, 5000)
+    expect(settled.result).toBe("settled")
+    expect(settled.amount).toBe(200)
+    await expect(page.getByText("✓ Paid")).toBeVisible({ timeout: 30_000 })
+    await waitForOpState(page, "melt", code, "finalized", 90_000)
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before - 2, 2)
+
+    // Policy guard: above its cap the module abstains (no action), and a
+    // human teller can still settle the same ticket from the console.
+    await page.getByPlaceholder("Phone or reference").fill("202-555-0174")
+    await page.getByPlaceholder("1.00").fill("2")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    const refusedCode = await readTellerCode(page)
+    const refused = settleWithSimTeller(refusedCode, origin, ctx.consoleBase, 100)
+    expect(refused.result).toBe("refused")
+
+    const ticket = await matchAndSettle(
+      page,
+      refusedCode,
+      "human settles what the module refused",
+      ctx.consoleBase,
+    )
+    expect(ticket.status).toBe("paid")
+    await waitForOpState(page, "melt", refusedCode, "finalized", 90_000)
+    await expect
+      .poll(async () => readBalance(page), { timeout: 90_000 })
+      .toBeCloseTo(before - 4, 2)
+    expectNoWalletErrors(ctx.walletErrors())
   })
 }

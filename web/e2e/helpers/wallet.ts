@@ -1,4 +1,5 @@
-import { execSync } from "node:child_process"
+import { execSync, execFileSync } from "node:child_process"
+import { resolve } from "node:path"
 import { expect, type Page } from "@playwright/test"
 
 // ---------------------------------------------------------------------------
@@ -179,6 +180,34 @@ export async function readTellerCode(page: Page): Promise<string> {
     throw new Error(`expected 6-char teller code, got: "${text}"`)
   }
   return text
+}
+
+/**
+ * Drives the reference automated payout module (payout/sim-teller.py):
+ * match -> fund lock -> simulated payout -> mark-paid. The module prints
+ * one JSON line; returns its verdict (result "settled" or "refused").
+ */
+export function settleWithSimTeller(
+  code: string,
+  origin: string,
+  consoleBase: string,
+  maxAmountCents: number,
+): { result: string; amount?: number; reason?: string } {
+  const script = resolve(process.cwd(), "../payout/sim-teller.py")
+  const args = [
+    script,
+    "--base", `${origin}${consoleBase}`,
+    "--user", "admin",
+    "--password", process.env.PECAN_ADMIN_PASSWORD ?? "",
+    "--code", code,
+    "--max-amount", String(maxAmountCents),
+  ]
+  const out = execFileSync("python3", args, {
+    timeout: 120_000,
+    stdio: ["ignore", "pipe", "pipe"],
+  }).toString()
+  const lines = out.trim().split("\n")
+  return JSON.parse(lines[lines.length - 1])
 }
 
 export async function waitForDepositFormReset(

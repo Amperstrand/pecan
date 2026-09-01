@@ -762,6 +762,9 @@ export function WalletPage() {
               <p className="font-mono text-3xl font-bold tracking-widest select-all">
                 {withdrawState.tail}
               </p>
+              <div className="flex justify-center">
+                <QrCodeImg text={withdrawState.tail} alt="Teller code QR" />
+              </div>
               <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="size-3 animate-spin" />
                 Waiting for payout
