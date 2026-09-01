@@ -1,8 +1,10 @@
 #!/bin/sh
-# Hourly reconciliation daemon over BOTH mint pairs. Installed at
+# Reconciliation daemon over BOTH mint pairs, every 5 minutes. Installed at
 # /opt/pecan-tools/ on inr2; driven by root's crontab:
-#   0 * * * * /opt/pecan-tools/reconcile-server.sh >> /var/log/pecan-reconcile.log 2>&1
-# All reads are sqlite-RO. Writes:
+#   */5 * * * * /opt/pecan-tools/reconcile-server.sh >> /var/log/pecan-reconcile.log 2>&1
+# All reads are sqlite-RO; two passes cost <0.5s — cadence is limited only
+# by log noise, so clean runs log ONE line and drift logs the full report.
+# Writes:
 #   /opt/pecan-tools/reconcile-status.json — last run + per-pair verdict
 #                                             (data source for the ops page)
 #   /opt/pecan-tools/last-drift.txt        — timestamp of the latest drift
@@ -18,14 +20,19 @@ for pair in eur usd; do
     eur) DB=/opt/giftcard-mint/data/cdk-mintd.sqlite;     T=/opt/pecan-data/tickets.json ;;
     usd) DB=/opt/giftcard-mint-usd/data/cdk-mintd.sqlite; T=/opt/pecan-usd-data/tickets.json ;;
   esac
-  echo "--- $STAMP pair=$pair"
   if out=$(python3 "$TOOLS/reconcile-core.py" "$DB" "$T" 2>&1); then
     verdict=clean
   else
     verdict=DRIFT
     drift=1
   fi
-  echo "$out"
+  if [ "$verdict" = DRIFT ]; then
+    echo "--- $STAMP pair=$pair DRIFT"
+    echo "$out"
+  else
+    notes=$(printf '%s\n' "$out" | grep -c '^  note:' || true)
+    echo "$STAMP pair=$pair clean ($notes notes)"
+  fi
   [ "$first" -eq 1 ] || printf ',\n' >> "$TOOLS/reconcile-status.json.tmp"
   printf '  "%s": "%s"' "$pair" "$verdict" >> "$TOOLS/reconcile-status.json.tmp"
   first=0
