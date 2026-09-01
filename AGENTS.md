@@ -34,7 +34,11 @@ converted in pecan from a public rate + 10% markup), and `btc` (per-quote
 bech32 address, esplora-watched, settles at
 `CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS` — **0 = mempool settlement on
 this signet deployment**; use ≥1, realistically ≥6, on any value-carrying
-network). Melting is teller-only — the mint is one-way by construction.
+network). Melting exits through the teller by default; a deployment may
+also enable payout rails — melt destinations written as `rail:destination`
+route to that rail's adapter (see docs/payout-modules.md; both pairs run
+the synthetic `sim` adapter). ln/btc melts stay refused — the one-way
+invariant is test-enforced per pair.
 The payment-processor proto cannot carry the method name yet (upstream PR
 #2275), so the wallet tags the rail in the flattened extra fields
 (`{"rail":"ln"}`) and the processor routes on it. See
