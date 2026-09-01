@@ -70,4 +70,23 @@ function registerUsdExtras(ctx: SuiteContext): void {
       "true",
     )
   })
+
+  // The one-way-mint invariant, USD side of the matrix (EUR asserts it in
+  // wallet.spec.ts): lightning and on-chain melt quotes must be refused —
+  // the teller is the only exit rail.
+  test("one-way mint: ln and btc melt quotes are refused", async () => {
+    const page = ctx.page()
+
+    const lnMelt = await page.request.post("/usd/v1/melt/quote/ln", {
+      headers: { "Content-Type": "application/json" },
+      data: { unit: "usd", amount: 500, request: "lntbs1test", rail: "ln" },
+    })
+    expect(lnMelt.status()).toBeGreaterThanOrEqual(400)
+
+    const btcMelt = await page.request.post("/usd/v1/melt/quote/btc", {
+      headers: { "Content-Type": "application/json" },
+      data: { unit: "usd", amount: 500, request: "tb1qtest", rail: "btc" },
+    })
+    expect(btcMelt.status()).toBeGreaterThanOrEqual(400)
+  })
 }

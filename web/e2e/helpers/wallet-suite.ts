@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test"
 import {
   apiLogin,
+  decodeInvoiceDescription,
   expectNoWalletErrors,
   finalizedMeltChange,
   fundLockReleaseEntry,
@@ -21,6 +22,24 @@ import {
  * pass identically. Currency-specific extras (deep saga tests, switcher
  * checks) register through the callback inside the same serial describe so
  * they share the page and the gates.
+ *
+ * Coverage matrix (rail × currency — keep every cell owned exactly once):
+ *
+ *   flow                                EUR               USD
+ *   teller deposit → auto-claim         suite             suite
+ *   lightning deposit (+rate desc)      suite             suite
+ *   onchain deposit → settle            wallet.spec EUR   usd.spec
+ *   teller withdraw, zero change        suite             suite
+ *   one-way mint: ln/btc melt refused   wallet.spec EUR   usd.spec
+ *   cross-currency concurrency          wallet.spec EUR   —
+ *   currency-switcher isolation         (from USD side)   usd.spec
+ *
+ * Deliberately EUR-only: the saga and wallet-UX rows exercise
+ * currency-agnostic machinery (same code, different mint URL) — reload
+ * saga, swap-kill restore, cancel stickiness, concurrent rails within one
+ * currency, amount validation, backup v2 round-trip, fresh-browser
+ * restore, multi-tab warning, sim-teller policy. Do NOT duplicate them
+ * per currency: 2× runtime, ~0 new signal.
  */
 export interface CurrencySuiteConfig {
   /** Currency the wallet boots in (localStorage pecan-currency). */
@@ -156,6 +175,14 @@ export function defineWalletSuite(
 
       // The card shows the invoice's remaining life (30 min TTL).
       await expect(page.getByText(/^Expires in \d+:\d{2}/)).toBeVisible()
+
+      // The payer's wallet shows the conversion: amount, sats, effective
+      // rate with the markup — decoded straight off the bolt11.
+      const description = decodeInvoiceDescription(invoice)
+      const unit = cfg.currency.toUpperCase()
+      expect(description).toMatch(
+        new RegExp(`${unit} \\d+\\.\\d{2} -> \\d+ sat @ \\d+ sat/${unit} \\(incl\\. \\d+(\\.\\d+)?% fee\\)`),
+      )
 
       const preimage = payLightningInvoice(invoice)
       expect(preimage).toHaveLength(64)

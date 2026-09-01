@@ -520,4 +520,62 @@ function registerEurExtras(ctx: SuiteContext): void {
     await expect(page.getByRole("alert")).toBeHidden({ timeout: 10_000 })
     expectNoWalletErrors(ctx.walletErrors())
   })
+
+  test("cross-currency concurrency: EUR invoice pending while USD teller settles", async () => {
+    const page = ctx.page()
+    const usdPassword = process.env.PECAN_USD_ADMIN_PASSWORD ?? ""
+    test.skip(!usdPassword, "USD admin password unavailable")
+
+    await page.getByRole("tab", { name: "EUR" }).click()
+    const eurBefore = await readBalance(page)
+
+    // EUR lightning invoice stays pending across the whole USD detour.
+    await page.getByRole("button", { name: "Lightning", exact: true }).click()
+    await page.getByPlaceholder("5.00").fill("1")
+    await page.getByRole("button", { name: "Create lightning invoice" }).click()
+    const lnCard = page.locator('[data-testid="deposit-card"]').filter({
+      hasText: "Pay this lightning invoice",
+    })
+    await lnCard.waitFor({ state: "visible", timeout: 30_000 })
+    const invoice = (await lnCard.locator("p.font-mono.select-all").textContent())?.trim()
+    expect(invoice!.startsWith("lntbs")).toBeTruthy()
+
+    // Same wallet, other mint: a USD teller deposit settles end to end
+    // while the EUR invoice is open.
+    await page.getByRole("tab", { name: "USD" }).click()
+    await expect(page.getByRole("tab", { name: "USD" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    )
+    const usdBefore = await readBalance(page)
+    await page.getByRole("button", { name: "Teller", exact: true }).click()
+    await page.getByPlaceholder("5.00").fill("2")
+    await page.getByRole("button", { name: "Create deposit quote" }).click()
+    // The EUR invoice card is on screen too; the 6-char code lives only
+    // on the teller card.
+    const code = await readTellerCode(page)
+    await apiLogin(page, "/usd-console", usdPassword)
+    const ticket = await matchAndSettle(
+      page,
+      code,
+      "E2E cross-currency USD teller",
+      "/usd-console",
+    )
+    expect(ticket.status).toBe("paid")
+    expect(ticket.unit).toBe("usd")
+    await expect
+      .poll(async () => readBalance(page), { timeout: 45_000 })
+      .toBeCloseTo(usdBefore + 2, 2)
+
+    // Now the EUR invoice settles too — both currencies credited on one
+    // wallet, both cards cleared.
+    const preimage = payLightningInvoice(invoice!)
+    expect(preimage).toHaveLength(64)
+    await page.getByRole("tab", { name: "EUR" }).click()
+    await expect
+      .poll(async () => readBalance(page), { timeout: 60_000 })
+      .toBeCloseTo(eurBefore + 1, 2)
+    await expect(page.locator('[data-testid="deposit-card"]')).toHaveCount(0)
+    expectNoWalletErrors(ctx.walletErrors())
+  })
 }

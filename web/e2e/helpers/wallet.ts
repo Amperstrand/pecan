@@ -95,6 +95,26 @@ export function payLightningInvoiceFrom(node: string, invoice: string): string {
   return match[1]
 }
 
+/**
+ * Decodes a bolt11 on a lab node to read back what the payer's wallet
+ * shows — the invoice description must carry the exchange rate.
+ */
+export function decodeInvoiceDescription(invoice: string): string {
+  let out: string
+  try {
+    out = execSync(
+      `ssh root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet decode ${invoice}"`,
+      { timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString()
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
+    throw new Error(`bolt11 decode failed: ${stderr.slice(0, 300)}`)
+  }
+  const match = out.match(/"description":\s*"((?:[^"\\]|\\.)*)"/)
+  if (!match) throw new Error(`no description in decode output: ${out.slice(0, 300)}`)
+  return JSON.parse(`"${match[1]}"`) as string
+}
+
 /** Pays from the hub node (well-connected, multiple channels). */
 export function payLightningInvoice(invoice: string): string {
   return payLightningInvoiceFrom("cln-hub-signet", invoice)
