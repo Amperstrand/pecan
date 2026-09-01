@@ -62,7 +62,7 @@ Every payout module drives the same console API loop:
 | cash-teller | — (human) | human counts out cash | live |
 | sim-teller | — (claim sim) | simulates the human teller for plain branch melts | reference impl |
 | payout-sim | `sim` | simulated transfer to the enveloped destination | generic sample adapter |
-| bank-sim | `sepa`, `sepa-instant` | simulated SEPA credit / instant transfer to an IBAN, receipt reference on settlement | EU rails, lifted from the pleBank bill-payment model |
+| bank-sim | `sepa`, `sepa-instant`, `swish`, `mobilepay`, `ideal`, `bizum` | simulated fiat transfers per scheme, receipt reference on settlement | simulated fiat rails |
 | real-rail adapter | own id | real transfer via that rail's backend | future — plug in as a new rail id |
 
 - **sim-teller** simulates the *human teller* on plain branch melts
@@ -72,16 +72,27 @@ Every payout module drives the same console API loop:
   claims only `payout_rail == "sim"`, amount cap, simulated transfer, notes
   carrying the rail name. Copy it, change the rail id and the transfer step,
   enable the id in `PAYOUT_RAILS` — that is the whole integration.
-- **bank-sim** (`payout/bank-sim.py`) lifts the EU rail semantics from the
-  pleBank bill-payment system (creditor IBAN + remittance info, ISO
-  20022-style receipts) into simulated adapters: `sepa` settles after a
-  batch delay with an EndToEndId-style receipt (`E2E-YYMMDD-XXXXXXXX`);
-  `sepa-instant` settles immediately with a UETR (the identifier the real
-  instant scheme uses). Destinations are mod-97 IBAN-validated — stricter
-  than pleBank's length check, which carried an invalid ES fixture. The
-  receipt lands in the settled ticket's notes (audit trail) and the
-  adapter verdict; showing it in the wallet needs a proof-propagation
-  channel through the mint (open).
+- **bank-sim** (`payout/bank-sim.py`) is the simulated fiat-rail registry.
+  The SEPA pair lifts its semantics from the pleBank bill-payment system
+  (creditor IBAN + remittance info, ISO 20022-style receipts); the mobile
+  and retail rails (`swish`, `mobilepay`, `ideal`, `bizum`) follow the
+  public schemes' own addressing and receipt formats. Every destination is
+  validated per scheme before any action — SEPA IBANs are mod-97 checked
+  (stricter than pleBank's length-only check, which carried an invalid ES
+  fixture), phone rails require E.164 within their country prefixes,
+  `ideal` requires an NL IBAN.
+
+## Receipts are the payment proof
+
+Adapters settle with `{notes, receipt}`; the receipt is Lightning's
+preimage in miniature — revealed only at settlement, unique, verifiable
+against the rail's own records (a bank reference). The processor returns
+it as the melt's `payment_proof`, the mint surfaces it as the quote's
+`payment_preimage`, and the wallet displays it in the withdraw's
+"✓ Paid — …" card exactly where Lightning shows a preimage. Teller
+settles without a receipt fall back to the settle notes as the proof.
+Notes remain the human audit trail on the ticket; the receipt stays a
+short, copyable token.
 - **A real adapter** (e.g. a mobile-payment or bank rail) is payout-sim with
   a real transfer call and its own rail id; the deployment adds the id to
   `CDK_BRANCH_PROCESSOR_PAYOUT_RAILS` and the wallet needs no changes — the
