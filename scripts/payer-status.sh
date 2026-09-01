@@ -21,9 +21,13 @@ try:
                if o["status"] == "confirmed" and not o.get("reserved"))
     res = sum(o["amount_msat"] // 1000 for o in outs
               if o["status"] == "confirmed" and o.get("reserved"))
-    print(free, res)
+    # Unconfirmed outputs are refill top-ups waiting on a signet block —
+    # money in flight, not missing.
+    pend = sum(o["amount_msat"] // 1000 for o in outs
+               if o["status"] == "unconfirmed" and not o.get("reserved"))
+    print(free, res, pend)
 except Exception:
-    print(-1, -1)
+    print(-1, -1, -1)
 '
 }
 
@@ -34,8 +38,8 @@ first=1
 for payer in cln-hub-signet cln-vls-signet cln-nostr-signet; do
   set -- $(funds "$payer")
   [ "$first" -eq 1 ] || printf ',\n' >> "$TOOLS/payer-status.json.tmp"
-  printf '  {"name": "%s", "free": %s, "reserved": %s}' \
-    "$payer" "${1:-0}" "${2:-0}" >> "$TOOLS/payer-status.json.tmp"
+  printf '  {"name": "%s", "free": %s, "reserved": %s, "pending": %s}' \
+    "$payer" "${1:-0}" "${2:-0}" "${3:-0}" >> "$TOOLS/payer-status.json.tmp"
   first=0
 done
 printf '\n ]\n}\n' >> "$TOOLS/payer-status.json.tmp"

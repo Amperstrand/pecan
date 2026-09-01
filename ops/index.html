@@ -172,10 +172,11 @@ function renderPayers(st) {
   let html = `<div style="margin-bottom:8px">${resPill}</div>`
   html += `<table><tr><th>payer</th><th class="num">free</th><th class="num">reserved</th><th></th></tr>`
   for (const p of st.payers || []) {
-    const cls = p.free < 0 ? "bad" : p.free >= PAYER_TARGET ? "ok" : "warn"
-    const note = p.free < 0 ? "unreachable" : p.free >= PAYER_TARGET ? "ok" : "low"
+    const total = p.free + (p.pending || 0)
+    const cls = p.free < 0 ? "bad" : total >= PAYER_TARGET ? "ok" : "warn"
+    const note = p.free < 0 ? "unreachable" : total >= PAYER_TARGET ? "ok" : "low"
     html += `<tr><td class="mono">${p.name}</td>` +
-      `<td class="num">${p.free < 0 ? "—" : p.free.toLocaleString()}</td>` +
+      `<td class="num">${p.free < 0 ? "—" : p.free.toLocaleString()}${p.pending > 0 ? ` <span class="muted">+${p.pending.toLocaleString()} pend</span>` : ""}</td>` +
       `<td class="num muted">${p.reserved < 0 ? "—" : p.reserved.toLocaleString()}</td>` +
       `<td><span class="pill ${cls}">${note}</span></td></tr>`
   }

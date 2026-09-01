@@ -27,7 +27,10 @@ try:
     st = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
-low = [p['name'] for p in st.get('payers', []) if 0 <= p['free'] < $MIN_FREE]
+# Pending = refill top-ups waiting on a signet block; they count towards
+# run-readiness (spendable within one block, ~5 min).
+low = [p['name'] for p in st.get('payers', [])
+       if 0 <= p['free'] + p.get('pending', 0) < $MIN_FREE]
 if low:
     print(' '.join(low))
 " || echo "status-unavailable"
@@ -55,6 +58,9 @@ while [ "$i" -le "$RUNS" ]; do
   elif [ -n "$low" ]; then
     echo "  payers low: $low — topping up from reservoir"
     ssh "$SERVER" "$TOOLS/refill-payers.sh" || true
+    # The status snapshot is up to 10 min stale (cron) — regenerate it
+    # before re-checking, or the refill just made still reads as low.
+    ssh "$SERVER" "$TOOLS/payer-status.sh" >/dev/null 2>&1 || true
     still_low=$(payers_low)
     if [ "$still_low" != "status-unavailable" ] && [ -n "$still_low" ]; then
       echo "  reservoir cannot cover: $still_low still low — stopping"
