@@ -39,6 +39,11 @@ services:
       # >= 1 (realistically >= 6).
       CDK_BRANCH_PROCESSOR_ONCHAIN: "true"
       CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "0"
+      # Payout rails (see docs/payout-modules.md): melt destinations
+      # written as `rail:destination` route to that rail's adapter;
+      # envelopes naming anything else are refused at quote time.
+      # `sim` is the synthetic sample adapter (payout/payout-sim.py).
+      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim"
     logging:
       driver: json-file
       options:
