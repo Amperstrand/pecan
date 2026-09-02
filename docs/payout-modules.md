@@ -231,11 +231,12 @@ reserve → deliver → settle the exact metered amount → return change.
 
 A charge session can end before its paid window does (the Atom's G39
 button, a wallet-side Stop, the car unplugging). Cashu has no native
-hold, and NUT-05 change is one-time knowledge signed into the melt
-RESPONSE — our exact-amount pre-swap deliberately produces none, and an
-asynchronous settle cannot retroactively mint it (the change-loss
-postmortem in docs/lightning-mint.md § Melt saga). So "the mint gives
-change later" has to be built one of three ways:
+hold; the full mechanics, the three designs (streaming — shipped;
+refund-as-mint-quote; true async melt change), their comparison and the
+upstream research live in [partial-delivery.md](partial-delivery.md) —
+including the correction that async melt change IS an ecosystem-supported
+pattern (cashu-ts `createMeltChangeProofs`, cdk #1961, nutshell #991),
+unwired only in our cdk-mintd build and wallet layer. Summary:
 
 **A. Streaming melts (chosen, implemented)** — never prepay more than
 the current chunk. The wallet melts €1 (= 1 s at the demo tariff),
@@ -255,12 +256,12 @@ existing primitives, but needs refund-amount plumbing (quote amounts
 are fixed at creation) and wallet-side discovery of the refund quote.
 The upgrade path if provable per-session refunds become a requirement.
 
-**C. Partial `total_spent` settle** — cdk processors CAN settle a melt
-for less than quoted and let the mint return the difference as change,
-but only synchronously against change outputs supplied in the original
-melt request. Our settles are asynchronous by construction; without
-change outputs the difference burns. Dead end for this flow, recorded
-so it is not rediscovered.
+**C. True async melt change** — settle with `total_spent = delivered`,
+blanks attached in the melt request, change signatures returned on the
+PAID quote check. The ecosystem-standard pattern for async melts
+(research in partial-delivery.md); needs a cdk-mintd verify/bump plus
+wallet-side index-matched unblinding. The upgrade path for exact
+billing.
 
 The stop signals, end to end: the wallet's Stop button simply stops
 melting further chunks (the current second finishes); the Atom's G39
