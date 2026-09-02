@@ -462,6 +462,8 @@ struct ApiTicket {
     /// Payout rail that must fulfill this melt; `None` = human teller.
     /// Adapters refuse tickets whose rail is not theirs.
     payout_rail: Option<String>,
+    /// Settlement receipt from the payout rail — the payment proof.
+    receipt: Option<String>,
     notes: Option<String>,
     settled_by: Option<String>,
     voided_by: Option<String>,
@@ -658,6 +660,7 @@ impl ApiTicket {
             expires_at: ticket.expires_at,
             description: ticket.description.clone(),
             payout_rail: ticket.payout_rail.clone(),
+            receipt: ticket.receipt.clone(),
             notes: ticket.notes.clone(),
             settled_by: ticket.settled_by.clone(),
             voided_by: ticket.voided_by.clone(),
@@ -988,7 +991,7 @@ async fn api_mark_paid(
         Ok(authed) => authed,
         Err(r) => return r,
     };
-    match mark_paid_inner(&state, &id, form.notes, &authed.username).await {
+    match mark_paid_inner(&state, &id, form.notes, form.receipt, &authed.username).await {
         Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -1412,6 +1415,8 @@ struct LoginForm {
 struct NotesForm {
     #[serde(default)]
     notes: String,
+    #[serde(default)]
+    receipt: String,
 }
 
 fn clean_notes(notes: String) -> Option<String> {
@@ -1427,11 +1432,12 @@ async fn mark_paid_inner(
     state: &WebState,
     id: &str,
     notes: String,
+    receipt: String,
     settled_by: &str,
 ) -> Result<Ticket, String> {
     state
         .branch
-        .mark_paid(id, clean_notes(notes), settled_by)
+        .mark_paid(id, clean_notes(notes), clean_notes(receipt), settled_by)
         .await
         .map_err(|e| format!("mark_paid: {e}"))
 }

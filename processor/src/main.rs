@@ -356,6 +356,9 @@ async fn main() -> Result<()> {
         payout::rails_from_config(
             &std::env::var("CDK_BRANCH_PROCESSOR_PAYOUT_RAILS").unwrap_or_default(),
         ),
+        std::env::var("CDK_BRANCH_PROCESSOR_PAYOUT_AUTOSIM")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
     ));
     let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
         .map_err(|e| anyhow!("payment processor server init: {e}"))?;

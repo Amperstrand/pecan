@@ -75,6 +75,13 @@ pub struct Ticket {
     /// envelope in the wallet's request). `None` = human teller.
     #[serde(default)]
     pub payout_rail: Option<String>,
+    /// Settlement receipt from the payout rail (bank reference, transfer
+    /// id). Returned as the melt's payment proof so the wallet displays it
+    /// where Lightning shows its preimage — the Lightning analogue is
+    /// exact: revealed only at settlement, unique, verifiable against the
+    /// rail's own records.
+    #[serde(default)]
+    pub receipt: Option<String>,
     /// Free-form notes added by the operator.
     pub notes: Option<String>,
     /// Unix timestamp after which an unsettled ticket is dead. Mint tickets
@@ -111,6 +118,7 @@ impl Ticket {
             paid_at: None,
             description,
             payout_rail: None,
+            receipt: None,
             notes: None,
             expires_at,
             settled_by: None,
@@ -139,6 +147,7 @@ impl Ticket {
             paid_at: None,
             description,
             payout_rail,
+            receipt: None,
             notes: None,
             expires_at,
             settled_by: None,
@@ -436,6 +445,7 @@ impl BranchState {
         &self,
         id: &str,
         notes: Option<String>,
+        receipt: Option<String>,
         settled_by: &str,
     ) -> Result<Ticket> {
         let (updated, transitioned) = {
@@ -465,6 +475,9 @@ impl BranchState {
                     ticket.paid_at = Some(unix_now());
                     if let Some(n) = notes {
                         ticket.notes = Some(n);
+                    }
+                    if let Some(r) = receipt {
+                        ticket.receipt = Some(r);
                     }
                     ticket.settled_by = Some(settled_by.to_string());
                     (ticket.clone(), true)
@@ -657,7 +670,10 @@ fn outgoing_payment_response(t: &Ticket) -> MakePaymentResponse {
     };
     MakePaymentResponse {
         payment_lookup_id: PaymentIdentifier::CustomId(t.id.clone()),
-        payment_proof: t.notes.clone(),
+        // The receipt is the payout proof the wallet shows (Lightning's
+        // preimage analogue); notes are the audit fallback for teller
+        // settles that carry no rail receipt.
+        payment_proof: t.receipt.clone().or_else(|| t.notes.clone()),
         status,
         total_spent: Amount::new(t.amount, t.unit_typed()),
     }
@@ -800,7 +816,7 @@ mod tests {
             .insert_open(incoming("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 500))
             .await
             .unwrap();
-        state.mark_paid(&t.id, None, "test").await.unwrap();
+        state.mark_paid(&t.id, None, None, "test").await.unwrap();
 
         let query = normalize_match_input("9ec0f4").unwrap();
         assert!(matches!(
@@ -820,12 +836,12 @@ mod tests {
             .unwrap();
         let mut rx = state.subscribe_events();
 
-        let paid = state.mark_paid(&t.id, Some("till #1".into()), "test").await.unwrap();
+        let paid = state.mark_paid(&t.id, Some("till #1".into()), None, "test").await.unwrap();
         assert_eq!(paid.status, TicketStatus::Paid);
         assert!(matches!(rx.try_recv(), Ok(Event::PaymentReceived(_))));
 
         // repeated confirm is a no-op and must not double-credit
-        let again = state.mark_paid(&t.id, None, "test").await.unwrap();
+        let again = state.mark_paid(&t.id, None, None, "test").await.unwrap();
         assert_eq!(again.status, TicketStatus::Paid);
         assert!(rx.try_recv().is_err());
     }
@@ -839,13 +855,13 @@ mod tests {
             .unwrap();
         state.mark_failed(&t.id, None, "test").await.unwrap();
         let mut rx = state.subscribe_events();
-        assert!(state.mark_paid(&t.id, None, "test").await.is_err());
+        assert!(state.mark_paid(&t.id, None, None, "test").await.is_err());
         assert!(rx.try_recv().is_err(), "voided ticket must not emit payment");
 
         let mut expired = incoming("0198c0ef-3f11-7abc-9def-bbbbbb111111", 700);
         expired.expires_at = Some(unix_now() - 1);
         let expired = state.insert_open(expired).await.unwrap();
-        assert!(state.mark_paid(&expired.id, None, "test").await.is_err());
+        assert!(state.mark_paid(&expired.id, None, None, "test").await.is_err());
     }
 
     #[tokio::test]
@@ -862,7 +878,7 @@ mod tests {
         assert!(state.insert_open(incoming(quote, 999)).await.is_err());
 
         // settled ids can never be re-registered
-        state.mark_paid(&t.id, None, "test").await.unwrap();
+        state.mark_paid(&t.id, None, None, "test").await.unwrap();
         assert!(state.insert_open(incoming(quote, 500)).await.is_err());
     }
 
@@ -891,13 +907,13 @@ mod tests {
         assert_eq!(t.status, TicketStatus::Waiting);
 
         // wallet has not locked funds → no payout
-        assert!(state.mark_paid(&t.id, None, "test").await.is_err());
+        assert!(state.mark_paid(&t.id, None, None, "test").await.is_err());
 
         // wallet funds the melt → Pending, payout allowed, success event fires
         let funded = state.mark_outgoing_submitted(&t.id).await.unwrap();
         assert_eq!(funded.status, TicketStatus::Pending);
         let mut rx = state.subscribe_events();
-        let paid = state.mark_paid(&t.id, None, "test").await.unwrap();
+        let paid = state.mark_paid(&t.id, None, None, "test").await.unwrap();
         assert_eq!(paid.status, TicketStatus::Paid);
         assert!(matches!(
             rx.try_recv(),
@@ -907,6 +923,63 @@ mod tests {
             .outgoing_by_quote_id("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4")
             .await
             .is_some_and(|x| x.id == t.id));
+    }
+
+    #[tokio::test]
+    async fn rail_receipt_is_the_payment_proof() {
+        let state = fresh_state().await;
+        let t = Ticket::new_outgoing(
+            "0198c0ef-3f11-7abc-9def-bbbbbba1b1b1".into(),
+            500,
+            "eur".into(),
+            Some("NL33INGB0000000881".into()),
+            Some("sepa".into()),
+            None,
+        );
+        let t = state.insert_open(t).await.unwrap();
+        state.mark_outgoing_submitted(&t.id).await.unwrap();
+
+        // Rail settle with notes + receipt: the receipt is the proof the
+        // wallet displays; notes stay the audit record.
+        let paid = state
+            .mark_paid(
+                &t.id,
+                Some("payout rail sepa receipt=E2E-1 iban=NL33…".into()),
+                Some("E2E-260901-AB12CD34".into()),
+                "bank-sim",
+            )
+            .await
+            .unwrap();
+        assert_eq!(paid.receipt.as_deref(), Some("E2E-260901-AB12CD34"));
+        let resp = state
+            .lookup_outgoing(&PaymentIdentifier::CustomId(t.id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.payment_proof.as_deref(),
+            Some("E2E-260901-AB12CD34")
+        );
+
+        // Teller settle without a receipt: notes remain the proof.
+        let t2 = Ticket::new_outgoing(
+            "0198c0ef-3f11-7abc-9def-bbbbbba2b2b2".into(),
+            500,
+            "eur".into(),
+            Some("counter".into()),
+            None,
+            None,
+        );
+        let t2 = state.insert_open(t2).await.unwrap();
+        state.mark_outgoing_submitted(&t2.id).await.unwrap();
+        state
+            .mark_paid(&t2.id, Some("till #2".into()), None, "test")
+            .await
+            .unwrap();
+        let resp2 = state
+            .lookup_outgoing(&PaymentIdentifier::CustomId(t2.id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resp2.payment_proof.as_deref(), Some("till #2"));
     }
 
     #[tokio::test]
@@ -927,7 +1000,7 @@ mod tests {
         assert_eq!(resp.status, MeltQuoteState::Failed);
 
         // and the operator must not pay out cash for it
-        let err = state.mark_paid(&t.id, None, "test").await.unwrap_err();
+        let err = state.mark_paid(&t.id, None, None, "test").await.unwrap_err();
         assert!(err.to_string().contains("expired"));
 
         // unexpired payouts are unaffected

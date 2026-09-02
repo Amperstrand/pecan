@@ -226,6 +226,7 @@ export function settleWithPayoutSim(
   result: string
   rail?: string
   destination?: string
+  receipt?: string
   ticket_rail?: string | null
   amount?: number
   reason?: string
@@ -237,6 +238,7 @@ export function settleWithPayoutSim(
     result: string
     rail?: string
     destination?: string
+    receipt?: string
     ticket_rail?: string | null
     amount?: number
     reason?: string

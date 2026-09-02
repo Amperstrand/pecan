@@ -60,6 +60,10 @@ pub struct BranchBackend {
     /// Payout rails this deployment operates (enveloped melt destinations
     /// naming anything else are refused at quote time). Empty = teller-only.
     payout_rails: HashSet<String>,
+    /// Demo mode: auto-settle enveloped rail tickets after the fund lock
+    /// with a generated scheme receipt (CDK_BRANCH_PROCESSOR_PAYOUT_AUTOSIM).
+    /// Off, the python adapters in payout/ do the settling on invocation.
+    autosim: bool,
     stream_active: AtomicBool,
     /// Unix seconds of the first `wait_payment_event` attach since this
     /// process started; 0 = never. Never cleared on client disconnect — it
@@ -87,6 +91,7 @@ impl BranchBackend {
         ln: Option<Arc<LnRail>>,
         onchain: Option<Arc<OnchainRail>>,
         payout_rails: HashSet<String>,
+        autosim: bool,
     ) -> Self {
         Self {
             state,
@@ -95,6 +100,7 @@ impl BranchBackend {
             ln,
             onchain,
             payout_rails,
+            autosim,
             stream_active: AtomicBool::new(false),
             stream_attached_at: AtomicU64::new(0),
             last_settings_at: AtomicU64::new(0),
@@ -109,6 +115,30 @@ impl BranchBackend {
     /// the new value up on its next start (it reads `get_settings` at boot).
     pub fn set_unit(&self, unit: Option<CurrencyUnit>) {
         *self.unit.write().expect("unit lock") = unit;
+    }
+
+    /// Demo-mode settler: after the scheme's simulated latency, mark the
+    /// ticket paid with a generated receipt — the wallet sees the melt
+    /// finalize on its own, exactly as a real rail's confirmation callback
+    /// would. A repeated or raced settle is a no-op (`mark_paid` is
+    /// idempotent on Paid).
+    fn spawn_autosim_settle(&self, ticket_id: String, rail: String, delay_ms: u64) {
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            let receipt = crate::payout::receipt_for_rail(&rail)
+                .unwrap_or_else(|| "SIM-UNKNOWN".to_string());
+            let notes = format!(
+                "payout rail {rail} (auto-simulated) receipt={receipt}"
+            );
+            match state
+                .mark_paid(&ticket_id, Some(notes), Some(receipt), "autosim")
+                .await
+            {
+                Ok(_) => tracing::info!("autosim settled {ticket_id} on rail {rail}"),
+                Err(e) => tracing::warn!("autosim settle failed for {ticket_id}: {e}"),
+            }
+        });
     }
 
     /// Unix seconds of the first payment-stream attach since process start.
@@ -427,6 +457,14 @@ impl MintPayment for BranchBackend {
                             req.rail
                         )));
                     }
+                    // Invalid destinations never become tickets — same
+                    // fail-fast gate as unoperated rails.
+                    if !crate::payout::valid_destination(&req.rail, &req.destination) {
+                        return Err(Error::Custom(format!(
+                            "invalid {} destination",
+                            req.rail
+                        )));
+                    }
                 }
                 let ticket = Ticket::new_outgoing(
                     opts.quote_id.to_string(),
@@ -492,6 +530,13 @@ impl MintPayment for BranchBackend {
                     .mark_outgoing_submitted(&ticket.id)
                     .await
                     .map_err(|e| Error::Custom(e.to_string()))?;
+                if self.autosim {
+                    if let Some(rail) = ticket.payout_rail.clone() {
+                        if let Some(delay) = crate::payout::settle_delay_ms(&rail) {
+                            self.spawn_autosim_settle(ticket.id.clone(), rail, delay);
+                        }
+                    }
+                }
                 let status = match ticket.status {
                     crate::state::TicketStatus::Paid => MeltQuoteState::Paid,
                     crate::state::TicketStatus::Failed => MeltQuoteState::Failed,
@@ -658,6 +703,7 @@ mod tests {
                 None,
                 None,
                 rails_from_config(rails),
+                false,
             )
         }
 

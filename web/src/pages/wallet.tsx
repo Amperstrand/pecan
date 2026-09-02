@@ -72,6 +72,65 @@ type WithdrawState =
   | { phase: "done"; preimage: string }
   | { phase: "error"; message: string }
 
+/**
+ * Withdraw destinations: the teller rail (human) plus the deployment's
+ * simulated payout rails — sending on a simulated rail settles
+ * automatically in this deployment and hands back the scheme's receipt
+ * reference as the payment proof.
+ */
+const WITHDRAW_OPTIONS = [
+  {
+    id: "teller",
+    label: "Teller",
+    placeholder: "Phone or reference",
+    hint: "Send ecash to a recipient via the teller.",
+  },
+  {
+    id: "sepa",
+    label: "SEPA",
+    placeholder: "IBAN, e.g. NL33INGB0000000881",
+    hint: "Bank transfer — settles with an E2E reference as receipt.",
+  },
+  {
+    id: "sepa-instant",
+    label: "Instant",
+    placeholder: "IBAN, e.g. DE96370205000003292912",
+    hint: "SEPA instant — settles with a UETR receipt.",
+  },
+  {
+    id: "swish",
+    label: "Swish",
+    placeholder: "+46…",
+    hint: "Mobile bank payment (SE) — Swish reference receipt.",
+  },
+  {
+    id: "mobilepay",
+    label: "MobilePay",
+    placeholder: "+45… / +358…",
+    hint: "Mobile wallet (DK/FI) — transaction-id receipt.",
+  },
+  {
+    id: "ideal",
+    label: "iDEAL",
+    placeholder: "NL IBAN",
+    hint: "Dutch instant bank rail — transaction-id receipt.",
+  },
+  {
+    id: "bizum",
+    label: "Bizum",
+    placeholder: "+34…",
+    hint: "Spanish mobile rail — operation-reference receipt.",
+  },
+  {
+    id: "sim",
+    label: "Sim",
+    placeholder: "alias",
+    hint: "Generic simulated rail — token receipt.",
+  },
+] as const
+
+type WithdrawRail = (typeof WITHDRAW_OPTIONS)[number]["id"]
+
 function QrCodeImg({ text, alt }: { text: string; alt: string }) {
   const [src, setSrc] = useState<string | null>(null)
   useEffect(() => {
@@ -268,6 +327,7 @@ export function WalletPage() {
   const [depositMethod, setDepositMethod] = useState<"branch" | "ln" | "btc">("branch")
   const [withdrawAmount, setWithdrawAmount] = useState("")
   const [withdrawRecipient, setWithdrawRecipient] = useState("")
+  const [withdrawRail, setWithdrawRail] = useState<WithdrawRail>("teller")
   const [depositState, setDepositState] = useState<DepositState>({ phase: "idle" })
   const [pendingDeposits, setPendingDeposits] = useState<DepositQuote[]>([])
   const pendingRef = useRef<DepositQuote[]>([])
@@ -295,6 +355,10 @@ export function WalletPage() {
     (next: Currency) => {
       setActiveCurrency(next)
       setCurrencyState(next)
+      // Blank the stale figure immediately — until the next currency's
+      // balance loads, the card must show "…", never the previous
+      // currency's number under the new tab.
+      setBalance(null)
       setDepositState({ phase: "idle" })
       setWithdrawState({ phase: "idle" })
       void refresh(next)
@@ -333,7 +397,7 @@ export function WalletPage() {
               withdrawPollRef = null
               setWithdrawState({ phase: "done", preimage })
               refresh()
-              setTimeout(() => setWithdrawState({ phase: "idle" }), 5000)
+              setTimeout(() => setWithdrawState({ phase: "idle" }), 60_000)
             }
           }, 3000)
         }
@@ -435,14 +499,22 @@ export function WalletPage() {
     if (!withdrawRecipient.trim()) {
       setWithdrawState({
         phase: "error",
-        message: "Enter a phone number or reference for the teller.",
+        message:
+          withdrawRail === "teller"
+            ? "Enter a phone number or reference for the teller."
+            : "Enter a destination for this rail.",
       })
       return
     }
     const amount = parseFloat(withdrawAmount)
+    // Simulated rails ride the payout envelope: rail:destination.
+    const target =
+      withdrawRail === "teller"
+        ? withdrawRecipient.trim()
+        : `${withdrawRail}:${withdrawRecipient.trim()}`
     setWithdrawState({ phase: "creating" })
     try {
-      const result = await createWithdraw(amount, withdrawRecipient.trim())
+      const result = await createWithdraw(amount, target)
       setWithdrawState({ phase: "pending", quoteId: result.quoteId, tail: result.tail })
       refresh()
 
@@ -452,7 +524,9 @@ export function WalletPage() {
           clearInterval(interval)
           setWithdrawState({ phase: "done", preimage })
           refresh()
-          setTimeout(() => setWithdrawState({ phase: "idle" }), 5000)
+          // The receipt reference is the proof of payment — leave it up
+          // long enough to read and copy.
+          setTimeout(() => setWithdrawState({ phase: "idle" }), 60_000)
         }
       }, 3000)
 
@@ -725,18 +799,43 @@ export function WalletPage() {
             <ArrowUp className="size-4" /> Withdraw
           </CardTitle>
           <CardDescription>
-            Send ecash to a recipient via the teller.
+            {WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)?.hint}
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
           {withdrawState.phase === "idle" || withdrawState.phase === "done" ? (
             <>
+              <div
+                className="grid grid-cols-3 gap-1.5 rounded-lg bg-muted p-1 text-sm"
+                role="tablist"
+                aria-label="Withdraw rail"
+              >
+                {WITHDRAW_OPTIONS.map((o) => (
+                  <button
+                    key={o.id}
+                    role="tab"
+                    type="button"
+                    aria-selected={withdrawRail === o.id}
+                    onClick={() => setWithdrawRail(o.id)}
+                    className={`rounded-md px-2 py-1.5 transition-colors ${
+                      withdrawRail === o.id
+                        ? "bg-background font-medium shadow-sm"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
               <div className="grid gap-1.5">
-                <Label htmlFor="wd-recipient">Recipient</Label>
+                <Label htmlFor="wd-recipient">Destination</Label>
                 <Input
                   id="wd-recipient"
                   type="text"
-                  placeholder="Phone or reference"
+                  placeholder={
+                    WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)
+                      ?.placeholder
+                  }
                   value={withdrawRecipient}
                   onChange={(e) => setWithdrawRecipient(e.target.value)}
                 />
@@ -754,15 +853,31 @@ export function WalletPage() {
                   onChange={(e) => setWithdrawAmount(e.target.value)}
                 />
               </div>
-              <Button
-                variant="outline"
-                onClick={startWithdraw}
-                disabled={!withdrawAmount || !withdrawRecipient}
-              >
-                {withdrawState.phase === "done"
-                  ? `✓ Paid — ${withdrawState.preimage}`
-                  : "Send"}
-              </Button>
+              {withdrawState.phase === "done" ? (
+                <div className="grid gap-2 rounded-md border p-3 text-center">
+                  <p className="break-all font-mono text-sm">
+                    {withdrawState.preimage}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Receipt — your proof of payment
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setWithdrawState({ phase: "idle" })}
+                  >
+                    New withdraw
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  onClick={startWithdraw}
+                  disabled={!withdrawAmount || !withdrawRecipient}
+                >
+                  Send
+                </Button>
+              )}
             </>
           ) : withdrawState.phase === "creating" ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">

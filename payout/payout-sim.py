@@ -24,6 +24,7 @@ Exit codes: 0 settled · 2 policy refusal · 3 fund-lock timeout ·
 import argparse
 import http.cookiejar
 import json
+import secrets
 import sys
 import time
 import urllib.error
@@ -45,7 +46,6 @@ def main() -> int:
                    help="simulated transfer duration in seconds")
     p.add_argument("--timeout", type=float, default=90.0,
                    help="seconds to wait for the wallet's fund lock")
-    p.add_argument("--notes", default=f"payout rail {RAIL} (simulated transfer)")
     a = p.parse_args()
 
     jar = http.cookiejar.CookieJar()
@@ -103,9 +103,11 @@ def main() -> int:
 
     # Transfer step: this is the only rail-specific part. Simulated here.
     time.sleep(a.settle_delay)
+    receipt = "SIM-{}".format(secrets.token_hex(4).upper())
 
+    notes = f"payout rail {RAIL} (simulated transfer) receipt={receipt}"
     try:
-        post(f"/api/tickets/{tid}/mark-paid", {"notes": a.notes})
+        post(f"/api/tickets/{tid}/mark-paid", {"notes": notes, "receipt": receipt})
     except urllib.error.HTTPError as e:
         return emit({"result": "api-error", "id": tid,
                      "stage": "mark-paid", "status": e.code}, 4)
@@ -115,6 +117,7 @@ def main() -> int:
                      "error": str(e.reason)}, 4)
     return emit({"result": "settled", "id": tid, "rail": RAIL,
                  "amount": amount, "destination": destination,
+                 "receipt": receipt,
                  "unit": t.get("unit"), "status": "paid"}, 0)
 
 

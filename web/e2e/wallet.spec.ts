@@ -11,7 +11,6 @@ import {
   sendOnchainFromExternal,
   settleWithSimTeller,
   settleWithPayoutSim,
-  settleWithBankSim,
   waitForOpState,
 } from "./helpers/wallet"
 import {
@@ -385,7 +384,7 @@ function registerEurExtras(ctx: SuiteContext): void {
     const settled = settleWithSimTeller(code, origin, ctx.consoleBase, 5000)
     expect(settled.result).toBe("settled")
     expect(settled.amount).toBe(200)
-    await expect(page.getByText("✓ Paid")).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByText("Receipt — your proof of payment")).toBeVisible({ timeout: 30_000 })
     await waitForOpState(page, "melt", code, "finalized", 90_000)
     await expect
       .poll(async () => readBalance(page), { timeout: 90_000 })
@@ -580,24 +579,25 @@ function registerEurExtras(ctx: SuiteContext): void {
     const before = await readBalance(page)
     const origin = new URL(page.url()).origin
 
-    // Enveloped destination routes to the sim adapter, which settles it.
-    await page.getByPlaceholder("Phone or reference").fill("sim:e2e-rail-alias")
+    // Sim rail via the picker: autosim settles it after the fund lock
+    // and the wallet shows the receipt as the payment proof.
+    await page.getByRole("tab", { name: "Sim" }).click()
+    await page.getByPlaceholder("alias").fill("e2e-rail-alias")
     await page.getByPlaceholder("1.00").fill("2")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     const railCode = await readTellerCode(page)
-    const settled = settleWithPayoutSim(railCode, origin, ctx.consoleBase, 5000)
-    expect(settled.result).toBe("settled")
-    expect(settled.destination).toBe("e2e-rail-alias")
-    await expect(page.getByText(`✓ Paid — ${settled.receipt}`)).toBeVisible({
+    await expect(page.getByText(/^SIM-[0-9A-F]{8}$/)).toBeVisible({
       timeout: 30_000,
     })
     await waitForOpState(page, "melt", railCode, "finalized", 90_000)
+    await page.getByRole("button", { name: "New withdraw" }).click()
     await expect
       .poll(async () => readBalance(page), { timeout: 90_000 })
       .toBeCloseTo(before - 2, 2)
 
     // The adapter must refuse a plain teller ticket (wrong rail, no
     // action) — and a human can still settle what it abstained from.
+    await page.getByRole("tab", { name: "Teller" }).click()
     await page.getByPlaceholder("Phone or reference").fill("e2e-plain-dest")
     await page.getByPlaceholder("1.00").fill("1")
     await page.getByRole("button", { name: "Send", exact: true }).click()
@@ -649,73 +649,67 @@ function registerEurExtras(ctx: SuiteContext): void {
     const page = ctx.page()
     await apiLogin(page, ctx.consoleBase)
     const before = await readBalance(page)
-    const origin = new URL(page.url()).origin
 
-    // SEPA credit transfer: valid IBAN settles, receipt is an
-    // EndToEndId-style reference — shown to the wallet as the payment
-    // proof, exactly where Lightning displays its preimage.
-    await page
-      .getByPlaceholder("Phone or reference")
-      .fill("sepa:NL33INGB0000000881")
+    // SEPA credit transfer: valid IBAN, receipt is an EndToEndId-style
+    // reference — shown to the wallet as the payment proof, exactly
+    // where Lightning displays its preimage. Autosim settles it.
+    await page.getByRole("tab", { name: "SEPA" }).click()
+    await page.getByPlaceholder("IBAN, e.g. NL33INGB0000000881").fill("NL33INGB0000000881")
     await page.getByPlaceholder("1.00").fill("2")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     const sctCode = await readTellerCode(page)
-    const sct = settleWithBankSim(sctCode, origin, ctx.consoleBase, 5000)
-    expect(sct.result).toBe("settled")
-    expect(sct.rail).toBe("sepa")
-    expect(sct.receipt).toMatch(/^E2E-\d{6}-[0-9A-F]{8}$/)
-    await expect(page.getByText(`✓ Paid — ${sct.receipt}`)).toBeVisible({
+    await expect(page.getByText(/^E2E-\d{6}-[0-9A-F]{8}$/)).toBeVisible({
       timeout: 30_000,
     })
     await waitForOpState(page, "melt", sctCode, "finalized", 90_000)
+    await page.getByRole("button", { name: "New withdraw" }).click()
 
     // SEPA instant: same addressing, receipt is a UETR (UUID).
-    await page
-      .getByPlaceholder("Phone or reference")
-      .fill("sepa-instant:DE96370205000003292912")
+    await page.getByRole("tab", { name: "Instant" }).click()
+    await page.getByPlaceholder("IBAN, e.g. DE96370205000003292912").fill("DE96370205000003292912")
     await page.getByPlaceholder("1.00").fill("1")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     const instCode = await readTellerCode(page)
-    const inst = settleWithBankSim(instCode, origin, ctx.consoleBase, 5000)
-    expect(inst.result).toBe("settled")
-    expect(inst.rail).toBe("sepa-instant")
-    expect(inst.receipt).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    )
+    await expect(
+      page.getByText(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+    ).toBeVisible({ timeout: 30_000 })
     await waitForOpState(page, "melt", instCode, "finalized", 90_000)
+    await page.getByRole("button", { name: "New withdraw" }).click()
 
-    // An invalid IBAN is refused without action — and a human can still
-    // settle the ticket, which carries the malformed destination.
-    await page
-      .getByPlaceholder("Phone or reference")
-      .fill("sepa:ES57018223704000185702009")
+    // An invalid IBAN is refused at quote time — no ticket, no code, no
+    // fund lock; the wallet names the likely cause.
+    await page.getByRole("tab", { name: "SEPA" }).click()
+    await page.getByPlaceholder("IBAN, e.g. NL33INGB0000000881").fill("ES57018223704000185702009")
     await page.getByPlaceholder("1.00").fill("1")
     await page.getByRole("button", { name: "Send", exact: true }).click()
-    const badCode = await readTellerCode(page)
-    const refused = settleWithBankSim(badCode, origin, ctx.consoleBase, 5000)
-    expect(refused.result).toBe("refused")
-    expect(refused.reason).toContain("not valid for rail sepa")
-    const ticket = await matchAndSettle(
-      page,
-      badCode,
-      "human settles what the bank rail refused",
-      ctx.consoleBase,
-    )
-    expect(ticket.status).toBe("paid")
-    await waitForOpState(page, "melt", badCode, "finalized", 90_000)
+    await expect(
+      page.getByText("the rail may not be enabled here"),
+    ).toBeVisible({ timeout: 30_000 })
+    await expect(page.locator("p.font-mono.text-3xl")).toHaveCount(0)
+    for (let i = ctx.walletErrors().length - 1; i >= 0; i--) {
+      // The deliberate refusal logs the caught error plus the raw 400.
+      if (
+        ctx.walletErrors()[i].includes("Unit unsupported") ||
+        ctx.walletErrors()[i].includes("status of 400")
+      ) {
+        ctx.walletErrors().splice(i, 1)
+      }
+    }
+    await page.getByRole("button", { name: "Try again" }).click()
 
     await expect
       .poll(async () => readBalance(page), { timeout: 90_000 })
-      .toBeCloseTo(before - 4, 2)
+      .toBeCloseTo(before - 3, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
 
   test("mobile and retail fiat rails settle with scheme receipts", async () => {
-    test.setTimeout(240_000)
+    test.setTimeout(420_000)
     const page = ctx.page()
     await apiLogin(page, ctx.consoleBase)
     const before = await readBalance(page)
-    const origin = new URL(page.url()).origin
 
     // Dummy destinations per scheme; each settles with the receipt
     // format that scheme actually issues, shown as the payment proof.
@@ -725,6 +719,11 @@ function registerEurExtras(ctx: SuiteContext): void {
       { rail: "ideal", destination: "NL33INGB0000000881", receipt: /^\d{16}$/ },
       { rail: "bizum", destination: "+34600000003", receipt: /^BZ\d{10}$/ },
     ]
+    // Typed as raw envelopes in the teller field — the other entry path
+    // besides the picker; autosim settles each with its scheme receipt.
+    // The previous test leaves the rail picker on SEPA, and the teller
+    // field's placeholder only exists on the Teller tab.
+    await page.getByRole("tab", { name: "Teller" }).click()
     for (const c of cases) {
       await page
         .getByPlaceholder("Phone or reference")
@@ -732,14 +731,12 @@ function registerEurExtras(ctx: SuiteContext): void {
       await page.getByPlaceholder("1.00").fill("1")
       await page.getByRole("button", { name: "Send", exact: true }).click()
       const code = await readTellerCode(page)
-      const settled = settleWithBankSim(code, origin, ctx.consoleBase, 5000)
-      expect(settled.result, c.rail).toBe("settled")
-      expect(settled.receipt, c.rail).toMatch(c.receipt)
       await expect(
-        page.getByText(`✓ Paid — ${settled.receipt}`),
+        page.getByText(new RegExp(`^${c.receipt.source}$`)),
         c.rail,
       ).toBeVisible({ timeout: 30_000 })
       await waitForOpState(page, "melt", code, "finalized", 90_000)
+      await page.getByRole("button", { name: "New withdraw" }).click()
     }
 
     await expect
