@@ -60,7 +60,9 @@ if [ "$SMOKE" -eq 1 ]; then
   # the information; the rest of the tier would only echo it.
   set -- $PW_ARGS --grep @smoke --max-failures=1
 else
-  set -- $PW_ARGS
+  # Default lane: everything except the @stress soak tool (~6 min, zero
+  # sat, run explicitly with `scripts/e2e.sh -g @stress`).
+  set -- $PW_ARGS --grep-invert @stress
 fi
 
 # Not exec'd: the trailing verdict line lets agents and soak greps read

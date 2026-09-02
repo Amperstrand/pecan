@@ -80,8 +80,11 @@ seconds with zero side effects:
    grepped alone skips on insufficient balance rather than hanging.
 6. Full suite: `scripts/e2e.sh` (verdict line at the end is greppable;
    actionTimeout=15s means a missing element fails its action in
-   seconds, never the whole test budget).
-7. `scripts/soak.sh N` — repetition under liquidity/reconcile guards.
+   seconds, never the whole test budget; the @stress soak tool is
+   excluded from the default lane).
+7. `scripts/e2e.sh -g @stress` — alternating-rail soak on one page
+   (~6 min, zero sat, main-thread heartbeat + stall probes).
+8. `scripts/soak.sh N` — repetition under liquidity/reconcile guards.
 
 E2E knobs and rules: `PECAN_E2E_ONCHAIN_CONF=<n>` pins the expected
 onchain confirmation policy (unset = trust the deployment; mismatch

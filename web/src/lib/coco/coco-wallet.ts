@@ -12,6 +12,7 @@ import {
 } from "./currency"
 import type { CoreEvents } from "@cashu/coco-core"
 import { subscribeWalletLogging, walletLog } from "./wallet-log"
+import { raceTimeout } from "./timeout"
 import { migrateLegacyMintUrls } from "./wallet-migration"
 
 export type { DepositMethod }
@@ -211,16 +212,24 @@ export async function createDepositQuote(
   const coco = await getCoco()
   const amount = Math.round(amountInput * 100)
 
-  const quote = await coco.quotes.mint.create({
-    mintUrl: mintUrl(currency),
-    method,
-    amount: amount,
-    unit: currency,
-    description: "Wallet deposit",
-    locked: true,
-  })
+  const quote = await raceTimeout(
+    coco.quotes.mint.create({
+      mintUrl: mintUrl(currency),
+      method,
+      amount: amount,
+      unit: currency,
+      description: "Wallet deposit",
+      locked: true,
+    }),
+    20_000,
+    "mint quote",
+  )
 
-  const operation = await coco.ops.mint.prepare({ quote, amount: amount })
+  const operation = await raceTimeout(
+    coco.ops.mint.prepare({ quote, amount: amount }),
+    15_000,
+    "mint prepare",
+  )
   void coco.ops.mint.execute(operation.id).catch((err: unknown) => {
     console.warn("mint execute background:", err)
   })
@@ -245,10 +254,14 @@ export async function pollAndMint(
   currency: Currency = activeCurrency(),
 ): Promise<boolean> {
   const coco = await getCoco()
-  const operations = await coco.ops.mint.listByQuote({
-    mintUrl: mintUrl(currency),
-    quoteId,
-  })
+  const operations = await raceTimeout(
+    coco.ops.mint.listByQuote({
+      mintUrl: mintUrl(currency),
+      quoteId,
+    }),
+    10_000,
+    "mint poll",
+  )
   const operation = operations[0]
   if (!operation) return false
   if (operation.state === "finalized" || operation.state === "failed") return true
@@ -271,14 +284,22 @@ export async function createWithdraw(
   const coco = await getCoco()
   const amount = Math.round(amountInput * 100)
 
-  const quote = await coco.quotes.melt.create({
-    mintUrl: mintUrl(currency),
-    method: "branch",
-    methodData: { amount: Amount.from(amount), description: recipient },
-    unit: currency,
-  })
+  const quote = await raceTimeout(
+    coco.quotes.melt.create({
+      mintUrl: mintUrl(currency),
+      method: "branch",
+      methodData: { amount: Amount.from(amount), description: recipient },
+      unit: currency,
+    }),
+    20_000,
+    "melt quote",
+  )
 
-  const prepared = await coco.ops.melt.prepare({ quote })
+  const prepared = await raceTimeout(
+    coco.ops.melt.prepare({ quote }),
+    15_000,
+    "melt prepare",
+  )
 
   // The teller can only pay out once this wallet has locked funds at the
   // mint, so the code must not appear before that. The melt is async
@@ -315,10 +336,17 @@ export async function createWithdraw(
 
 export async function pollWithdraw(quoteId: string): Promise<string | null> {
   const coco = await getCoco()
-  const operation = await coco.ops.melt.getByQuote({
-    mintUrl: mintUrl(),
-    quoteId,
-  })
+  // Polled from a bare setInterval: a timeout here must stay benign —
+  // return null and let the next tick retry (same contract as refresh
+  // contention below), never an unhandled rejection.
+  const operation = await raceTimeout(
+    coco.ops.melt.getByQuote({
+      mintUrl: mintUrl(),
+      quoteId,
+    }),
+    10_000,
+    "melt poll",
+  ).catch(() => null)
   if (!operation) return null
   if (operation.state === "finalized") {
     return readPreimage(operation)
