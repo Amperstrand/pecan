@@ -157,8 +157,23 @@ Pieces:
   `charger/<device>/start` (MQTT via HiveMQ) or the atom-bridge webhook —
   a thin bridge from this HTTP contract to hermes/MQTT replaces the fake
   with zero pecan changes.
+- **Live deployment (2026-09-02)**: the gateway runs on inr2
+  (`atom-bridge.service`, now `/opt/atom-bridge/bridge.mjs` — versioned in
+  evmap as `bridge/atom-gateway.mjs`; keeps the legacy hermes webhook
+  paths) and fronts at
+  `https://giftcard.cashu.exchange/atom-gateway/*` (caddy; shared secret
+  via `X-API-Key`/`X-Bridge-Key`, value in `/opt/atom-bridge/.env` +
+  keychain `evmap-bridge`). The physical M5Stack Atom runs the dual
+  ESPHome firmware (`evmap/firmware/atom-charger-esphome/`) — `atomA`
+  (G26 relay) and `atomB` (G32) — over HiveMQ. Real-hardware e2e:
+  `PECAN_EV_GATEWAY=https://giftcard.cashu.exchange/atom-gateway
+  PECAN_EV_GATEWAY_KEY=… PECAN_EV_DEVICE=atomA scripts/e2e.sh -g "ev rail"`.
+  **Drift lesson**: a funded ev melt that expires unsettled burns the
+  customer's ecash (reconcile DRIFT; two test melts were written off via
+  mark-failed on 2026-09-02). Until adapters are daemonized, an operator
+  must settle-or-write-off open ev tickets before expiry.
 - **Wallet**: no picker tab yet — the raw envelope in the teller field
-  (`ev:atom1`) works today; the tab ships with the hardware.
+  (`ev:atomA`) works today; the tab ships with the hardware.
 
 End-to-end test: `scripts/e2e.sh -g "ev rail"` (zero sat — the fake
 gateway and a shrunk tariff keep it under a minute). Deployment: the rail
