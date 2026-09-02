@@ -55,7 +55,7 @@ MUST end up as a script under `scripts/`. Future sessions (and CI) re-run
 these without spending LLM tokens on browser driving.
 
 **Test ladder — always answer at the cheapest tier that can.** A full
-e2e cycle costs 2-3 wall minutes, ~57k sat of payer liquidity, and
+e2e cycle costs 10-15 wall minutes, ~57k sat of payer liquidity, and
 agent tokens to interpret; the tiers below answer most questions in
 seconds with zero side effects:
 
@@ -66,11 +66,32 @@ seconds with zero side effects:
    mint keys/info, one-way melt refusal (ln/btc, both pairs), console
    health, manifest, metrics auth, reconcile drift. The "is the
    deployment healthy" check — run after every deploy, before every
-   e2e cycle.
-4. Targeted e2e: `scripts/e2e.sh -g "cross-currency"` runs one test,
-   not 25. Iterate on failures here.
-5. Full suite: `scripts/e2e.sh` (verdict line at the end is greppable).
-6. `scripts/soak.sh N` — repetition under liquidity/reconcile guards.
+   e2e cycle (e2e.sh runs it as a preflight unless `--no-preflight`).
+4. Smoke tier: `scripts/e2e.sh --smoke` — the @smoke-tagged critical
+   path (wallet boots + form contract, teller deposit+withdraw, client
+   validation, both pairs), ~1-2 min, ZERO sat. The default lane after
+   any deploy or wallet change; it exists to fail fast (e.g. it would
+   have caught the missing withdraw amount input of 2026-09-02 in
+   seconds instead of a 3-minute repro).
+5. Targeted e2e: `scripts/e2e.sh -g "cross-currency"` runs one test,
+   not 30. Iterate on failures here. Chain-aware: every test boots on
+   the wallet page (navigation lives in beforeAll), but funding comes
+   from earlier tests in the same serial chain — a mid-chain test
+   grepped alone skips on insufficient balance rather than hanging.
+6. Full suite: `scripts/e2e.sh` (verdict line at the end is greppable;
+   actionTimeout=15s means a missing element fails its action in
+   seconds, never the whole test budget).
+7. `scripts/soak.sh N` — repetition under liquidity/reconcile guards.
+
+E2E knobs and rules: `PECAN_E2E_ONCHAIN_CONF=<n>` pins the expected
+onchain confirmation policy (unset = trust the deployment; mismatch
+fails loudly instead of timing out); timeouts scale with it, so an
+n-conf cycle is the same command with the env set. Parametrize sweeps
+with `test.for` (see the mobile rail cases in wallet.spec.ts) so a
+failure names the case and the rest still run. Tests sharing the
+serial-chain page must reset shared widgets (rail tab, withdraw form
+phase) at their start — whichever test ran before may have left them
+anywhere.
 
 Coverage matrix (rail × currency, which file owns each cell, and which
 rows are deliberately EUR-only shared machinery) lives as a comment

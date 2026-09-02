@@ -36,10 +36,12 @@ defineWalletSuite(
 
 function registerEurExtras(ctx: SuiteContext): void {
   test("onchain deposit: external wallet → mempool → settled → receipt", async () => {
-    // Signet runs 0-conf by design (CDK_BRANCH_PROCESSOR_ONCHAIN_
-    // CONFIRMATIONS=0): the rail settles on mempool visibility and the
-    // test stays fast. If confirmations are ever raised again, this
-    // fails loudly instead of silently waiting minutes for blocks.
+    // The deployment's confirmation policy drives every timeout below:
+    // 0-conf settles on mempool visibility; n-conf waits n signet blocks
+    // (~10 min each, budgeted at 2x). PECAN_E2E_ONCHAIN_CONF pins an
+    // expectation for cycles that intentionally flip the policy — the
+    // test then fails loudly on drift instead of timing out opaquely.
+    const pinned = process.env.PECAN_E2E_ONCHAIN_CONF
     const page = ctx.page()
     test.setTimeout(150_000)
 
@@ -60,19 +62,24 @@ function registerEurExtras(ctx: SuiteContext): void {
     const expectedSat = Number(sendCaption?.match(/\d+/)?.[0] ?? 0)
     expect(expectedSat).toBeGreaterThan(1000)
 
-    const txid = sendOnchainFromExternal(address, expectedSat)
-    expect(txid).toHaveLength(64)
-
     const rail = await page.request
       .get(`${ctx.consoleBase}/api/onchain-status/${address}`)
       .then((r) => r.json())
-    expect(
-      rail.required_confirmations,
-      "this deployment must run 0-conf onchain settlement on signet",
-    ).toBe(0)
+    const conf = rail.required_confirmations as number
+    if (pinned !== undefined) {
+      expect(
+        conf,
+        "onchain confirmation policy drifted from PECAN_E2E_ONCHAIN_CONF",
+      ).toBe(Number(pinned))
+    }
+    const settleTimeout = 120_000 + conf * 2 * 10 * 60_000
+    test.setTimeout(settleTimeout + 60_000)
+
+    const txid = sendOnchainFromExternal(address, expectedSat)
+    expect(txid).toHaveLength(64)
 
     await expect
-      .poll(async () => readBalance(page), { timeout: 120_000 })
+      .poll(async () => readBalance(page), { timeout: settleTimeout })
       .toBeCloseTo(before + 50, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
@@ -343,8 +350,14 @@ function registerEurExtras(ctx: SuiteContext): void {
     expectNoWalletErrors(ctx.walletErrors())
   })
 
-  test("amount validation errors are visible client-side", async () => {
+  test("amount validation errors are visible client-side", { tag: "@smoke" }, async () => {
     const page = ctx.page()
+
+    // Whichever test ran before us may have left the withdraw card in
+    // its done phase, where the Send button is replaced by the receipt
+    // block — reset the form so the Send click below can exist.
+    const newWithdraw = page.getByRole("button", { name: "New withdraw" })
+    if (await newWithdraw.isVisible()) await newWithdraw.click()
 
     // above the mint max — used to fail silently (the 1231234 regression)
     await page.getByPlaceholder("5.00").fill("1231234")
@@ -705,43 +718,47 @@ function registerEurExtras(ctx: SuiteContext): void {
     expectNoWalletErrors(ctx.walletErrors())
   })
 
-  test("mobile and retail fiat rails settle with scheme receipts", async () => {
-    test.setTimeout(420_000)
-    const page = ctx.page()
-    await apiLogin(page, ctx.consoleBase)
-    const before = await readBalance(page)
+  // Dummy destinations per scheme; each settles with the receipt format
+  // that scheme actually issues, shown as the payment proof.
+  const MOBILE_RAILS: Record<string, { destination: string; receipt: RegExp }> = {
+    swish: { destination: "+46700000001", receipt: /^[0-9a-f]{32}$/ },
+    mobilepay: { destination: "+45700000002", receipt: /^MP-\d{10}$/ },
+    ideal: { destination: "NL33INGB0000000881", receipt: /^\d{16}$/ },
+    bizum: { destination: "+34600000003", receipt: /^BZ\d{10}$/ },
+  }
 
-    // Dummy destinations per scheme; each settles with the receipt
-    // format that scheme actually issues, shown as the payment proof.
-    const cases = [
-      { rail: "swish", destination: "+46700000001", receipt: /^[0-9a-f]{32}$/ },
-      { rail: "mobilepay", destination: "+45700000002", receipt: /^MP-\d{10}$/ },
-      { rail: "ideal", destination: "NL33INGB0000000881", receipt: /^\d{16}$/ },
-      { rail: "bizum", destination: "+34600000003", receipt: /^BZ\d{10}$/ },
-    ]
-    // Typed as raw envelopes in the teller field — the other entry path
-    // besides the picker; autosim settles each with its scheme receipt.
-    // The previous test leaves the rail picker on SEPA, and the teller
-    // field's placeholder only exists on the Teller tab.
-    await page.getByRole("tab", { name: "Teller" }).click()
-    for (const c of cases) {
+  // Typed as raw envelopes in the teller field — the other entry path
+  // besides the picker; autosim settles each with its scheme receipt.
+  // One test per rail: a failure names the rail and the rest still run.
+  // (Playwright has no test.for — per-case test() registration is the idiom.)
+  for (const rail of Object.keys(MOBILE_RAILS)) {
+    test(`${rail} settles with its scheme receipt`, async () => {
+      test.setTimeout(210_000)
+      const page = ctx.page()
+      await apiLogin(page, ctx.consoleBase)
+
+      // Whichever test ran before us may have left the rail picker on
+      // another rail — the teller field only exists on the Teller tab.
+      await page.getByRole("tab", { name: "Teller" }).click()
+
+      const c = MOBILE_RAILS[rail]!
+      const before = await readBalance(page)
       await page
         .getByPlaceholder("Phone or reference")
-        .fill(`${c.rail}:${c.destination}`)
+        .fill(`${rail}:${c.destination}`)
       await page.getByPlaceholder("1.00").fill("1")
       await page.getByRole("button", { name: "Send", exact: true }).click()
       const code = await readTellerCode(page)
       await expect(
         page.getByText(new RegExp(`^${c.receipt.source}$`)),
-        c.rail,
+        rail,
       ).toBeVisible({ timeout: 30_000 })
       await waitForOpState(page, "melt", code, "finalized", 90_000)
       await page.getByRole("button", { name: "New withdraw" }).click()
-    }
-
-    await expect
-      .poll(async () => readBalance(page), { timeout: 90_000 })
-      .toBeCloseTo(before - cases.length, 2)
-    expectNoWalletErrors(ctx.walletErrors())
-  })
+      await expect
+        .poll(async () => readBalance(page), { timeout: 90_000 })
+        .toBeCloseTo(before - 1, 2)
+      expectNoWalletErrors(ctx.walletErrors())
+    })
+  }
 }

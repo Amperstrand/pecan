@@ -87,6 +87,14 @@ export function defineWalletSuite(
       }, cfg.currency)
       sharedPage = await context.newPage()
       walletErrors = trackWalletErrors(sharedPage)
+      // Navigate here, not in the first test, so a grepped subset of this
+      // serial chain at least lands on the wallet page instead of hanging
+      // on about:blank. Chain funding still comes from the earlier tests —
+      // a mid-chain test grepped alone skips on insufficient balance.
+      await sharedPage.goto(WALLET)
+      await sharedPage
+        .getByRole("heading", { name: "Wallet" })
+        .waitFor({ state: "visible", timeout: 30_000 })
     })
 
     test.afterEach(async ({}, testInfo) => {
@@ -119,9 +127,8 @@ export function defineWalletSuite(
       if (sharedPage) await sharedPage.close()
     })
 
-    test("fresh wallet loads with the switcher active", async () => {
+    test("fresh wallet loads with the switcher active", { tag: "@smoke" }, async () => {
       const page = sharedPage!
-      await page.goto(WALLET)
       await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
       await expect(
         page.getByRole("tab", { name: cfg.currency.toUpperCase() }),
@@ -129,7 +136,7 @@ export function defineWalletSuite(
       await readBalance(page)
     })
 
-    test("teller deposit: quote → teller settle → auto-claim", async () => {
+    test("teller deposit: quote → teller settle → auto-claim", { tag: "@smoke" }, async () => {
       const page = sharedPage!
       await apiLogin(page, cfg.consoleBase, cfg.password)
 
@@ -196,7 +203,7 @@ export function defineWalletSuite(
       expectNoWalletErrors(walletErrors)
     })
 
-    test("withdraw: melt → teller payout → finalized, zero change", async () => {
+    test("withdraw: melt → teller payout → finalized, zero change", { tag: "@smoke" }, async () => {
       const page = sharedPage!
       await apiLogin(page, cfg.consoleBase, cfg.password)
 

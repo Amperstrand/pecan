@@ -168,17 +168,35 @@ export async function readBalance(page: Page): Promise<number> {
   // appears — a NaN here would poison every later `before ± amount` check.
   const el = page.locator('.text-4xl.tabular-nums')
   await el.waitFor({ state: "visible", timeout: 20_000 })
+  // A currency switch re-renders the figure asynchronously; guard against
+  // reading the previous currency's number under the new tab (a stale read
+  // once poisoned a `before + amount` baseline and cost a full suite run).
+  const activeTab = await page
+    .locator('[role="tablist"][aria-label="Currency"] [aria-selected="true"]')
+    .textContent()
+    .catch(() => null)
+  const expectedSymbol = activeTab ? CURRENCY_SYMBOLS[activeTab.trim()] : undefined
   const deadline = Date.now() + 20_000
   for (;;) {
     const text = await el.textContent()
-    const value = parseFloat(text!.replace(/[^\d.]/g, ""))
-    if (!Number.isNaN(value)) return value
+    if (expectedSymbol && !text!.includes(expectedSymbol)) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `balance shows "${text!.trim()}" under the ${activeTab!.trim()} tab — stale cross-currency read`,
+        )
+      }
+    } else {
+      const value = parseFloat(text!.replace(/[^\d.]/g, ""))
+      if (!Number.isNaN(value)) return value
+    }
     if (Date.now() > deadline) {
       throw new Error(`balance never rendered a number: "${text?.trim()}"`)
     }
     await page.waitForTimeout(250)
   }
 }
+
+const CURRENCY_SYMBOLS: Record<string, string> = { EUR: "€", USD: "$" }
 
 /**
  * The 6-character code shown under "Give this code to the teller:" for both
