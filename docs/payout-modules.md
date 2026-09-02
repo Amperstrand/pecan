@@ -226,3 +226,44 @@ reserve → deliver → settle the exact metered amount → return change.
   self-attested by our daemon; a real deployment binds it to the
   charger's own meter record (the OCPP transaction id / meterStop),
   countersigned by the merchant.
+
+## Partial delivery: abort, change, and the three designs
+
+A charge session can end before its paid window does (the Atom's G39
+button, a wallet-side Stop, the car unplugging). Cashu has no native
+hold, and NUT-05 change is one-time knowledge signed into the melt
+RESPONSE — our exact-amount pre-swap deliberately produces none, and an
+asynchronous settle cannot retroactively mint it (the change-loss
+postmortem in docs/lightning-mint.md § Melt saga). So "the mint gives
+change later" has to be built one of three ways:
+
+**A. Streaming melts (chosen, implemented)** — never prepay more than
+the current chunk. The wallet melts €1 (= 1 s at the demo tariff),
+the daemon fires that second, the wallet melts the next only after the
+current one settles. Abort = stop streaming: the un-melted budget never
+left the wallet, so "change" is simply money that was never spent.
+Cost: ~one melt saga (~2-4 s) of latency between seconds — the relay
+pauses between paid seconds, which reads as an honest "pay per second"
+demo. Exposure on abort: at most the in-flight chunk, and only if the
+button lands mid-second (sub-€1 rounding, accepted for the demo).
+
+**B. Refund-as-mint-quote** — melt the full budget up front; on abort
+the daemon settles the ticket with a delivered/receipt split and issues
+the remainder as a NEW branch mint quote NUT-20-locked to the wallet's
+pubkey (the refund lands as a deposit card and auto-claims). Uses only
+existing primitives, but needs refund-amount plumbing (quote amounts
+are fixed at creation) and wallet-side discovery of the refund quote.
+The upgrade path if provable per-session refunds become a requirement.
+
+**C. Partial `total_spent` settle** — cdk processors CAN settle a melt
+for less than quoted and let the mint return the difference as change,
+but only synchronously against change outputs supplied in the original
+melt request. Our settles are asynchronous by construction; without
+change outputs the difference burns. Dead end for this flow, recorded
+so it is not rediscovered.
+
+The stop signals, end to end: the wallet's Stop button simply stops
+melting further chunks (the current second finishes); the Atom's G39
+button publishes `charger/<id>/aborted {"consumed": k}` → the gateway
+reports `stopped` in status → the daemon settles the in-flight ticket
+with a `…-STOPPED` receipt → the wallet's stream ends on seeing it.

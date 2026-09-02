@@ -153,8 +153,15 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
                    "destination": slug, "device": device,
                    "seconds": seconds}
 
-    receipt = "EV-{}-{}s-{}".format(device, seconds,
-                                    secrets.token_hex(4).upper())
+    # The device's stop button aborts mid-window: delivered < requested
+    # and the status carries stopped=true. The receipt states the
+    # delivered seconds and ends with STOPPED — the wallet's stream
+    # reads that and stops melting further chunks.
+    delivered = int(state.get("seconds", seconds))
+    was_stopped = bool(state.get("stopped"))
+    suffix = "-STOPPED" if was_stopped else ""
+    receipt = "EV-{}-{}s-{}{}".format(device, delivered,
+                                      secrets.token_hex(4).upper(), suffix)
     notes = f"payout rail {RAIL} (charge session) receipt={receipt}"
     try:
         console.post(f"/api/tickets/{tid}/mark-paid",
@@ -167,7 +174,8 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
                    "stage": "mark-paid-transport", "error": str(e.reason)}
     return 0, {"result": "settled", "id": tid, "rail": RAIL,
                "amount": amount, "destination": slug, "device": device,
-               "seconds": seconds, "receipt": receipt, "status": "paid"}
+               "seconds": delivered, "stopped": was_stopped,
+               "receipt": receipt, "status": "paid"}
 
 
 def load_state(path):

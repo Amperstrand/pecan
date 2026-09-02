@@ -69,7 +69,9 @@ type WithdrawState =
   | { phase: "idle" }
   | { phase: "creating" }
   | { phase: "pending"; quoteId: string; tail: string; auto: boolean; label: string }
+  | { phase: "charging"; label: string; device: string; budget: number; spent: number; receipt: string | null }
   | { phase: "done"; preimage: string }
+  | { phase: "charged"; label: string; seconds: number; stopped: boolean; receipt: string | null }
   | { phase: "error"; message: string }
 
 /**
@@ -516,6 +518,94 @@ export function WalletPage() {
     }
   }
 
+  // Streaming charge sessions (design A in docs/payout-modules.md): the
+  // wallet melts one €1 chunk (= one tariffed second) at a time and only
+  // melts the next after the current one settles. Stop = don't melt the
+  // next chunk — the un-melted budget never left the wallet, so partial
+  // sessions need no refund path at all.
+  const chargeStopRef = useRef(false)
+
+  const settleChunk = async (quoteId: string): Promise<string | null> => {
+    const deadline = Date.now() + 90_000
+    while (Date.now() < deadline) {
+      const preimage = await pollWithdraw(quoteId)
+      if (preimage) return preimage
+      await new Promise((r) => setTimeout(r, 1_500))
+    }
+    return null
+  }
+
+  const startCharging = async (
+    option: (typeof WITHDRAW_OPTIONS)[number],
+    budget: number,
+  ) => {
+    const device = option.fixed!.split(":")[1] ?? option.id
+    chargeStopRef.current = false
+    let spent = 0
+    let receipt: string | null = null
+    let stopped = false
+
+    const finish = () => {
+      setWithdrawState({
+        phase: "charged",
+        label: option.label,
+        seconds: spent,
+        // Either stop path counts: the device's STOPPED receipt (button on
+        // the Atom) or the wallet's own Stop ending the stream early.
+        stopped: stopped || chargeStopRef.current,
+        receipt,
+      })
+      refresh()
+    }
+
+    while (!chargeStopRef.current && spent < budget) {
+      setWithdrawState({
+        phase: "charging",
+        label: option.label,
+        device,
+        budget,
+        spent,
+        receipt,
+      })
+      let chunkReceipt: string | null = null
+      try {
+        const result = await createWithdraw(1, option.fixed!)
+        // Wait for the daemon to fire this second and settle its receipt.
+        chunkReceipt = await settleChunk(result.quoteId)
+      } catch (e) {
+        // The first chunk failing is an error; later chunks mean the
+        // balance ran dry mid-session — summarize what was delivered.
+        const msg = e instanceof Error ? e.message : String(e)
+        if (spent === 0) {
+          setWithdrawState({ phase: "error", message: msg })
+        } else {
+          finish()
+        }
+        return
+      }
+      if (chunkReceipt === null) {
+        // Daemon slow/down: keep what settled, end the session.
+        finish()
+        return
+      }
+      if (chunkReceipt === "FAILED") {
+        finish()
+        return
+      }
+      receipt = chunkReceipt
+      spent += 1
+      // The device's stop button lands in the receipt: the daemon marks
+      // the in-flight chunk with …-STOPPED when the charger reports an
+      // abort. The current second is accounted; the stream ends here.
+      if (chunkReceipt.includes("STOPPED")) {
+        stopped = true
+        break
+      }
+      refresh()
+    }
+    finish()
+  }
+
   const startWithdraw = async () => {
     const option = WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)
     const invalidAmount = validateWithdrawAmount(
@@ -540,6 +630,12 @@ export function WalletPage() {
       return
     }
     const amount = parseFloat(withdrawAmount)
+    // Charger rails stream: the amount is the budget, melted a second at
+    // a time so a stop never strands prepaid energy.
+    if (option?.fixed?.startsWith("ev:")) {
+      await startCharging(option, Math.round(amount))
+      return
+    }
     // Input rails ride the payout envelope: rail:destination.
     const target =
       option?.fixed ??
@@ -883,7 +979,11 @@ export function WalletPage() {
                 </div>
               ) : null}
               <div className="grid gap-1.5">
-                <Label htmlFor="wd-amt">Amount ({symbol})</Label>
+                <Label htmlFor="wd-amt">
+                  {activeOption?.fixed?.startsWith("ev:")
+                    ? `Budget (${symbol})`
+                    : `Amount (${symbol})`}
+                </Label>
                 <Input
                   id="wd-amt"
                   type="number"
@@ -917,7 +1017,7 @@ export function WalletPage() {
                   onClick={startWithdraw}
                   disabled={!withdrawAmount || (!activeOption?.fixed && !withdrawRecipient)}
                 >
-                  Send
+                  {activeOption?.fixed?.startsWith("ev:") ? "Start charging" : "Send"}
                 </Button>
               )}
             </>
@@ -957,6 +1057,68 @@ export function WalletPage() {
                 </div>
               </div>
             )
+           ) : withdrawState.phase === "charging" ? (
+              <div className="grid gap-3 text-center">
+                <p className="text-lg font-medium">
+                  ⚡ Charging at {withdrawState.label}
+                </p>
+                <p className="text-3xl font-bold tabular-nums">
+                  {withdrawState.spent}
+                  <span className="text-base font-normal text-muted-foreground">
+                    {" "}
+                    / {withdrawState.budget} s
+                  </span>
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  One second melted at a time — stop anytime and the rest
+                  of your budget stays in the wallet.
+                </p>
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  {withdrawState.receipt
+                    ? "Paying for the next second"
+                    : "Starting the first second"}
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    chargeStopRef.current = true
+                  }}
+                >
+                  Stop charging
+                </Button>
+              </div>
+          ) : withdrawState.phase === "charged" ? (
+              <div className="grid gap-2 rounded-md border p-3 text-center">
+                <p className="font-medium">
+                  {withdrawState.stopped
+                    ? `Charging stopped — ${withdrawState.seconds} s delivered`
+                    : `Charged ${withdrawState.seconds} s at ${withdrawState.label}`}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  €{withdrawState.seconds}.00 spent
+                  {withdrawState.stopped
+                    ? " — the rest of the budget stayed in your wallet"
+                    : ""}
+                </p>
+                {withdrawState.receipt ? (
+                  <>
+                    <p className="break-all font-mono text-sm">
+                      {withdrawState.receipt}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Session record — your proof of charging
+                    </p>
+                  </>
+                ) : null}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setWithdrawState({ phase: "idle" })}
+                >
+                  New withdraw
+                </Button>
+              </div>
           ) : (
             <div className="grid gap-2">
               <p className="text-sm text-destructive">{withdrawState.message}</p>
