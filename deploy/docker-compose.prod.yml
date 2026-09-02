@@ -44,7 +44,9 @@ services:
       # envelopes naming anything else are refused at quote time.
       # `sim` = synthetic sample; the rest are the simulated fiat rails
       # (payout/bank-sim.py) with scheme-authentic receipt references.
-      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim,sepa,sepa-instant,swish,mobilepay,ideal,bizum"
+      # `ev` is REAL: payout/ev-charge.py against a device gateway —
+      # never autosimmed (see processor payout.rs).
+      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim,sepa,sepa-instant,swish,mobilepay,ideal,bizum,ev"
       # Demo mode: enveloped rail tickets auto-settle after the fund lock
       # with a generated scheme receipt (processor payout.rs). Off = the
       # python adapters in payout/ settle on invocation instead.

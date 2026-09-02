@@ -123,8 +123,28 @@ pub fn valid_destination(rail: &str, dest: &str) -> bool {
         "swish" => valid_msisdn(dest, &["+46"]),
         "mobilepay" => valid_msisdn(dest, &["+45", "+358"]),
         "bizum" => valid_msisdn(dest, &["+34"]),
+        // The EV rail addresses a charger by device slug (atom1,
+        // t-relay-r3). Unlike the simulated rails this one settles through
+        // the ev-charge adapter against real hardware — it must never be
+        // added to SIMULATED_RAILS or autosimmed.
+        "ev" => valid_device_slug(dest),
         _ => false,
     }
+}
+
+/// Charger device slug: lowercase alphanumerics and dashes, 3-24 chars,
+/// starting alphanumeric. The slug is the adapter's device key (mapped to
+/// a gateway device id by the ev-charge adapter's --device-map).
+fn valid_device_slug(dest: &str) -> bool {
+    let len = dest.len();
+    (3..=24).contains(&len)
+        && dest
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && dest
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
 }
 
 /// Settling delay per simulated rail — the demo's stand-in for scheme
@@ -270,6 +290,14 @@ mod tests {
         assert!(!valid_destination("mobilepay", "+4612345678"));
         assert!(valid_destination("bizum", "+34600000003"));
         assert!(!valid_destination("bizum", "+44700000004"));
+        // The EV rail addresses chargers by device slug; a malformed slug
+        // never becomes a ticket the adapter would have to refuse later.
+        assert!(valid_destination("ev", "atom1"));
+        assert!(valid_destination("ev", "t-relay-r3"));
+        assert!(!valid_destination("ev", "Atom1"));
+        assert!(!valid_destination("ev", "x"));
+        assert!(!valid_destination("ev", "-leading-dash"));
+        assert!(!valid_destination("ev", "has space"));
         assert!(!valid_destination("unknown-rail", "anything"));
     }
 

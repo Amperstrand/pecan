@@ -117,3 +117,49 @@ short, copyable token.
    id beside `sim`.
 4. Daemonized adapters (poll for open tickets on their rail instead of
    being invoked with a code) once one runs in production.
+
+## The EV rail (`ev`) — charging sessions as melts (prototype)
+
+`ev:<device-slug>` buys a charge window on a charger: the wallet melts
+ecash, the mint holds the burned inputs (fund lock), the charger delivers
+the window, and the settle receipt is the session record —
+`EV-<device>-<seconds>s-<8hex>` — shown where Lightning shows preimages.
+The OCPP analogue is deliberate: Authorize = the quote-time slug gate,
+StartTransaction's window = the tariff-derived seconds, StopTransaction =
+the gateway's `done`, the receipt = transactionId + meter delta.
+
+Pieces:
+
+- **Processor** (`payout.rs`): `ev` validates device slugs
+  (`^[a-z0-9][a-z0-9-]{2,23}$`). It is a REAL rail — deliberately absent
+  from `SIMULATED_RAILS`, `receipt_for_rail` and `settle_delay_ms`, so
+  autosim can never fake-settle energy.
+- **Adapter** (`payout/ev-charge.py`): payout-sim's loop (login → match →
+  fund-lock wait) with the energy step in the middle: tariff
+  `--secs-per-eur` converts melted cents into a window, the device
+  gateway is triggered, `done` is awaited, then `mark-paid` with the
+  session receipt. Device refusals exit 2 (human may settle); a window
+  that ran but never confirmed exits 6 with the ticket left open — never
+  auto-settle on doubt.
+- **Device gateway contract** (any backend may implement it):
+
+  ```
+  POST /device/{id}/trigger  {"seconds": N}   X-API-Key: …
+        -> 200 {"triggered": true, "session": "<id>"}
+  GET  /device/{id}/status
+        -> 200 {"state": "idle"|"running"|"done", "session": …, "seconds": N}
+  ```
+
+- **`payout/ev-device-fake.py`** implements the contract for testing
+  (binds `--port 0`, prints the bound port on its startup line). The real
+  backend maps the same contract onto the evmap stack: the M5Stack Atom
+  firmware already anchors to `{"end": epochSec}` payloads on
+  `charger/<device>/start` (MQTT via HiveMQ) or the atom-bridge webhook —
+  a thin bridge from this HTTP contract to hermes/MQTT replaces the fake
+  with zero pecan changes.
+- **Wallet**: no picker tab yet — the raw envelope in the teller field
+  (`ev:atom1`) works today; the tab ships with the hardware.
+
+End-to-end test: `scripts/e2e.sh -g "ev rail"` (zero sat — the fake
+gateway and a shrunk tariff keep it under a minute). Deployment: the rail
+is already in `CDK_BRANCH_PROCESSOR_PAYOUT_RAILS` on both pairs.
