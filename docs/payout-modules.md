@@ -178,3 +178,51 @@ Pieces:
 End-to-end test: `scripts/e2e.sh -g "ev rail"` (zero sat — the fake
 gateway and a shrunk tariff keep it under a minute). Deployment: the rail
 is already in `CDK_BRANCH_PROCESSOR_PAYOUT_RAILS` on both pairs.
+
+## The EV rail's settlement model — who trusts whom
+
+**Question: does the charger accept our ecash? Does the mint have an
+account with the charger?** Neither — and that is the defining property
+of the current design:
+
+- The **charger never sees ecash**. It is a dumb actuator: it trusts one
+  shared-secret HTTPS/MQTT channel (the atom-gateway) and closes a relay
+  when told. No wallet, no proofs, no mint URL, no unit.
+- The **mint has no charger account**. The ecash is handled 100%
+  mint-side: the melt burns the customer's inputs, and the ev-charge
+  daemon — run by the mint operator, on the mint's own host — notices
+  the ticket and fires the charger. Everything lives in ONE trust
+  domain: ours.
+
+Net monetary effect of one charge session: the mint's ecash liabilities
+shrink by the melted amount and that value accrues to the mint's
+backing; the operator (who also owns the charger) delivers energy whose
+cost they bear. In other words: **the mint operator is the merchant**,
+selling energy for ecash. No value moves to any charger; nothing to
+reconcile against the device.
+
+Ordering caveat (deliberate for the demo, wrong for production
+energy): the melt burns BEFORE delivery — a per-trigger prepay. If the
+charger never confirms, the ticket expires and the customer's value
+burns (the DRIFT class; operators write off, the customer has no
+protocol-level recourse). A metered model should invert the order:
+reserve → deliver → settle the exact metered amount → return change.
+
+### How it should work when the charger is NOT ours
+
+- **Connected chargers (recommended): merchant-side wallet, pull
+  model.** The charger's controller runs a wallet, requests payment
+  (NUT-18 creqA, as evmap's silent.energy stack already does for the
+  sat mint), verifies and melts to its own balance. The mint stays
+  account-free; the merchant is just another ecash user who later melts
+  out through whatever rail they like.
+- **Dumb/offline chargers: the payout-rail model, but with a merchant
+  ledger.** The rail routes and fires as today, but per-merchant gateway
+  keys replace the single shared secret, and every settled ticket posts
+  to a merchant balance that is paid out periodically (fiat rails or
+  ecash) — the bank-rail analogy is exact: the charger is a destination
+  that accumulates and gets settled, like an IBAN.
+- **Receipts should become merchant-attested**: today's EV receipt is
+  self-attested by our daemon; a real deployment binds it to the
+  charger's own meter record (the OCPP transaction id / meterStop),
+  countersigned by the merchant.
