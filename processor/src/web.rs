@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Json, Path as AxumPath, State};
+use axum::extract::{Query, Json, Path as AxumPath, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -107,6 +107,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/login", post(api_login))
         .route("/api/logout", post(api_logout))
         .route("/api/quotes/match", post(api_match_quote))
+        .route("/api/tickets/open", get(api_open_tickets))
         .route("/api/tickets/{id}/mark-paid", post(api_mark_paid))
         .route("/api/tickets/{id}/mark-failed", post(api_mark_failed))
         .route("/api/settings/attachment", post(api_set_attachment))
@@ -850,6 +851,38 @@ async fn api_onchain_status(
         body,
     )
         .into_response()
+}
+
+/// Open outgoing tickets, oldest first — the daemonized payout adapters'
+/// discovery surface (`GET /api/tickets/open?rail=ev`). Waiting tickets
+/// (no fund lock yet) are included: the adapter re-checks the lock before
+/// acting, exactly as the code-invoked flow does.
+async fn api_open_tickets(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    let rail = params.get("rail").map(String::as_str);
+    let mut tickets: Vec<ApiTicket> = state
+        .branch
+        .list_all()
+        .await
+        .into_iter()
+        .filter(|t| {
+            matches!(t.kind, TicketKind::Outgoing)
+                && matches!(
+                    t.status,
+                    TicketStatus::Waiting | TicketStatus::Pending
+                )
+                && rail.is_none_or(|r| t.payout_rail.as_deref() == Some(r))
+        })
+        .map(|t| ApiTicket::from_ticket(&t))
+        .collect();
+    tickets.sort_by_key(|t| t.created_at);
+    Json(tickets).into_response()
 }
 
 async fn api_match_quote(

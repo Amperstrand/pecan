@@ -68,64 +68,87 @@ interface DepositReceipt {
 type WithdrawState =
   | { phase: "idle" }
   | { phase: "creating" }
-  | { phase: "pending"; quoteId: string; tail: string }
+  | { phase: "pending"; quoteId: string; tail: string; auto: boolean; label: string }
   | { phase: "done"; preimage: string }
   | { phase: "error"; message: string }
 
 /**
  * Withdraw destinations: the teller rail (human) plus the deployment's
- * simulated payout rails — sending on a simulated rail settles
- * automatically in this deployment and hands back the scheme's receipt
- * reference as the payment proof.
+ * payout rails — the simulated rails settle automatically and hand back
+ * the scheme's receipt as the payment proof; the demo EV chargers are
+ * fixed-destination rails (the envelope is complete, no destination
+ * input — the charger itself is the offramp, 1 € = 1 kW·s).
  */
 const WITHDRAW_OPTIONS = [
   {
     id: "teller",
     label: "Teller",
     placeholder: "Phone or reference",
+    fixed: null,
     hint: "Send ecash to a recipient via the teller.",
   },
   {
     id: "sepa",
     label: "SEPA",
     placeholder: "IBAN, e.g. NL33INGB0000000881",
+    fixed: null,
     hint: "Bank transfer — settles with an E2E reference as receipt.",
   },
   {
     id: "sepa-instant",
     label: "Instant",
     placeholder: "IBAN, e.g. DE96370205000003292912",
+    fixed: null,
     hint: "SEPA instant — settles with a UETR receipt.",
   },
   {
     id: "swish",
     label: "Swish",
     placeholder: "+46…",
+    fixed: null,
     hint: "Mobile bank payment (SE) — Swish reference receipt.",
   },
   {
     id: "mobilepay",
     label: "MobilePay",
     placeholder: "+45… / +358…",
+    fixed: null,
     hint: "Mobile wallet (DK/FI) — transaction-id receipt.",
   },
   {
     id: "ideal",
     label: "iDEAL",
     placeholder: "NL IBAN",
+    fixed: null,
     hint: "Dutch instant bank rail — transaction-id receipt.",
   },
   {
     id: "bizum",
     label: "Bizum",
     placeholder: "+34…",
+    fixed: null,
     hint: "Spanish mobile rail — operation-reference receipt.",
   },
   {
     id: "sim",
     label: "Sim",
     placeholder: "alias",
+    fixed: null,
     hint: "Generic simulated rail — token receipt.",
+  },
+  {
+    id: "atomA",
+    label: "Charger A",
+    placeholder: null,
+    fixed: "ev:atomA",
+    hint: "Demo EV charger — 1 € = 1 kW·s of charging, fires on send.",
+  },
+  {
+    id: "atomB",
+    label: "Charger B",
+    placeholder: null,
+    fixed: "ev:atomB",
+    hint: "Demo EV charger — 1 € = 1 kW·s of charging, fires on send.",
   },
 ] as const
 
@@ -385,10 +408,17 @@ export function WalletPage() {
 
         const pendingWithdraw = await getPendingWithdraw()
         if (pendingWithdraw) {
+          // Resume shows the charging state when the melt's envelope names
+          // a fixed-destination rail (ev:atomA); otherwise the teller code.
+          const resumedOption = WITHDRAW_OPTIONS.find(
+            (o) => o.fixed && o.fixed === pendingWithdraw.description,
+          )
           setWithdrawState({
             phase: "pending",
             quoteId: pendingWithdraw.quoteId,
             tail: pendingWithdraw.tail,
+            auto: Boolean(resumedOption),
+            label: resumedOption?.label ?? "payout",
           })
           withdrawPollRef = setInterval(async () => {
             const preimage = await pollWithdraw(pendingWithdraw.quoteId)
@@ -487,6 +517,7 @@ export function WalletPage() {
   }
 
   const startWithdraw = async () => {
+    const option = WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)
     const invalidAmount = validateWithdrawAmount(
       withdrawAmount,
       CURRENCIES[currency].symbol,
@@ -496,7 +527,9 @@ export function WalletPage() {
       setWithdrawState({ phase: "error", message: invalidAmount })
       return
     }
-    if (!withdrawRecipient.trim()) {
+    // Fixed-destination rails (the demo chargers) carry a complete
+    // envelope — there is no destination input to validate.
+    if (!option?.fixed && !withdrawRecipient.trim()) {
       setWithdrawState({
         phase: "error",
         message:
@@ -507,15 +540,24 @@ export function WalletPage() {
       return
     }
     const amount = parseFloat(withdrawAmount)
-    // Simulated rails ride the payout envelope: rail:destination.
+    // Input rails ride the payout envelope: rail:destination.
     const target =
-      withdrawRail === "teller"
+      option?.fixed ??
+      (withdrawRail === "teller"
         ? withdrawRecipient.trim()
-        : `${withdrawRail}:${withdrawRecipient.trim()}`
+        : `${withdrawRail}:${withdrawRecipient.trim()}`)
     setWithdrawState({ phase: "creating" })
     try {
       const result = await createWithdraw(amount, target)
-      setWithdrawState({ phase: "pending", quoteId: result.quoteId, tail: result.tail })
+      setWithdrawState({
+        phase: "pending",
+        quoteId: result.quoteId,
+        tail: result.tail,
+        // Fixed-destination rails settle themselves (the charger daemon):
+        // no teller code to hand over, the charger is already firing.
+        auto: Boolean(option?.fixed),
+        label: option?.label ?? "payout",
+      })
       refresh()
 
       const interval = setInterval(async () => {
@@ -553,6 +595,7 @@ export function WalletPage() {
   }
 
   const balanceText = balance !== null ? (balance / 100).toFixed(2) : "…"
+  const activeOption = WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)
   const symbol = CURRENCIES[currency].symbol
   const isDark = document.documentElement.classList.contains("dark")
 
@@ -827,19 +870,18 @@ export function WalletPage() {
                   </button>
                 ))}
               </div>
-              <div className="grid gap-1.5">
-                <Label htmlFor="wd-recipient">Destination</Label>
-                <Input
-                  id="wd-recipient"
-                  type="text"
-                  placeholder={
-                    WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)
-                      ?.placeholder
-                  }
-                  value={withdrawRecipient}
-                  onChange={(e) => setWithdrawRecipient(e.target.value)}
-                />
-              </div>
+              {activeOption?.placeholder ? (
+                <div className="grid gap-1.5">
+                  <Label htmlFor="wd-recipient">Destination</Label>
+                  <Input
+                    id="wd-recipient"
+                    type="text"
+                    placeholder={activeOption.placeholder}
+                    value={withdrawRecipient}
+                    onChange={(e) => setWithdrawRecipient(e.target.value)}
+                  />
+                </div>
+              ) : null}
               <div className="grid gap-1.5">
                 <Label htmlFor="wd-amt">Amount ({symbol})</Label>
                 <Input
@@ -873,7 +915,7 @@ export function WalletPage() {
                 <Button
                   variant="outline"
                   onClick={startWithdraw}
-                  disabled={!withdrawAmount || !withdrawRecipient}
+                  disabled={!withdrawAmount || (!activeOption?.fixed && !withdrawRecipient)}
                 >
                   Send
                 </Button>
@@ -884,21 +926,37 @@ export function WalletPage() {
               <Loader2 className="size-4 animate-spin" /> Creating…
             </div>
           ) : withdrawState.phase === "pending" ? (
-            <div className="grid gap-3 text-center">
-              <p className="text-sm text-muted-foreground">
-                Give this code to the teller:
-              </p>
-              <p className="font-mono text-3xl font-bold tracking-widest select-all">
-                {withdrawState.tail}
-              </p>
-              <div className="flex justify-center">
-                <QrCodeImg text={withdrawState.tail} alt="Teller code QR" />
+            withdrawState.auto ? (
+              <div className="grid gap-3 text-center">
+                <p className="text-lg font-medium">
+                  ⚡ Charging at {withdrawState.label}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  The charger is delivering — this settles by itself when
+                  the charge window completes.
+                </p>
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Charging
+                </div>
               </div>
-              <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="size-3 animate-spin" />
-                Waiting for payout
+            ) : (
+              <div className="grid gap-3 text-center">
+                <p className="text-sm text-muted-foreground">
+                  Give this code to the teller:
+                </p>
+                <p className="font-mono text-3xl font-bold tracking-widest select-all">
+                  {withdrawState.tail}
+                </p>
+                <div className="flex justify-center">
+                  <QrCodeImg text={withdrawState.tail} alt="Teller code QR" />
+                </div>
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Waiting for payout
+                </div>
               </div>
-            </div>
+            )
           ) : (
             <div className="grid gap-2">
               <p className="text-sm text-destructive">{withdrawState.message}</p>

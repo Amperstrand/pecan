@@ -172,8 +172,8 @@ Pieces:
   customer's ecash (reconcile DRIFT; two test melts were written off via
   mark-failed on 2026-09-02). Until adapters are daemonized, an operator
   must settle-or-write-off open ev tickets before expiry.
-- **Wallet**: no picker tab yet — the raw envelope in the teller field
-  (`ev:atomA`) works today; the tab ships with the hardware.
+- **Wallet**: Charger A/B picker tabs (the raw envelope typed in the
+  teller field, `ev:atomA`, remains the power-user path).
 
 End-to-end test: `scripts/e2e.sh -g "ev rail"` (zero sat — the fake
 gateway and a shrunk tariff keep it under a minute). Deployment: the rail

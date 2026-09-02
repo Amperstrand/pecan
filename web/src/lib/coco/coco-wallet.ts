@@ -565,6 +565,7 @@ export async function getPendingDeposits(): Promise<DepositQuote[]> {
 export async function getPendingWithdraw(): Promise<{
   quoteId: string
   tail: string
+  description: string | null
 } | null> {
   const coco = await getCoco()
   const ops = await coco.ops.melt.listInFlight()
@@ -576,9 +577,11 @@ export async function getPendingWithdraw(): Promise<{
       o.createdAt > staleCutoff,
   )
   if (!op || !op.quoteId) return null
+  const request = (op as { request?: { description?: string } }).request
   return {
     quoteId: op.quoteId,
     tail: op.quoteId.slice(-6).toUpperCase(),
+    description: request?.description ?? null,
   }
 }
 
