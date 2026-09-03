@@ -96,6 +96,10 @@ serial-chain page must reset shared widgets (rail tab, withdraw form
 phase) at their start — whichever test ran before may have left them
 anywhere.
 
+Current status, known limitations, and the ranked improvement backlog
+live in [docs/status.md](docs/status.md) — read it before planning work;
+keep it current when the picture changes.
+
 Coverage matrix (rail × currency, which file owns each cell, and which
 rows are deliberately EUR-only shared machinery) lives as a comment
 block atop `web/e2e/helpers/wallet-suite.ts` — keep it current when
