@@ -134,6 +134,22 @@ const ONCHAIN_PAYERS = ["cln-hub-signet", "cln-vls-signet", "cln-nostr-signet"] 
 export function sendOnchainFromExternal(address: string, sat: number): string {
   const failures: string[] = []
   for (const node of ONCHAIN_PAYERS) {
+    // Health probe first: a wedged RPC (the vls signer outage of
+    // 2026-09-03) accepts the connection and then hangs, which would
+    // burn the whole 300s withdraw budget on a dead node before the
+    // failover ever reaches a healthy payer. getinfo must answer fast.
+    try {
+      execSync(
+        `ssh -o ConnectTimeout=10 root@46.224.104.12 "timeout 15 docker exec ${node} lightning-cli --network=signet getinfo"`,
+        { timeout: 40_000, stdio: ["ignore", "pipe", "pipe"] },
+      )
+    } catch (err) {
+      const e = err as { stderr?: Buffer; stdout?: Buffer }
+      failures.push(
+        `${node}: RPC unhealthy, skipped (${`${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 160)})`,
+      )
+      continue
+    }
     let out: string
     try {
       out = execSync(

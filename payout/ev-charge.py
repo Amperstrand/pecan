@@ -149,24 +149,44 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
             break
         time.sleep(1.0)
     if not (state and state.get("state") == "done"):
-        # The window ran but the device never confirmed; the ticket stays
-        # open for an operator decision — do NOT auto-settle on doubt.
-        return 6, {"result": "device-timeout", "id": tid,
+        # Metering lost: the window was granted (the relay was commanded
+        # for its full length) but completion was never confirmed.
+        # Settle the GRANTED window with a TIMEOUT receipt rather than
+        # leaving the ticket open — an expired open ticket burns the
+        # whole deposit with no accounting at all (the drift class of
+        # 2026-09-03). If the relay never physically fired the operator
+        # can refund against this audit trail.
+        receipt = "EV-{}-{}s-{}-TIMEOUT".format(
+            device, seconds, secrets.token_hex(4).upper())
+        cents = max(1, round(seconds * 100.0 / tariff))
+        notes = (f"payout rail {RAIL} (charge session, metering lost) "
+                 f"receipt={receipt}")
+        try:
+            console.post(f"/api/tickets/{tid}/mark-paid",
+                         {"notes": notes, "receipt": receipt,
+                          "delivered": cents})
+        except (urllib.error.HTTPError, urllib.error.URLError):
+            return 6, {"result": "device-timeout-settle-failed", "id": tid}
+        return 6, {"result": "device-timeout-settled", "id": tid,
                    "destination": slug, "device": device,
-                   "seconds": seconds}
+                   "seconds": seconds, "receipt": receipt}
 
     # The device's stop button aborts mid-window: delivered < requested
     # and the status carries stopped=true. The receipt states the
-    # delivered seconds and ends with STOPPED — the wallet's stream
-    # reads that and stops melting further chunks. `delivered` settles
-    # the melt for what was actually used: the mint returns the
-    # difference to the wallet's change outputs (design C).
+    # delivered seconds and ends with STOPPED. `delivered` rides the
+    # settle as rail metadata (the mint settles at the FULL quote — cdk
+    # rejects total_spent below the quote amount); the deposit-pattern
+    # wallet claims the difference as a refund mint quote.
     delivered = int(state.get("seconds", seconds))
     was_stopped = bool(state.get("stopped"))
     suffix = "-STOPPED" if was_stopped else ""
     receipt = "EV-{}-{}s-{}{}".format(device, delivered,
                                       secrets.token_hex(4).upper(), suffix)
-    cents = max(1, round(delivered * 100.0 / a.secs_per_eur))
+    # Tariff snapshot: bill at the rate the session was priced at, not
+    # whatever the daemon currently runs with (a restart with a changed
+    # --secs-per-eur mid-session must not reprice delivered energy).
+    tariff = getattr(a, "_tariffs", {}).get(tid, a.secs_per_eur)
+    cents = max(1, round(delivered * 100.0 / tariff))
 
     notes = f"payout rail {RAIL} (charge session) receipt={receipt}"
     # `delivered` rides along as rail metadata — the mint settles the melt
@@ -287,14 +307,32 @@ def watch(a, console, gateway, device_map):
                 continue
             # Never trigger energy for a quote that is about to expire —
             # an unpayable ticket means the window cannot be settled and
-            # the customer's ecash burns (reconcile DRIFT).
+            # the customer's ecash burns (reconcile DRIFT). Nothing was
+            # delivered, so the ledger records the FULL deposit as due
+            # back to the customer; the mint quote expired, which means
+            # the refund cannot be a mint issuance — it is an operator
+            # payback (teller deposit the customer creates). The ticket
+            # is failed with a refund-due note so reconcile stops
+            # flagging and the audit trail names the owed amount.
             expires = t.get("expires_at")
             if expires and time.time() > float(expires) - 5:
                 state[tid] = {"status": "open", "at": int(time.time()),
-                              "result": "expired-before-trigger"}
+                              "result": "expired-before-trigger",
+                              "refund_due_cents": int(t.get("amount", 0))}
                 save_state(a.state_file, state)
-                log({"result": "operator-needed", "id": tid,
-                     "reason": "quote expired before the charger could fire; settle or write off manually"})
+                try:
+                    console.post(
+                        f"/api/tickets/{tid}/mark-failed",
+                        {"notes": "expired before the charger fired — "
+                                  "NOTHING delivered, full deposit due "
+                                  "back to the customer (operator payback "
+                                  "via a fresh teller deposit)"})
+                except (urllib.error.HTTPError, urllib.error.URLError) as e:
+                    log({"result": "api-error", "stage": "expire-mark-failed",
+                         "error": str(e)})
+                log({"result": "refund-due", "id": tid,
+                     "amount_cents": t.get("amount", 0),
+                     "reason": "quote expired before the charger fired"})
                 continue
             t = wait_fund_lock(console, tid, t, a.timeout)
             if t.get("status") == "waiting":
@@ -303,14 +341,29 @@ def watch(a, console, gateway, device_map):
             expires = t.get("expires_at")
             if expires and time.time() > float(expires) - 5:
                 state[tid] = {"status": "open", "at": int(time.time()),
-                              "result": "expired-before-trigger"}
+                              "result": "expired-waiting-fund-lock",
+                              "refund_due_cents": 0}
                 save_state(a.state_file, state)
-                log({"result": "operator-needed", "id": tid,
-                     "reason": "quote expired while waiting for the fund lock"})
+                try:
+                    console.post(
+                        f"/api/tickets/{tid}/mark-failed",
+                        {"notes": "expired waiting for the wallet's fund "
+                                  "lock — nothing burned, nothing due"})
+                except (urllib.error.HTTPError, urllib.error.URLError) as e:
+                    log({"result": "api-error", "stage": "expire-mark-failed",
+                         "error": str(e)})
+                log({"result": "closed", "id": tid,
+                     "reason": "quote expired before the fund lock"})
                 continue
             # Claim BEFORE triggering: a crash between here and settle
-            # must not lead to a second energy delivery.
-            state[tid] = {"status": "triggered", "at": int(time.time())}
+            # must not lead to a second energy delivery. The tariff is
+            # snapshotted into the record — settle bills at the priced
+            # rate even if the daemon restarts with a different flag.
+            state[tid] = {"status": "triggered", "at": int(time.time()),
+                          "secs_per_eur": a.secs_per_eur}
+            if not hasattr(a, "_tariffs"):
+                a._tariffs = {}
+            a._tariffs[tid] = a.secs_per_eur
             save_state(a.state_file, state)
             quote_id = t.get("quote_id")
             code, result = deliver_energy(
@@ -423,6 +476,9 @@ def main() -> int:
         log({"result": "fund-lock-timeout", "id": tid})
         return 3
 
+    if not hasattr(a, "_tariffs"):
+        a._tariffs = {}
+    a._tariffs[tid] = a.secs_per_eur
     code, result = deliver_energy(a, gateway, tid, amount, slug or "",
                                   device_map)
     log(result)

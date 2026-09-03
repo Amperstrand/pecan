@@ -637,6 +637,7 @@ export function WalletPage() {
         // The refund is a fresh locked mint quote the daemon settles
         // against its delivery ledger (one per melt, capped at the
         // un-consumed amount); the existing deposit machinery claims it.
+        const centsBeforeClaim = await getBalanceCents(currency)
         const refundQuote = await createDepositQuote(
           claimable,
           "branch",
@@ -648,7 +649,13 @@ export function WalletPage() {
           if (await pollAndMint(refundQuote.quoteId)) break
           await new Promise((r) => setTimeout(r, 1_500))
         }
-        refunded = claimable
+        // pollAndMint reports terminal states, including FAILED — prove
+        // the refund with the balance before telling the user it landed
+        // (a failed claim surfaces as a pending deposit card instead).
+        const centsAfterClaim = await getBalanceCents(currency)
+        if (centsAfterClaim - centsBeforeClaim >= claimable * 100 - 1) {
+          refunded = claimable
+        }
       } catch (e) {
         // Claim failures surface as an unsettled deposit card — the
         // refund is recoverable from history; do not fail the summary.

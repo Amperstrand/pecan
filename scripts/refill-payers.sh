@@ -16,8 +16,19 @@ TARGET=80000
 RESERVE=150000
 
 free_sats() {
-  docker exec "$1" lightning-cli --network=signet listfunds |
-    python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(o['amount_msat']//1000 for o in d['outputs'] if o['status']=='confirmed' and not o.get('reserved')))"
+  # A dead or hung RPC reads as zero free — the payer is skipped for this
+  # pass instead of hanging the whole refill loop (the vls signer outage
+  # of 2026-09-03 stalled every cron pass for hours).
+  timeout 20 docker exec "$1" lightning-cli --network=signet listfunds 2>/dev/null |
+    python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(sum(o['amount_msat'] // 1000 for o in d['outputs']
+              if o['status'] == 'confirmed' and not o.get('reserved')))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0
 }
 
 STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -35,7 +46,7 @@ for payer in cln-hub-signet cln-vls-signet cln-nostr-signet; do
   fi
   amt=$need
   [ "$amt" -gt "$avail" ] && amt=$avail
-  addr=$(docker exec "$payer" lightning-cli --network=signet newaddr bech32 |
+  addr=$(timeout 20 docker exec "$payer" lightning-cli --network=signet newaddr bech32 |
     python3 -c "import sys,json; print(json.load(sys.stdin)['bech32'])" 2>/dev/null) || addr=""
   if [ -z "$addr" ]; then
     echo "  $payer: no address from RPC — skipping"
@@ -44,7 +55,7 @@ for payer in cln-hub-signet cln-vls-signet cln-nostr-signet; do
   # A failed withdraw (insufficient funds, RPC error) must skip the payer,
   # not abort the whole refill loop — the reservoir keeps its remaining
   # funds for the next cron pass.
-  txout=$(docker exec cln-swap-signet lightning-cli --network=signet \
+  txout=$(timeout 60 docker exec cln-swap-signet lightning-cli --network=signet \
     withdraw "$addr" "${amt}sat" normal 2>&1) || txout=""
   txid=$(printf '%s' "$txout" | python3 -c "
 import sys, json

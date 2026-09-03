@@ -1,6 +1,8 @@
 # Pecan + EV rail — status, limitations, and where to go next
 
-Snapshot: 2026-09-03. Live at https://giftcard.cashu.exchange. This is
+Snapshot: 2026-09-03 (updated after the hardening round — full suite
+33/33 including both onchain tests, both charger e2es, and the stress
+soak). Live at https://giftcard.cashu.exchange. This is
 the honest map of what works, what is known-broken or limited, and the
 ranked backlog. Keep it current when the picture changes.
 
@@ -36,6 +38,38 @@ ranked backlog. Keep it current when the picture changes.
 - **Ops**: reconcile clean; caddy reload fixed (systemd PrivateTmp
   recreation after the disk-full /tmp wipe); password/fixture fetching
   automated in `scripts/e2e.sh`.
+
+## Hardening round 2026-09-03 (late)
+
+Audited the charger surface and fixed, all verified by tests:
+
+- **Tariff snapshot**: the daemon records `secs_per_eur` per ticket at
+  trigger time — a restart with a changed flag can no longer reprice
+  delivered energy.
+- **Expired-untriggered deposits** now auto-`mark-failed` with a
+  refund-due note (full deposit owed back, operator payback) instead of
+  lingering as reconcile DRIFT.
+- **Metering-loss policy changed**: a window whose completion is never
+  confirmed settles the GRANTED window with a `…-TIMEOUT` receipt —
+  strictly better than the old leave-open policy, which burned the whole
+  deposit with no accounting.
+- **Gateway session pruning**: sessions and ref indexes are dropped an
+  hour after their window ends (unbounded maps on a long-lived host).
+- **Payer health probe**: `sendOnchainFromExternal` probes each payer
+  with a 15 s `getinfo` before its 300 s withdraw — the vls signer
+  outage (still down; failover covers it) used to eat the entire budget
+  before a healthy payer was tried. `refill-payers.sh` gained the same
+  timeouts and reads hung RPCs as zero.
+- **e2e.sh `-g` fix**: an explicit grep no longer combines with the
+  default `--grep-invert @stress` into a contradiction.
+- **Device-button e2e** added (simulated G39 press over MQTT): the
+  debugging trail is a lesson — the generated Python subscribed to the
+  literal topic `charger/${DEVICE}/#` because the line sat in a
+  single-quoted TS string (no interpolation). Symptoms: subscription
+  granted, zero messages. Fix: template literal. Also: paho v2
+  `on_subscribe` takes five args.
+- **Refund honesty**: the wallet proves the refund with a balance delta
+  before the summary claims it (pollAndMint reports FAILED as terminal).
 
 ## Known limitations and open issues (ranked)
 
