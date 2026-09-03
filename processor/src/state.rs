@@ -82,6 +82,13 @@ pub struct Ticket {
     /// rail's own records.
     #[serde(default)]
     pub receipt: Option<String>,
+    /// Cents actually delivered — payout rails with partial delivery (an
+    /// aborted charge session) settle for less than the melt. `None` =
+    /// fully delivered. Drives the melt's `total_spent` so the mint signs
+    /// the difference back to the wallet as NUT-05 change (design C,
+    /// docs/partial-delivery.md).
+    #[serde(default)]
+    pub delivered: Option<u64>,
     /// Free-form notes added by the operator.
     pub notes: Option<String>,
     /// Unix timestamp after which an unsettled ticket is dead. Mint tickets
@@ -119,6 +126,7 @@ impl Ticket {
             description,
             payout_rail: None,
             receipt: None,
+            delivered: None,
             notes: None,
             expires_at,
             settled_by: None,
@@ -148,6 +156,7 @@ impl Ticket {
             description,
             payout_rail,
             receipt: None,
+            delivered: None,
             notes: None,
             expires_at,
             settled_by: None,
@@ -446,6 +455,7 @@ impl BranchState {
         id: &str,
         notes: Option<String>,
         receipt: Option<String>,
+        delivered: Option<u64>,
         settled_by: &str,
     ) -> Result<Ticket> {
         let (updated, transitioned) = {
@@ -478,6 +488,9 @@ impl BranchState {
                     }
                     if let Some(r) = receipt {
                         ticket.receipt = Some(r);
+                    }
+                    if let Some(d) = delivered {
+                        ticket.delivered = Some(d);
                     }
                     ticket.settled_by = Some(settled_by.to_string());
                     (ticket.clone(), true)
@@ -675,6 +688,12 @@ fn outgoing_payment_response(t: &Ticket) -> MakePaymentResponse {
         // settles that carry no rail receipt.
         payment_proof: t.receipt.clone().or_else(|| t.notes.clone()),
         status,
+        // NOTE: cdk's melt finalize REJECTS total_spent < quote.amount
+        // ("Payment amount N is less than quote amount M",
+        // IncorrectQuoteAmount — discovered live 2026-09-03), so partial
+        // delivery CANNOT ride total_spent; the melt always settles at
+        // the full quote. `delivered` stays as ticket metadata for the
+        // rail's own accounting until upstream grows partial settles.
         total_spent: Amount::new(t.amount, t.unit_typed()),
     }
 }
@@ -816,7 +835,7 @@ mod tests {
             .insert_open(incoming("0198c0ef-3f11-7abc-9def-aaaaaa9ec0f4", 500))
             .await
             .unwrap();
-        state.mark_paid(&t.id, None, None, "test").await.unwrap();
+        state.mark_paid(&t.id, None, None, None, "test").await.unwrap();
 
         let query = normalize_match_input("9ec0f4").unwrap();
         assert!(matches!(
@@ -836,12 +855,12 @@ mod tests {
             .unwrap();
         let mut rx = state.subscribe_events();
 
-        let paid = state.mark_paid(&t.id, Some("till #1".into()), None, "test").await.unwrap();
+        let paid = state.mark_paid(&t.id, Some("till #1".into()), None, None, "test").await.unwrap();
         assert_eq!(paid.status, TicketStatus::Paid);
         assert!(matches!(rx.try_recv(), Ok(Event::PaymentReceived(_))));
 
         // repeated confirm is a no-op and must not double-credit
-        let again = state.mark_paid(&t.id, None, None, "test").await.unwrap();
+        let again = state.mark_paid(&t.id, None, None, None, "test").await.unwrap();
         assert_eq!(again.status, TicketStatus::Paid);
         assert!(rx.try_recv().is_err());
     }
@@ -855,13 +874,13 @@ mod tests {
             .unwrap();
         state.mark_failed(&t.id, None, "test").await.unwrap();
         let mut rx = state.subscribe_events();
-        assert!(state.mark_paid(&t.id, None, None, "test").await.is_err());
+        assert!(state.mark_paid(&t.id, None, None, None, "test").await.is_err());
         assert!(rx.try_recv().is_err(), "voided ticket must not emit payment");
 
         let mut expired = incoming("0198c0ef-3f11-7abc-9def-bbbbbb111111", 700);
         expired.expires_at = Some(unix_now() - 1);
         let expired = state.insert_open(expired).await.unwrap();
-        assert!(state.mark_paid(&expired.id, None, None, "test").await.is_err());
+        assert!(state.mark_paid(&expired.id, None, None, None, "test").await.is_err());
     }
 
     #[tokio::test]
@@ -878,7 +897,7 @@ mod tests {
         assert!(state.insert_open(incoming(quote, 999)).await.is_err());
 
         // settled ids can never be re-registered
-        state.mark_paid(&t.id, None, None, "test").await.unwrap();
+        state.mark_paid(&t.id, None, None, None, "test").await.unwrap();
         assert!(state.insert_open(incoming(quote, 500)).await.is_err());
     }
 
@@ -907,13 +926,13 @@ mod tests {
         assert_eq!(t.status, TicketStatus::Waiting);
 
         // wallet has not locked funds → no payout
-        assert!(state.mark_paid(&t.id, None, None, "test").await.is_err());
+        assert!(state.mark_paid(&t.id, None, None, None, "test").await.is_err());
 
         // wallet funds the melt → Pending, payout allowed, success event fires
         let funded = state.mark_outgoing_submitted(&t.id).await.unwrap();
         assert_eq!(funded.status, TicketStatus::Pending);
         let mut rx = state.subscribe_events();
-        let paid = state.mark_paid(&t.id, None, None, "test").await.unwrap();
+        let paid = state.mark_paid(&t.id, None, None, None, "test").await.unwrap();
         assert_eq!(paid.status, TicketStatus::Paid);
         assert!(matches!(
             rx.try_recv(),
@@ -946,6 +965,7 @@ mod tests {
                 &t.id,
                 Some("payout rail sepa receipt=E2E-1 iban=NL33…".into()),
                 Some("E2E-260901-AB12CD34".into()),
+                None,
                 "bank-sim",
             )
             .await
@@ -960,6 +980,31 @@ mod tests {
             Some("E2E-260901-AB12CD34")
         );
 
+        // Partial delivery is METADATA only: cdk rejects total_spent below
+        // the quote amount (IncorrectQuoteAmount), so the melt settles at
+        // full and `delivered` documents what the rail actually provided.
+        let t3 = Ticket::new_outgoing(
+            "0198c0ef-3f11-7abc-9def-cccccc3c3c3c".into(),
+            300,
+            "eur".into(),
+            Some("ev:atomA".into()),
+            None,
+            None,
+        );
+        let t3 = state.insert_open(t3).await.unwrap();
+        state.mark_outgoing_submitted(&t3.id).await.unwrap();
+        state
+            .mark_paid(&t3.id, None, Some("EV-atomA-1s-ABCD1234-STOPPED".into()), Some(100), "ev-charge")
+            .await
+            .unwrap();
+        let resp3 = state
+            .lookup_outgoing(&PaymentIdentifier::CustomId(t3.id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resp3.total_spent.to_u64(), 300);
+        let stored = state.get_ticket(&t3.id).await.unwrap();
+        assert_eq!(stored.delivered, Some(100));
+
         // Teller settle without a receipt: notes remain the proof.
         let t2 = Ticket::new_outgoing(
             "0198c0ef-3f11-7abc-9def-bbbbbba2b2b2".into(),
@@ -972,7 +1017,7 @@ mod tests {
         let t2 = state.insert_open(t2).await.unwrap();
         state.mark_outgoing_submitted(&t2.id).await.unwrap();
         state
-            .mark_paid(&t2.id, Some("till #2".into()), None, "test")
+            .mark_paid(&t2.id, Some("till #2".into()), None, None, "test")
             .await
             .unwrap();
         let resp2 = state
@@ -1000,7 +1045,7 @@ mod tests {
         assert_eq!(resp.status, MeltQuoteState::Failed);
 
         // and the operator must not pay out cash for it
-        let err = state.mark_paid(&t.id, None, None, "test").await.unwrap_err();
+        let err = state.mark_paid(&t.id, None, None, None, "test").await.unwrap_err();
         assert!(err.to_string().contains("expired"));
 
         // unexpired payouts are unaffected

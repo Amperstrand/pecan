@@ -132,7 +132,7 @@ impl BranchBackend {
                 "payout rail {rail} (auto-simulated) receipt={receipt}"
             );
             match state
-                .mark_paid(&ticket_id, Some(notes), Some(receipt), "autosim")
+                .mark_paid(&ticket_id, Some(notes), Some(receipt), None, "autosim")
                 .await
             {
                 Ok(_) => tracing::info!("autosim settled {ticket_id} on rail {rail}"),

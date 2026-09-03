@@ -1024,7 +1024,7 @@ async fn api_mark_paid(
         Ok(authed) => authed,
         Err(r) => return r,
     };
-    match mark_paid_inner(&state, &id, form.notes, form.receipt, &authed.username).await {
+    match mark_paid_inner(&state, &id, form.notes, form.receipt, form.delivered, &authed.username).await {
         Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -1450,6 +1450,8 @@ struct NotesForm {
     notes: String,
     #[serde(default)]
     receipt: String,
+    #[serde(default)]
+    delivered: Option<u64>,
 }
 
 fn clean_notes(notes: String) -> Option<String> {
@@ -1466,11 +1468,18 @@ async fn mark_paid_inner(
     id: &str,
     notes: String,
     receipt: String,
+    delivered: Option<u64>,
     settled_by: &str,
 ) -> Result<Ticket, String> {
     state
         .branch
-        .mark_paid(id, clean_notes(notes), clean_notes(receipt), settled_by)
+        .mark_paid(
+            id,
+            clean_notes(notes),
+            clean_notes(receipt),
+            delivered,
+            settled_by,
+        )
         .await
         .map_err(|e| format!("mark_paid: {e}"))
 }

@@ -112,27 +112,29 @@ lands as a deposit card and auto-claims through the existing machinery.
   blind-signs outputs worth the refund) done through the deposit flow,
   whose delivery channel already works.
 
-## Design C — true async melt change (the "blank option", rehabilitated)
+## Design C — true async melt change: BLOCKED at the mint's amount floor
 
 Melt the full budget with blanks attached; the processor settles with
 `total_spent = delivered`; the mint signs the un-spent blanks at
 finalize; the wallet polls the quote and unblinds the change when PAID.
 
-- Change: real NUT-05/NUT-08 change, exact to the delivered amount.
-- Exposure: full budget at risk until the wallet polls the paid quote —
-  but recovery is deterministic (mint persists the promises), so the
-  risk is latency, not loss (on a mint with the persistence fixes).
-- What it takes on OUR stack:
-  1. cdk-mintd with ordered paid-quote change (#1961) — verify or bump
-     our 0.18.0-rc.0; confirm the branch/custom method stores outputs
-     and returns them on the paid check (the LN path demonstrably does).
-  2. Processor: `MakePaymentResponse.total_spent = delivered cents` —
-     small; the daemon already knows.
-  3. coco wallet: attach blanks to branch melts; on PAID, unblind by
-     index with mint-assigned amounts (cashu-ts's `createMeltChangeProofs`
-     is the reference implementation; the Amethyst bug is the checklist).
-  4. e2e: partial-delivery test asserting change proofs land.
-- Estimate: 2-4 focused days, dominated by (1).
+**Live finding (2026-09-03, cdk-mintd 0.18.0):** the mint's finalize
+REJECTS `total_spent < quote.amount` — `IncorrectQuoteAmount`, "Payment
+amount N is less than quote amount M" — and the saga wedges in
+`finalizing`, retrying forever (our first partial settle had to be
+surgically re-settled at full). cdk's change model is fee-reserve
+shaped: `total_spent` may exceed the quote, never undercut it. Partial
+settlement of one quote is therefore an UPSTREAM FEATURE REQUEST
+(a quote semantics change or an MPP-of-delivery concept), not missing
+wiring. Two things from the C experiment ARE in production now, both
+proven by a live €11 melt that finalized as `inputs 2048 → total_spent
+1100 + change 948`:
+
+- overshoot-as-change works end to end (wallet attaches blanks,
+  mint signs, check re-serves) — `needsSwapFor` no longer pre-swaps;
+- the device is the metering authority: the G39 abort reports
+  `{"delivered": s}` (OCPP meterStop pattern), the gateway clamps it to
+  the requested window, and the STOPPED receipt carries it.
 
 ## Comparison
 
@@ -147,7 +149,8 @@ finalize; the wallet polls the quote and unblinds the change when PAID.
 | Privacy                | many small melts       | melt + mint quote    | one melt             |
 | Failure story          | tiny                   | operator-dependent   | poll-dependent       |
 
-Guidance: keep A as the demo default (it is live and honest). Choose C
-when exact billing matters and the mint supports it — it is the
-ecosystem-blessed answer to this exact question. B remains the fallback
-for mints without async-change support.
+Guidance: A is the shipped answer — with the amount-floor discovery it
+is also the only design that expresses partial delivery within cdk's
+quote semantics today. C needs upstream (partial settle); revisit if/when
+cdk grows it. B remains the fallback for refund semantics without mint
+support.

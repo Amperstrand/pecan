@@ -25,15 +25,15 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
   protected readonly method = "branch" as const
 
   /**
-   * Swap on ANY overshoot: proof granularity (e.g. a single 512 for a 500
-   * melt) would otherwise return the overpay as one-time change signatures in
-   * the melt response — and this mint's custom-method state checks do not
-   * re-serve them, so a response lost to a page reload loses the overpay. An
-   * exact-amount melt returns no change; a lost SWAP response is recoverable
-   * from the mint via restore.
+   * Overshoot rides as change: the melt carries blinded change outputs
+   * for the overpay, and the mint (cdk-mintd ≥ 0.18.0) stores the change
+   * signatures with the quote and re-serves them on state checks — the
+   * recovery path in checkMeltQuote below. This is also what lets the ev
+   * rail settle partial delivery: the processor's total_spent < inputs
+   * and the difference returns as change automatically.
    */
-  needsSwapFor(selectedAmount: Amount, totalAmount: Amount): boolean {
-    return selectedAmount.greaterThan(totalAmount)
+  needsSwapFor(_selectedAmount: Amount, _totalAmount: Amount): boolean {
+    return false
   }
 
   protected async createRemoteQuote(
@@ -66,12 +66,10 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
     // Eager by design: the teller may only dispense cash once the wallet has
     // locked (burned) its proofs — the mint's make_payment marks the ticket
     // submitted, which mark-paid requires ("waiting for the wallet to lock
-    // funds"). But ASYNC per NUT-05: prefer_async makes the mint return
-    // immediately after setup (inputs burned, PENDING) instead of blocking
-    // the response until a human settles minutes later — the shape coco's
-    // saga model assumes. Change is deferred on async melts and this mint's
-    // custom state checks never re-serve it, so the exact-amount pre-swap
-    // keeps the overpay at zero.
+    // funds"). ASYNC per NUT-05: prefer_async makes the mint return
+    // immediately after setup (inputs burned, PENDING). Change is deferred
+    // with it and recovered from the quote check at finalize — see
+    // needsSwapFor/checkMeltQuote.
     const preview = {
       method: "branch",
       inputs: proofsToMelt,

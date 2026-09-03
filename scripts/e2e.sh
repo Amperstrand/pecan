@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Run the Playwright e2e suite against prod with the generated admin password.
 # The processor persists the random first-boot password to
 # /opt/pecan-config/initial-admin-password.txt (0600); older builds logged it
@@ -22,12 +22,12 @@ cd "$(dirname "$0")/../web"
 
 SMOKE=0
 PREFLIGHT=1
-PW_ARGS=""
+PW_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --smoke) SMOKE=1 ;;
     --no-preflight) PREFLIGHT=0 ;;
-    *) PW_ARGS="$PW_ARGS $arg" ;;
+    *) PW_ARGS+=("$arg") ;;
   esac
 done
 
@@ -55,14 +55,27 @@ if [ -n "$USD_PW" ]; then
   export PECAN_USD_ADMIN_PASSWORD="$USD_PW"
 fi
 
+# EV-rail test fixtures (the ev-rail spec's simulated charger-button
+# press): the gateway shared secret and the fleet MQTT account, both from
+# inr2 (the atom-gateway's env file).
+EV_ENV=$(ssh root@46.224.104.12 \
+  "grep -E '^(BRIDGE_KEY|MQTT_URL|MQTT_USER|MQTT_PASS)=' /opt/atom-bridge/.env" \
+  2>/dev/null || true)
+if [ -n "$EV_ENV" ]; then
+  export PECAN_EV_GATEWAY_KEY="$(printf '%s\n' "$EV_ENV" | grep BRIDGE_KEY | cut -d= -f2)"
+  export PECAN_EV_MQTT_URL="$(printf '%s\n' "$EV_ENV" | grep MQTT_URL | cut -d= -f2)"
+  export PECAN_EV_MQTT_USER="$(printf '%s\n' "$EV_ENV" | grep MQTT_USER | cut -d= -f2)"
+  export PECAN_EV_MQTT_PASS="$(printf '%s\n' "$EV_ENV" | grep MQTT_PASS | cut -d= -f2)"
+fi
+
 if [ "$SMOKE" -eq 1 ]; then
   # max-failures=1: when iterating on a broken build the first failure is
   # the information; the rest of the tier would only echo it.
-  set -- $PW_ARGS --grep @smoke --max-failures=1
+  set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"} --grep @smoke --max-failures=1
 else
   # Default lane: everything except the @stress soak tool (~6 min, zero
   # sat, run explicitly with `scripts/e2e.sh -g @stress`).
-  set -- $PW_ARGS --grep-invert @stress
+  set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"} --grep-invert @stress
 fi
 
 # Not exec'd: the trailing verdict line lets agents and soak greps read

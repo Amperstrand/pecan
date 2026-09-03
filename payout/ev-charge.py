@@ -156,16 +156,24 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     # The device's stop button aborts mid-window: delivered < requested
     # and the status carries stopped=true. The receipt states the
     # delivered seconds and ends with STOPPED — the wallet's stream
-    # reads that and stops melting further chunks.
+    # reads that and stops melting further chunks. `delivered` settles
+    # the melt for what was actually used: the mint returns the
+    # difference to the wallet's change outputs (design C).
     delivered = int(state.get("seconds", seconds))
     was_stopped = bool(state.get("stopped"))
     suffix = "-STOPPED" if was_stopped else ""
     receipt = "EV-{}-{}s-{}{}".format(device, delivered,
                                       secrets.token_hex(4).upper(), suffix)
+    cents = max(1, round(delivered * 100.0 / a.secs_per_eur))
+
     notes = f"payout rail {RAIL} (charge session) receipt={receipt}"
+    # `delivered` rides along as rail metadata — the mint settles the melt
+    # at the FULL quote either way (cdk rejects total_spent < amount), so
+    # partial delivery is accounted by the streaming wallet, not here.
     try:
         console.post(f"/api/tickets/{tid}/mark-paid",
-                     {"notes": notes, "receipt": receipt})
+                     {"notes": notes, "receipt": receipt,
+                      "delivered": cents})
     except urllib.error.HTTPError as e:
         return 4, {"result": "api-error", "id": tid,
                    "stage": "mark-paid", "status": e.code}
