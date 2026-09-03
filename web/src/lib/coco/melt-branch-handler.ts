@@ -25,15 +25,17 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
   protected readonly method = "branch" as const
 
   /**
-   * Overshoot rides as change: the melt carries blinded change outputs
-   * for the overpay, and the mint (cdk-mintd ≥ 0.18.0) stores the change
-   * signatures with the quote and re-serves them on state checks — the
-   * recovery path in checkMeltQuote below. This is also what lets the ev
-   * rail settle partial delivery: the processor's total_spent < inputs
-   * and the difference returns as change automatically.
+   * Swap on ANY overshoot — for two reasons. Change hygiene: the mint
+   * (cdk-mintd ≥ 0.18.0) re-serves change signatures on quote checks, so
+   * overshoot change IS recoverable, but the pre-swap keeps the common
+   * case change-free. Fee control (the expensive lesson, 2026-09-03):
+   * melting proof-granular selections pays per-proof input fees — a €6
+   * melt from a 13-proof wallet cost €4.24 in fees. The pre-swap
+   * consolidates inputs first; the fee reserve rides as change outputs
+   * when a swap cannot be exact.
    */
-  needsSwapFor(_selectedAmount: Amount, _totalAmount: Amount): boolean {
-    return false
+  needsSwapFor(selectedAmount: Amount, totalAmount: Amount): boolean {
+    return selectedAmount.greaterThan(totalAmount)
   }
 
   protected async createRemoteQuote(

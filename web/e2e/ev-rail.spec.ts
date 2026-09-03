@@ -1,16 +1,17 @@
-import { test, expect, type Page } from "@playwright/test"
+import { test, expect } from "@playwright/test"
 import { apiLogin, matchAndSettle, readBalance, readTellerCode } from "./helpers/wallet"
 
-// The EV rail as a streaming charge session (design A,
-// docs/payout-modules.md): the wallet melts one €1 chunk per second; a
-// Stop ends the stream and the un-melted budget stays in the wallet —
-// partial sessions with no refund machinery. The daemon on inr2 settles
-// each chunk against the physical Atom (PECAN_EV_DEVICE selects the
-// charger, default atomA).
+// The DEPOSIT pattern end to end (docs/partial-delivery.md): one €6 melt
+// is the deposit; the wallet's slider tracks delivery on the gateway's
+// public session endpoint (the melt quote id is the capability); the
+// Stop button reaches the physical relay; the daemon settles the melt at
+// full and the wallet claims the un-spent part as a refund mint quote
+// the daemon validates against its delivery ledger. Final balance =
+// before − delivered exactly — the refund closes the deposit gap.
 const DEVICE = process.env.PECAN_EV_DEVICE ?? "atomA"
 const TAB = `Charger ${DEVICE === "atomB" ? "B" : "A"}`
 
-test("ev rail: streaming charge spends per second and stops with change kept", async ({ page }) => {
+test("ev rail: deposit pattern — slider, remote stop, refund of the unspent deposit", async ({ page }) => {
   test.setTimeout(300_000)
   const consoleBase = "/eur-console"
   const password = process.env.PECAN_ADMIN_PASSWORD
@@ -23,50 +24,55 @@ test("ev rail: streaming charge spends per second and stops with change kept", a
   await page.goto(`${consoleBase}/wallet`)
   await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
 
-  if ((await readBalance(page)) < 5) {
-    await page.getByPlaceholder("5.00").fill("5")
+  const budget = 6
+  if ((await readBalance(page)) < budget + 1) {
+    await page.getByPlaceholder("5.00").fill("15")
     await page.getByRole("button", { name: "Create deposit quote" }).click()
     const depCode = await readTellerCode(page)
     await apiLogin(page, consoleBase, password)
     await matchAndSettle(page, depCode, "ev rail funding", consoleBase)
     await expect
       .poll(async () => readBalance(page), { timeout: 45_000 })
-      .toBeGreaterThanOrEqual(5)
+      .toBeGreaterThanOrEqual(budget + 1)
   }
 
   const before = await readBalance(page)
-  // Budget 3 → the wallet streams at most three €1 chunks.
   await page.getByRole("tab", { name: TAB, exact: true }).click()
   await expect(page.getByLabel("Destination")).toHaveCount(0)
-  await page.getByPlaceholder("1.00").fill("3")
+  await page.getByPlaceholder("1.00").fill(String(budget))
   await page.getByRole("button", { name: "Start charging" }).click()
 
-  // The live counter: first chunk settles → "1 / 3 s".
-  await expect(page.getByText("1 / 3 s")).toBeVisible({ timeout: 120_000 })
+  // The slider appears and tracks delivery against the 6 s window.
+  await expect(page.getByText("⚡ Charging at " + TAB)).toBeVisible({ timeout: 60_000 })
+  await expect(page.getByText(/€\d+\.00 of the deposit remaining/)).toBeVisible({
+    timeout: 30_000,
+  })
+  // Let a second deliver, then stop from the BROWSER — the stop must
+  // reach the relay through the gateway (public, quote-id capability).
+  await expect
+    .poll(
+      async () =>
+        Number(await page.getByRole("progressbar").getAttribute("aria-valuenow")),
+      { timeout: 120_000 },
+    )
+    .toBeGreaterThanOrEqual(1)
   await page.getByRole("button", { name: "Stop charging" }).click()
 
-  // Partial session: summary shows 1 s delivered, change kept.
+  // Stopped summary with actual consumption from the device-side abort.
   await expect(page.getByText(/Charging stopped — \d+ s delivered/)).toBeVisible({
-    timeout: 120_000,
+    timeout: 180_000,
   })
-  const summary = await page
-    .getByText(/Charging stopped — (\d+) s delivered/)
-    .textContent()
-  const delivered = Number(summary!.match(/(\d+) s delivered/)![1])
-  expect(delivered).toBeGreaterThanOrEqual(1)
-  expect(delivered).toBeLessThan(3)
-  await expect(page.getByText(/€\d+\.00 spent/)).toBeVisible()
-  await expect(page.getByText(/EV-atom[AB]-\d+s-[0-9A-F]{8}/)).toBeVisible()
+  const receipt = await page.locator("p.break-all.font-mono").textContent()
+  expect(receipt).toMatch(new RegExp(`^EV-${DEVICE}-[1-5]s-[0-9A-F]{8}-STOPPED$`))
+  const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
 
-  // Accounting: only the delivered seconds left the wallet, within the
-  // overshoot-change granularity. KNOWN ISSUE (2026-09-03): with
-  // needsSwapFor=false, a chunk whose proof selection overshoots (e.g. a
-  // 128¢ proof for a 100¢ melt) returns change via the quote check, and
-  // the change of a chunk that settles around the Stop press may not be
-  // credited to spendable before this poll ends — observed as exactly
-  // (overshoot − amount) missing. Tolerance covers one chunk's
-  // overshoot; a permanent shortfall means the change was lost, not late.
+  // THE deposit-pattern assertion: the un-spent euros came back as a
+  // refund quote the daemon settled — balance is exact, not approximate.
   await expect
-    .poll(async () => readBalance(page), { timeout: 90_000 })
-    .toBeGreaterThanOrEqual(before - delivered - 0.28)
+    .poll(async () => readBalance(page), { timeout: 200_000 })
+    .toBeCloseTo(before - delivered, 2)
+  await expect(page.getByText(new RegExp(`€${delivered}\\.00 spent`))).toBeVisible()
+  await expect(
+    page.getByText(new RegExp(`€${budget - delivered}\\.00 refunded to your wallet`)),
+  ).toBeVisible()
 })

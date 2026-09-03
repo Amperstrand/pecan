@@ -854,9 +854,11 @@ async fn api_onchain_status(
 }
 
 /// Open outgoing tickets, oldest first — the daemonized payout adapters'
-/// discovery surface (`GET /api/tickets/open?rail=ev`). Waiting tickets
-/// (no fund lock yet) are included: the adapter re-checks the lock before
-/// acting, exactly as the code-invoked flow does.
+/// discovery surface (`GET /api/tickets/open?rail=ev&kind=outgoing`).
+/// Waiting tickets (no fund lock yet) are included: the adapter
+/// re-checks the lock before acting, exactly as the code-invoked flow
+/// does. `kind=incoming` returns open mint tickets instead — the refund
+/// quotes the ev daemon settles for partially-consumed deposits.
 async fn api_open_tickets(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -866,18 +868,25 @@ async fn api_open_tickets(
         return r;
     }
     let rail = params.get("rail").map(String::as_str);
+    let kind = params.get("kind").map(String::as_str);
     let mut tickets: Vec<ApiTicket> = state
         .branch
         .list_all()
         .await
         .into_iter()
-        .filter(|t| {
-            matches!(t.kind, TicketKind::Outgoing)
-                && matches!(
-                    t.status,
-                    TicketStatus::Waiting | TicketStatus::Pending
-                )
-                && rail.is_none_or(|r| t.payout_rail.as_deref() == Some(r))
+        .filter(|t| match kind {
+            Some("incoming") => {
+                matches!(t.kind, TicketKind::Incoming)
+                    && matches!(t.status, TicketStatus::Waiting | TicketStatus::Pending)
+            }
+            _ => {
+                matches!(t.kind, TicketKind::Outgoing)
+                    && matches!(
+                        t.status,
+                        TicketStatus::Waiting | TicketStatus::Pending
+                    )
+                    && rail.is_none_or(|r| t.payout_rail.as_deref() == Some(r))
+            }
         })
         .map(|t| ApiTicket::from_ticket(&t))
         .collect();

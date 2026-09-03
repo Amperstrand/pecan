@@ -154,3 +154,63 @@ is also the only design that expresses partial delivery within cdk's
 quote semantics today. C needs upstream (partial settle); revisit if/when
 cdk grows it. B remains the fallback for refund semantics without mint
 support.
+
+## The deposit pattern (design D — implemented, the commercial shape)
+
+Commercial chargers work like a parking garage: authorize a €50 hold,
+meter the session, bill the actual, refund the rest. This is the flow
+pecan now ships — distinct from all three designs above because the
+MONEY moves like commercial hardware expects:
+
+```
+wallet melts €B (the deposit) ──▶ daemon triggers a B-second window
+  │                                  (session_ref = the melt quote id)
+  ├─ slider: polls the gateway's PUBLIC /session/<quote-id>/status —
+  │  delivered counts up, remaining balance estimates down; the quote
+  │  id is the capability, no operator secret in the browser
+  ├─ Stop (browser button or the device's G39) ──▶ relay off + aborted
+  │  {"delivered": k} (the metering authority reports actuals)
+  ▼
+daemon settles the melt AT FULL (cdk's amount floor) with a STOPPED
+receipt, then watches for the wallet's refund quote
+mint quote, description "refund:<melt-quote-id>", NUT-20 locked
+  ─ validates: known melt, settled, not already refunded,
+    claimed ≤ deposit − delivered  ──▶ mark-paid
+  ▼
+wallet claims it through the ordinary deposit machinery; balance ends
+at before − delivered·tariff, exactly
+```
+
+Why this shape (tradeoffs, against the alternatives):
+
+- vs streaming (A): one mental model for the user ("deposit"), one melt
+  per session, continuous charging without per-second saga gaps — at the
+  cost of the full budget being at mint-risk during the session (a
+  daemon outage at expiry burns the deposit; streaming loses at most a
+  chunk). This mirrors real charger deployments, which prefer holds.
+- vs async melt change (C): C stays blocked by the mint's amount floor;
+  the refund quote achieves the same user-visible result (money back,
+  exact) using only deposit machinery that has run in production for
+  months.
+- Fee control matters more than it looks: melting proof-granular
+  selections pays per-proof input fees (measured: €4.24 on a €6 melt
+  from a 13-proof wallet). The exact-amount pre-swap is INPUT
+  CONSOLIDATION; the deposit flow keeps it.
+
+Operational invariants (reinforced by the tollgate-rs review):
+refund issuance is idempotent per melt (one refund, ever, in the
+daemon's state ledger); validation is server-side against the delivery
+ledger (never the wallet's claim); the claim flow is reload-safe (an
+interrupted refund surfaces as an ordinary pending deposit card); and
+`mark-paid` is at-least-once-safe (settling a Paid ticket is a no-op).
+Known exposure: a deposit melt that expires while the daemon is down
+burns (the DRIFT class) — the tollgate review's "unknown outcome"
+discipline applies; a future hardening would reconcile expired deposits
+against un-triggered windows and auto-issue refunds.
+
+Commercial-charger mapping: OCPP `RemoteStartTransaction` = the trigger
+(session_ref = our transaction correlation), `MeterValues`/`StopTransaction`
+= the aborted/done reports (delivered = meterStop − meterStart), the
+deposit = the pre-authorization hold, and the refund quote = the
+settlement reversal. The gateway's HTTP contract is the OCPP-to-rail
+seam a real CSMS adapter would implement.

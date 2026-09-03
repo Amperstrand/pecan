@@ -99,9 +99,11 @@ class Gateway:
         with urllib.request.build_opener().open(req, timeout=30) as r:
             return json.loads(r.read().decode() or "{}")
 
-    def trigger(self, device: str, seconds: int) -> dict:
-        return self._req("POST", f"/device/{device}/trigger",
-                         {"seconds": seconds})
+    def trigger(self, device: str, seconds: int, session_ref=None) -> dict:
+        payload = {"seconds": seconds}
+        if session_ref:
+            payload["session_ref"] = session_ref
+        return self._req("POST", f"/device/{device}/trigger", payload)
 
     def status(self, device: str) -> dict:
         return self._req("GET", f"/device/{device}/status")
@@ -112,7 +114,7 @@ def log(obj: dict) -> None:
 
 
 def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
-                   slug: str, device_map: dict) -> tuple:
+                   slug: str, device_map: dict, session_ref=None) -> tuple:
     """Trigger the charger, await the window, mark the ticket paid.
 
     Returns (exit_code, result). Never called before the wallet's fund
@@ -122,7 +124,7 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     device = device_map.get(slug, slug)
     seconds = max(1, round(amount / 100.0 * a.secs_per_eur))
     try:
-        trig = gateway.trigger(device, seconds)
+        trig = gateway.trigger(device, seconds, session_ref=session_ref)
     except urllib.error.HTTPError as e:
         return 2, {"result": "refused", "id": tid, "destination": slug,
                    "device": device, "seconds": seconds,
@@ -183,6 +185,7 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     return 0, {"result": "settled", "id": tid, "rail": RAIL,
                "amount": amount, "destination": slug, "device": device,
                "seconds": delivered, "stopped": was_stopped,
+               "delivered_cents": cents,
                "receipt": receipt, "status": "paid"}
 
 
@@ -200,6 +203,57 @@ def save_state(path, state):
     with open(tmp, "w") as f:
         json.dump(state, f)
     os.replace(tmp, path)
+
+
+def settle_refunds(a, console, state):
+    """Deposit-pattern refunds: the wallet claims the un-consumed part of
+    a settled deposit melt by creating a branch mint quote whose
+    description is `refund:<melt-quote-id>`. Validate it against the
+    delivery ledger — the claimed amount may not exceed what the session
+    actually left unconsumed, and each melt refunds at most once — then
+    settle it like any deposit. Money returns through the standard
+    mint-quote machinery; no melt is ever settled below its amount."""
+    try:
+        tickets = console.get("/api/tickets/open?kind=incoming")
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        log({"result": "api-error", "stage": "refund-scan", "error": str(e)})
+        return
+    for t in tickets if isinstance(tickets, list) else []:
+        desc = t.get("description") or ""
+        if not desc.startswith("refund:"):
+            continue
+        quote_id = desc.split(":", 1)[1]
+        # find the delivery record for that melt quote
+        rec = next((r for r in state.values()
+                    if r.get("quote_id") == quote_id
+                    and r.get("status") == "settled"), None)
+        if rec is None:
+            continue  # not ours, or not settled — leave for an operator
+        if rec.get("refunded"):
+            continue  # one refund per melt, ever
+        overpay = max(0, int(rec.get("amount_cents", 0))
+                      - int(rec.get("delivered_cents", 0)))
+        claimed = int(t.get("amount", 0))
+        if claimed < 1 or claimed > overpay:
+            log({"result": "refund-refused", "id": t.get("id"),
+                 "quote_id": quote_id, "claimed": claimed,
+                 "overpay": overpay})
+            continue
+        receipt = "REFUND-{}".format(secrets.token_hex(4).upper())
+        try:
+            console.post(f"/api/tickets/{t['id']}/mark-paid",
+                         {"notes": f"ev deposit refund for {quote_id} "
+                                   f"({claimed}c of {overpay}c overpay) "
+                                   f"receipt={receipt}",
+                          "receipt": receipt})
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            log({"result": "api-error", "stage": "refund-mark-paid",
+                 "error": str(e)})
+            continue
+        rec["refunded"] = True
+        save_state(a.state_file, state)
+        log({"result": "refund-settled", "quote_id": quote_id,
+             "amount": claimed, "receipt": receipt})
 
 
 def wait_fund_lock(console, tid, ticket, timeout):
@@ -258,14 +312,28 @@ def watch(a, console, gateway, device_map):
             # must not lead to a second energy delivery.
             state[tid] = {"status": "triggered", "at": int(time.time())}
             save_state(a.state_file, state)
+            quote_id = t.get("quote_id")
             code, result = deliver_energy(
                 a, gateway, tid, int(t.get("amount", 0)),
-                t.get("description") or "", device_map)
-            state[tid] = {"status": "settled" if code == 0 else
-                          "refused" if code == 2 else "open",
-                          "at": int(time.time()), "result": result["result"]}
+                t.get("description") or "", device_map,
+                session_ref=quote_id)
+            rec = {"status": "settled" if code == 0 else
+                   "refused" if code == 2 else "open",
+                   "at": int(time.time()), "result": result["result"]}
+            if code == 0 and quote_id:
+                # Refund ledger entry for the deposit pattern: what the
+                # melt paid vs what the session actually delivered. The
+                # wallet claims the difference with a refund:<quote-id>
+                # mint quote that settle_refunds validates against this.
+                rec["quote_id"] = quote_id
+                rec["amount_cents"] = int(t.get("amount", 0))
+                rec["delivered_cents"] = result.get("delivered_cents",
+                                                    int(t.get("amount", 0)))
+                rec["refunded"] = False
+            state[tid] = rec
             save_state(a.state_file, state)
             log(result)
+        settle_refunds(a, console, state)
         time.sleep(a.poll_interval)
 
 

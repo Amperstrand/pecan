@@ -167,7 +167,12 @@ describe("MeltBranchHandler.checkMeltQuote (change recovery from state checks)",
 })
 
 describe("MeltBranchHandler fee and finalization", () => {
-  it("swaps on any selection overshoot so melts never carry change", () => {
+  it("swaps on any selection overshoot: input consolidation is fee control", () => {
+    // The pre-swap keeps the common melt change-free, and — the
+    // expensive lesson — consolidates inputs: melting proof-granular
+    // selections pays per-proof fees (a €6 melt from a 13-proof wallet
+    // cost €4.24). Overshoot change IS recoverable from quote checks on
+    // cdk-mintd >= 0.18.0, but consolidated inputs are cheaper still.
     const handler = new TestableMeltHandler()
     expect(handler.needsSwapFor(Amount.from(512), Amount.from(500))).toBe(true)
     expect(handler.needsSwapFor(Amount.from(500), Amount.from(500))).toBe(false)

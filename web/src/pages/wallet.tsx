@@ -32,6 +32,7 @@ import {
   pollWithdraw,
   resumePendingOperations,
 } from "@/lib/coco/coco-wallet"
+import { parseChargeReceipt, refundEuros } from "@/lib/coco/charge-session"
 import { downloadWalletDump, exportWalletDump } from "@/lib/coco/wallet-backup"
 import { BackupCard } from "@/components/wallet/backup-card"
 import { ExpiryCountdown } from "@/components/wallet/expiry-countdown"
@@ -69,9 +70,9 @@ type WithdrawState =
   | { phase: "idle" }
   | { phase: "creating" }
   | { phase: "pending"; quoteId: string; tail: string; auto: boolean; label: string }
-  | { phase: "charging"; label: string; device: string; budget: number; spent: number; receipt: string | null }
+  | { phase: "charging"; label: string; device: string; budget: number; delivered: number; requested: number; ref: string }
   | { phase: "done"; preimage: string }
-  | { phase: "charged"; label: string; seconds: number; stopped: boolean; receipt: string | null }
+  | { phase: "charged"; label: string; seconds: number; spent: number; refunded: number; stopped: boolean; receipt: string | null }
   | { phase: "error"; message: string }
 
 /**
@@ -523,16 +524,39 @@ export function WalletPage() {
   // melts the next after the current one settles. Stop = don't melt the
   // next chunk — the un-melted budget never left the wallet, so partial
   // sessions need no refund path at all.
-  const chargeStopRef = useRef(false)
+  // Deposit-pattern charge sessions (docs/partial-delivery.md § deposit):
+  // ONE melt for the whole budget is the deposit; the charger meters
+  // actual delivery; the wallet's Stop (or the device's button) ends the
+  // session; the daemon settles the melt at full and the wallet claims
+  // the un-consumed remainder as a refund mint quote the daemon settles.
+  // The slider polls the gateway's public session endpoint — the melt
+  // quote id is the capability — so no operator secret ships in the
+  // browser bundle.
+  const chargeAbort = useRef(false)
 
-  const settleChunk = async (quoteId: string): Promise<string | null> => {
-    const deadline = Date.now() + 90_000
-    while (Date.now() < deadline) {
-      const preimage = await pollWithdraw(quoteId)
-      if (preimage) return preimage
-      await new Promise((r) => setTimeout(r, 1_500))
+  const sessionStatus = async (ref: string) => {
+    try {
+      const r = await fetch(`/atom-gateway/session/${ref}/status`)
+      if (!r.ok) return null
+      return (await r.json()) as {
+        state: string
+        delivered: number
+        remaining: number
+        requested: number
+        stopped: boolean
+      }
+    } catch {
+      return null
     }
-    return null
+  }
+
+  const stopSession = async (ref: string) => {
+    try {
+      const r = await fetch(`/atom-gateway/session/${ref}/stop`, { method: "POST" })
+      return r.ok
+    } catch {
+      return false
+    }
   }
 
   const startCharging = async (
@@ -540,70 +564,107 @@ export function WalletPage() {
     budget: number,
   ) => {
     const device = option.fixed!.split(":")[1] ?? option.id
-    chargeStopRef.current = false
-    let spent = 0
+    chargeAbort.current = false
     let receipt: string | null = null
-    let stopped = false
 
-    const finish = () => {
+    let result
+    try {
+      result = await createWithdraw(budget, option.fixed!)
+    } catch (e) {
       setWithdrawState({
-        phase: "charged",
-        label: option.label,
-        seconds: spent,
-        // Either stop path counts: the device's STOPPED receipt (button on
-        // the Atom) or the wallet's own Stop ending the stream early.
-        stopped: stopped || chargeStopRef.current,
-        receipt,
+        phase: "error",
+        message: e instanceof Error ? e.message : String(e),
       })
-      refresh()
+      return
     }
+    const ref = result.quoteId
 
-    while (!chargeStopRef.current && spent < budget) {
-      setWithdrawState({
-        phase: "charging",
-        label: option.label,
-        device,
-        budget,
-        spent,
-        receipt,
-      })
-      let chunkReceipt: string | null = null
-      try {
-        const result = await createWithdraw(1, option.fixed!)
-        // Wait for the daemon to fire this second and settle its receipt.
-        chunkReceipt = await settleChunk(result.quoteId)
-      } catch (e) {
-        // The first chunk failing is an error; later chunks mean the
-        // balance ran dry mid-session — summarize what was delivered.
-        const msg = e instanceof Error ? e.message : String(e)
-        if (spent === 0) {
-          setWithdrawState({ phase: "error", message: msg })
-        } else {
-          finish()
+    // The finalize poll (receipt) and the slider poll run concurrently;
+    // whichever resolves the session first wins.
+    const finalize = (async () => {
+      const deadline = Date.now() + 600_000
+      while (Date.now() < deadline) {
+        const preimage = await pollWithdraw(ref)
+        if (preimage) return preimage
+        await new Promise((r) => setTimeout(r, 1_500))
+      }
+      return null
+    })()
+
+    const slider = (async () => {
+      while (!chargeAbort.current) {
+        const st = await sessionStatus(ref)
+        if (st) {
+          setWithdrawState({
+            phase: "charging",
+            label: option.label,
+            device,
+            budget,
+            delivered: st.delivered,
+            requested: st.requested,
+            ref,
+          })
+          if (st.state !== "running") return
         }
-        return
+        await new Promise((r) => setTimeout(r, 1_000))
       }
-      if (chunkReceipt === null) {
-        // Daemon slow/down: keep what settled, end the session.
-        finish()
-        return
-      }
-      if (chunkReceipt === "FAILED") {
-        finish()
-        return
-      }
-      receipt = chunkReceipt
-      spent += 1
-      // The device's stop button lands in the receipt: the daemon marks
-      // the in-flight chunk with …-STOPPED when the charger reports an
-      // abort. The current second is accounted; the stream ends here.
-      if (chunkReceipt.includes("STOPPED")) {
-        stopped = true
-        break
-      }
-      refresh()
+    })()
+
+    receipt = await finalize
+    chargeAbort.current = true
+    await Promise.race([slider, new Promise((r) => setTimeout(r, 2_000))])
+    refresh()
+
+    if (!receipt || receipt === "FAILED") {
+      setWithdrawState({
+        phase: "error",
+        message: receipt
+          ? "The charger session failed — check history."
+          : "The session did not settle in time — it stays pending and resolves on reload.",
+      })
+      return
     }
-    finish()
+
+    const parsed = parseChargeReceipt(receipt)
+    const delivered = parsed?.deliveredSeconds ?? budget
+    const stopped = parsed?.stopped ?? false
+    const spent = Math.min(budget, delivered)
+    const claimable = refundEuros(budget, delivered)
+
+    let refunded = 0
+    if (claimable >= 1) {
+      try {
+        // The refund is a fresh locked mint quote the daemon settles
+        // against its delivery ledger (one per melt, capped at the
+        // un-consumed amount); the existing deposit machinery claims it.
+        const refundQuote = await createDepositQuote(
+          claimable,
+          "branch",
+          currency,
+          `refund:${ref}`,
+        )
+        const deadline = Date.now() + 180_000
+        while (Date.now() < deadline) {
+          if (await pollAndMint(refundQuote.quoteId)) break
+          await new Promise((r) => setTimeout(r, 1_500))
+        }
+        refunded = claimable
+      } catch (e) {
+        // Claim failures surface as an unsettled deposit card — the
+        // refund is recoverable from history; do not fail the summary.
+        console.error("refund claim failed:", e)
+      }
+    }
+    refresh()
+    setWithdrawState({
+      phase: "charged",
+      label: option.label,
+      seconds: delivered,
+      spent,
+      refunded,
+      stopped,
+      receipt,
+    })
   }
 
   const startWithdraw = async () => {
@@ -1063,26 +1124,47 @@ export function WalletPage() {
                   ⚡ Charging at {withdrawState.label}
                 </p>
                 <p className="text-3xl font-bold tabular-nums">
-                  {withdrawState.spent}
+                  {withdrawState.delivered}
                   <span className="text-base font-normal text-muted-foreground">
                     {" "}
-                    / {withdrawState.budget} s
+                    / {withdrawState.requested || withdrawState.budget} s
                   </span>
                 </p>
-                <p className="text-sm text-muted-foreground">
-                  One second melted at a time — stop anytime and the rest
-                  of your budget stays in the wallet.
-                </p>
-                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-                  <Loader2 className="size-3 animate-spin" />
-                  {withdrawState.receipt
-                    ? "Paying for the next second"
-                    : "Starting the first second"}
+                <div
+                  className="relative h-3 w-full overflow-hidden rounded-full bg-muted"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={withdrawState.requested || withdrawState.budget}
+                  aria-valuenow={withdrawState.delivered}
+                >
+                  <div
+                    className="h-full rounded-full bg-primary transition-all duration-1000"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        (withdrawState.delivered /
+                          Math.max(1, withdrawState.requested || withdrawState.budget)) *
+                          100,
+                      )}%`,
+                    }}
+                  />
                 </div>
+                <p className="text-sm text-muted-foreground">
+                  {`≈ €${Math.max(
+                    0,
+                    withdrawState.budget - withdrawState.delivered,
+                  )}.00 of the deposit remaining`}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Deposit €
+                  {withdrawState.budget}
+                  .00 · 1 € per second — the unspent part refunds
+                  automatically when the session ends.
+                </p>
                 <Button
                   variant="outline"
                   onClick={() => {
-                    chargeStopRef.current = true
+                    void stopSession(withdrawState.ref)
                   }}
                 >
                   Stop charging
@@ -1096,10 +1178,12 @@ export function WalletPage() {
                     : `Charged ${withdrawState.seconds} s at ${withdrawState.label}`}
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  €{withdrawState.seconds}.00 spent
-                  {withdrawState.stopped
-                    ? " — the rest of the budget stayed in your wallet"
-                    : ""}
+                  €{withdrawState.spent}.00 spent
+                  {withdrawState.refunded >= 1
+                    ? ` · €${withdrawState.refunded}.00 refunded to your wallet`
+                    : withdrawState.stopped
+                      ? " — the unspent deposit refunded automatically"
+                      : ""}
                 </p>
                 {withdrawState.receipt ? (
                   <>

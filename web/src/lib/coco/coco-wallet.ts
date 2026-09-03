@@ -208,6 +208,7 @@ export async function createDepositQuote(
   amountInput: number,
   method: DepositMethod = "branch",
   currency: Currency = activeCurrency(),
+  description = "Wallet deposit",
 ): Promise<DepositQuote> {
   const coco = await getCoco()
   const amount = Math.round(amountInput * 100)
@@ -218,7 +219,7 @@ export async function createDepositQuote(
       method,
       amount: amount,
       unit: currency,
-      description: "Wallet deposit",
+      description,
       locked: true,
     }),
     20_000,
