@@ -662,6 +662,7 @@ function registerEurExtras(ctx: SuiteContext): void {
     const page = ctx.page()
     await apiLogin(page, ctx.consoleBase)
     const before = await readBalance(page)
+    test.skip(before < 4, "insufficient balance (chain funding filtered out)")
 
     // SEPA credit transfer: valid IBAN, receipt is an EndToEndId-style
     // reference — shown to the wallet as the payment proof, exactly

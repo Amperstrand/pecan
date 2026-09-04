@@ -469,6 +469,12 @@ export function WalletPage() {
                     receipt: recent.receipt,
                   })
                   refresh()
+                  // The refund claim lived in the reloaded page's
+                  // promise chain — the boot scan ran before this melt
+                  // finalized, so claim HERE (idempotent server-side).
+                  void claimOrphanedEvRefunds().then((euros) => {
+                    if (euros >= 1) refresh()
+                  })
                   return
                 }
               }
@@ -1347,9 +1353,12 @@ export function WalletPage() {
       <p className="text-center text-xs text-muted-foreground">
         Self-custodied — Coco 2 · keys stay in your browser.
         <br />
-        <a href="/console/" className="underline">Operator console</a>
+        {/* The wallet is currency-agnostic (localStorage picks the
+            mint); the consoles are per-pair, so these links follow the
+            ACTIVE currency's processor instance. */}
+        <a href={`${consoleUrl(currency)}/`} className="underline">Operator console</a>
         {" · "}
-        <a href="/teller/" className="underline">Teller</a>
+        <a href={`${consoleUrl(currency)}/teller`} className="underline">Teller</a>
       </p>
     </main>
   )

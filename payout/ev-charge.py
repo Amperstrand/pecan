@@ -57,26 +57,53 @@ RAIL = "ev"
 class Console:
     def __init__(self, base: str, user: str, password: str):
         self.base = base
+        self.user = user
+        self.password = password
         jar = http.cookiejar.CookieJar()
         self.op = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(jar))
-        self.post("/api/login", {"username": user, "password": password})
+        self._login()
 
-    def post(self, path: str, payload: dict) -> dict:
+    def _login(self) -> None:
         req = urllib.request.Request(
-            self.base + path,
-            data=json.dumps(payload).encode(),
+            self.base + "/api/login",
+            data=json.dumps({"username": self.user,
+                             "password": self.password}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         with self.op.open(req, timeout=30) as r:
-            body = r.read().decode()
-            return json.loads(body) if body else {}
+            r.read()
+
+    def _request(self, method: str, path: str, payload=None):
+        # Every pecan deploy recreates the processor and kills the
+        # session cookie — a one-shot login 401s forever after. Re-auth
+        # once and retry on exactly that condition.
+        def build():
+            headers = {"Content-Type": "application/json"}
+            data = (json.dumps(payload).encode()
+                    if payload is not None else None)
+            if data is None:
+                headers = {}
+            return urllib.request.Request(self.base + path, data=data,
+                                          headers=headers, method=method)
+        try:
+            with self.op.open(build(), timeout=30) as r:
+                body = r.read().decode()
+                return json.loads(body) if body else {}
+        except urllib.error.HTTPError as e:
+            if e.code != 401:
+                raise
+            self._login()
+            with self.op.open(build(), timeout=30) as r:
+                body = r.read().decode()
+                return json.loads(body) if body else {}
+
+    def post(self, path: str, payload: dict) -> dict:
+        return self._request("POST", path, payload)
 
     def get(self, path: str) -> dict:
-        with self.op.open(self.base + path, timeout=30) as r:
-            body = r.read().decode()
-            return json.loads(body) if body else {}
+        return self._request("GET", path)
 
     def open_tickets(self) -> list:
         tickets = self.get(f"/api/tickets/open?rail={RAIL}")

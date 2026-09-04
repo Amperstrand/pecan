@@ -152,8 +152,13 @@ export function sendOnchainFromExternal(address: string, sat: number): string {
     }
     let out: string
     try {
+      // Feerate is PINNED, not estimated: signet fee estimates
+      // occasionally explode (observed 4.28M sat/kB on 2026-09-04 —
+      // every payer answered "0 available UTXOs, 184k sats short" while
+      // holding healthy balances). A 1.5k/kw floor-rate tx always
+      // propagates; the deposit is esplora-watched, not fee-raced.
       out = execSync(
-        `ssh root@46.224.104.12 "docker exec ${node} lightning-cli --network=signet withdraw ${address} ${sat}sat normal"`,
+        `ssh root@46.224.104.12 "docker exec ${node} lightning-cli --network=signet withdraw ${address} ${sat}sat 1500perkw"`,
         { timeout: 300_000, stdio: ["ignore", "pipe", "pipe"] },
       ).toString()
     } catch (err) {
