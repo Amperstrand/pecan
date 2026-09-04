@@ -106,6 +106,7 @@ export class MintBranchHandler<M extends "branch" | "ln" | "btc"> implements Min
   async execute(ctx: ExecuteContext<M>): Promise<MintExecutionResult> {
     const outputData = deserializeOutputData(ctx.operation.outputData)
     const signingOptions = await this.getSigningOptions(ctx.operation.pubkey)
+    // NUT #20: To mint a quote where a public key was provided, the wallet includes a signature on `msg_to_sign` in the `PostMintBolt11Request`.
     try {
       const proofs = await ctx.wallet.mintProofs(
         this.method,

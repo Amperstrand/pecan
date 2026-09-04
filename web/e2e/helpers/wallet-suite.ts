@@ -28,6 +28,7 @@ import {
  *   flow                                EUR               USD       SAT
  *   teller deposit → auto-claim         suite             suite     —
  *   lightning deposit (+rate desc)      suite             suite     sat.spec (bolt11, no rate)
+ *   deposit survives reload             wallet.spec EUR   —         sat.spec (bolt11 restore)
  *   onchain deposit → settle            wallet.spec EUR   usd.spec  —
  *   teller withdraw, zero change        suite             suite     —
  *   bolt11 melt withdraw → preimage     —                 —         sat.spec
@@ -36,6 +37,8 @@ import {
  *   simulated EU bank rails (sepa)      wallet.spec EUR   —         —
  *   cross-currency concurrency          wallet.spec EUR   —         sat.spec (switch isolation)
  *   currency-switcher isolation         (from USD side)   usd.spec  sat.spec (from SAT side)
+ *   charger A rail (all ev-rail tests)  ev-rail           —         —
+ *   charger B rail (window+stop+refund) ev-rail           —         —
  *
  * Deliberately EUR-only: the saga and wallet-UX rows exercise
  * currency-agnostic machinery (same code, different mint URL) — reload

@@ -72,6 +72,25 @@ echo "== cross-pair =="
 check "metrics need auth" 401 "$(code "$URL/ops/metrics/eur")"
 check "ops page served" 200 "$(code "$URL/ops/")"
 
+# The sat pair rides on an EXTERNAL mint — a dead signut must surface
+# here, not as a mystery wallet failure hours later.
+SIGNUT_INFO=$(curl -s -m 10 https://signut.cashu.exchange/v1/info)
+if echo "$SIGNUT_INFO" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+m = [x for x in d.get("nuts", {}).get("4", {}).get("methods", [])
+     if x.get("unit") == "sat"]
+sys.exit(0 if m else 1)
+' 2>/dev/null; then
+  echo "  ok   signut reachable, sat minting live"
+else
+  echo "  FAIL signut unreachable or sat unit missing — the SAT wallet tab is degraded"
+  fail=$((fail + 1))
+fi
+
 if curl -sk -m 10 "$URL/ops/reconcile-status.json" | \
   python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("drift") == 0 else 1)' 2>/dev/null; then
   echo "  ok   reconcile clean"

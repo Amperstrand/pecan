@@ -124,6 +124,48 @@ async function bootAndFund(page: Page, consoleBase: string, minBalance: number) 
   }
 }
 
+test("ev rail: charger B serves the same contract (atomB window)", async ({ page }) => {
+  test.setTimeout(300_000)
+  const consoleBase = "/eur-console"
+  const password = process.env.PECAN_ADMIN_PASSWORD
+  test.skip(!password, "admin password unavailable")
+  test.skip(!deviceOnline(), "charger offline (Atom unplugged/wedged)")
+
+  // The fleet is TWO chargers on one box; every other test rides A.
+  // This pins B's relay path: melt → window on B → remote stop →
+  // refund, with the receipt naming the device.
+  const budget = 4
+  await bootAndFund(page, consoleBase, budget + 1)
+
+  const before = await readBalance(page)
+  await page.getByRole("tab", { name: "Charger B", exact: true }).click()
+  await page.getByPlaceholder("1.00").fill(String(budget))
+  await page.getByRole("button", { name: "Start charging" }).click()
+
+  await expect(page.getByText("⚡ Charging at Charger B")).toBeVisible({
+    timeout: 60_000,
+  })
+  await expect
+    .poll(
+      async () =>
+        Number(await page.getByRole("progressbar").getAttribute("aria-valuenow")),
+      { timeout: 120_000 },
+    )
+    .toBeGreaterThanOrEqual(1)
+  await page.getByRole("button", { name: "Stop charging" }).click()
+
+  await expect(page.getByText(/Charging stopped — \d+ s delivered/)).toBeVisible({
+    timeout: 180_000,
+  })
+  const receipt = await page.locator("p.break-all.font-mono").textContent()
+  expect(receipt).toMatch(/^EV-atomB-[1-3]s-[0-9A-F]{8}-STOPPED$/)
+  const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
+
+  await expect
+    .poll(async () => readBalance(page), { timeout: 200_000 })
+    .toBeCloseTo(before - delivered, 2)
+})
+
 test("ev rail: deposit pattern — slider, remote stop, refund of the unspent deposit", async ({ page }) => {
   test.setTimeout(300_000)
   const consoleBase = "/eur-console"

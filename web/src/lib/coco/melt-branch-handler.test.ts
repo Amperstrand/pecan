@@ -122,6 +122,42 @@ describe("MeltBranchHandler.executeMelt", () => {
     expect(result).toEqual({ state: "PENDING" })
   })
 
+  it("passes a PENDING melt response through", async () => {
+    const ctx = executingCtx()
+    const result = await new TestableMeltHandler().callExecuteMelt(ctx, [], [], "q1")
+    expect(result).toMatchObject({ state: "PENDING" })
+  })
+
+  it("fails loudly on the out-of-spec FAILED state instead of coercing to UNPAID (audit F1)", async () => {
+    // cdk mints emit FAILED when a teller voids the ticket. The old
+    // unknown→UNPAID coercion made coco restore proofs the mint may
+    // have burned — a phantom balance.
+    const failingCtx = {
+      wallet: {
+        completeMelt: vi.fn(async () => ({
+          quote: { state: "FAILED" },
+          change: [],
+        })),
+      },
+      operation: { id: "op1", mintUrl: "https://mint.example", amount: Amount.from(500), unit: "nok" },
+    } as unknown as ExecuteContext<"branch">
+    await expect(
+      new TestableMeltHandler().callExecuteMelt(failingCtx, [], [], "q1"),
+    ).rejects.toThrow(/FAILED/)
+  })
+
+  it("fails loudly on a missing state field (audit F1)", async () => {
+    const failingCtx = {
+      wallet: {
+        completeMelt: vi.fn(async () => ({ quote: {}, change: [] })),
+      },
+      operation: { id: "op1", mintUrl: "https://mint.example", amount: Amount.from(500), unit: "nok" },
+    } as unknown as ExecuteContext<"branch">
+    await expect(
+      new TestableMeltHandler().callExecuteMelt(failingCtx, [], [], "q1"),
+    ).rejects.toThrow(/null/)
+  })
+
   it("rethrows non-pending mint errors", async () => {
     const ctx = executingCtx(() => {
       throw new MintOperationError(20003, "insufficient funds")

@@ -68,10 +68,9 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
     // Eager by design: the teller may only dispense cash once the wallet has
     // locked (burned) its proofs — the mint's make_payment marks the ticket
     // submitted, which mark-paid requires ("waiting for the wallet to lock
-    // funds"). ASYNC per NUT-05: prefer_async makes the mint return
-    // immediately after setup (inputs burned, PENDING). Change is deferred
-    // with it and recovered from the quote check at finalize — see
-    // needsSwapFor/checkMeltQuote.
+    // funds"). Change is deferred with the async setup and recovered from
+    // the quote check at finalize — see needsSwapFor/checkMeltQuote.
+    // NUT #5: For other methods, the wallet can request asynchronous execution with `prefer_async: true` in the melt request body if it is supported by the mint. In both cases, the request returns immediately after validation with a `"PENDING"` state.
     const preview = {
       method: "branch",
       inputs: proofsToMelt,
@@ -89,10 +88,20 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
       // completeMelt's response quote is typed narrowly, but the mint's
       // full melt response (state, preimage) is merged into it at runtime.
       const q = res.quote as { state?: string; payment_preimage?: string | null }
-      const state =
-        q.state === "PAID" || q.state === "PENDING" ? q.state : "UNPAID"
+      // The spec's state enum is UNPAID/PENDING/PAID; cdk adds FAILED
+      // (a voided ticket — the teller refused the payout). Coercing
+      // FAILED (or a missing state) to UNPAID made coco restore the
+      // input proofs as spendable while the mint may have burned them —
+      // a phantom balance. Any state we cannot positively interpret
+      // fails the op loudly instead (pollWithdraw surfaces it as a
+      // failed withdraw).
+      if (q.state !== "PAID" && q.state !== "PENDING" && q.state !== "UNPAID") {
+        throw new Error(
+          `melt refused by mint: state ${JSON.stringify(q.state ?? null)}`,
+        )
+      }
       return {
-        state,
+        state: q.state,
         change: proofsToSerializedChange(res.change),
         payment_preimage: q.payment_preimage,
       }
@@ -107,9 +116,13 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
   protected async checkMeltQuote(
     ctx: FinalizeContext<"branch"> | RecoverExecutingContext<"branch">,
   ): Promise<QuoteMeltResponse<"branch">> {
-    // The mint stores a melt's change signatures with the quote and re-serves
-    // them on state checks — this is the only way to recover the overpay when
-    // the original melt response was lost (e.g. page reload during execute).
+    // The mint may store a melt's change signatures with the quote and
+    // re-serve them on state checks — the recovery path for a lost melt
+    // response. UNVERIFIED on the deployed mint for NONEMPTY change
+    // (audit NUT-05/08 F2): the exact-amount pre-swap means the common
+    // case carries none; this stays as the best-effort claim.
+    // NUT #5: To check whether a melt quote has been paid, the wallet makes a `GET /v1/melt/quote/{method}/{quote_id}`.
+    // NUT #5: The mint responds with the same structure as the initial quote response.
     const q = await ctx.mintAdapter.checkMeltQuoteFor(
       ctx.operation.mintUrl,
       "branch",
@@ -137,6 +150,7 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
     quote: BranchMeltQuoteResponse,
     _operation: BasePrepareContext<"branch">["operation"],
   ): Amount {
+    // NUT #5: `fee_reserve` is the additional fee reserve for using the method (the wallet provides proofs covering at least `amount + fee_reserve + fee`, where `fee` is the keyset input fee per [NUT-02][02])
     return Amount.from(quote.fee_reserve ?? 0)
   }
 
@@ -151,6 +165,7 @@ export class MeltBranchHandler extends BaseQuoteMeltHandler<"branch"> {
     quote: BranchMeltQuoteResponse,
   ): BoltMeltQuote<"branch"> {
     const now = Date.now()
+    // NUT #5: `state` is an enum string field with possible values `"UNPAID"`, `"PENDING"`, `"PAID"`:
     return {
       mintUrl,
       method: "branch",

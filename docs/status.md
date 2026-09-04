@@ -1,8 +1,9 @@
 # Pecan + EV rail — status, limitations, and where to go next
 
-Snapshot: 2026-09-04 (updated after the SAT currency round — signut
-bolt11 pair live end-to-end, full suite green incl. sat.spec). Live at
-https://giftcard.cashu.exchange. This is
+Snapshot: 2026-09-05 (updated after the hardware-return round — Rust
+firmware live on the M5Stick, greatspectations Layer-1 expansion, two
+AI spec audits with fixes, full suite 43 green incl. atomB + sat
+reload-resume). Live at https://giftcard.cashu.exchange. This is
 the honest map of what works, what is known-broken or limited, and the
 ranked backlog. Keep it current when the picture changes.
 
@@ -11,12 +12,12 @@ ranked backlog. Keep it current when the picture changes.
 | Piece | Version / state | Notes |
 |---|---|---|
 | cdk-mintd (both pairs) | **0.18.0 final** (upgraded from rc.3 2026-09-03) | DB-backed config; pre-upgrade DBs in `/root/backups/*-pre-0.18.0.sqlite` |
-| pecan processor | deployment branch (SAT round) | EUR + USD pairs, 8 payout rails on EUR (7 sim + ev), 7 on USD (no ev yet); CSP whitelists signut (https+wss) |
+| pecan processor | deployment branch | EUR + USD pairs, 8 payout rails on EUR (7 sim + ev), 7 on USD (no ev yet); CSP whitelists signut (https+wss) |
 | Wallet (coco 2) | same deploy | rail picker, deposit-pattern chargers, mint-call timeouts, reload-resume, **sat mode (bolt11, signut)** |
 | SAT mint | external: signut.cashu.exchange (Nutshell-CF) | bolt11+sat only, NUT-17 off (ws 410 → blackhole factory), CORS open; no console, no pecan rails |
 | ev-charge daemon | inr2 systemd `ev-charge.service` | watch mode: settle, expiry guards, at-most-once trigger, refund ledger |
 | atom-gateway | inr2 systemd `atom-bridge.service` | public session endpoints (ref = capability), remote stop, delivered metering |
-| Atom firmware | ESPHome dual-charger (atomA G26 / atomB G32) | G39 abort reports actual `{"delivered": s}`; LED matrix countdowns; **offline since ~2026-09-04 — `scripts/ev-device-sim.sh` stands in** |
+| Charger firmware | **charger-stick-slint (Rust+Slint) LIVE 2026-09-05** — evmap `af24ed0` | M5StickC Plus; MQTT byte-parity; see FLASHING.md (USB-only at 92-95% flash: no OTA slots on 4MB; ESPHome sibling keeps wifi-OTA) |
 | Deploy lane | `scripts/deploy.sh` → build on ai-legion-small → inr2 | builder disk pruned 2026-09-02 (was 99% full) |
 
 ## Verified working (evidence in the repo)
@@ -101,6 +102,36 @@ Audited the charger surface and fixed, all verified by tests:
 - **Refund honesty**: the wallet proves the refund with a balance delta
   before the summary claims it (pollAndMint reports FAILED as terminal).
 
+## Spec-compliance round 2026-09-05 (greatspectations + AI audits)
+
+Layer 1 (mechanical, CI): spec-quote coverage doubled to 9 verbatim
+NUT quotes (NUT-04/05/20) across the handlers — `spectate check` green
+in `scripts/spec-quote-check.sh`.
+
+Layer 2 (semantic): two AI audits (docs/audits/results/) — NUT-04+20
+(mint/locked quotes) and NUT-05+08 (melt/change) — 35 ✅ / 6 ⚠️ / 0 ❌.
+The NUT-20 posture is strong: locks enforced at quote creation AND
+re-verified at settle (the processor cannot mint at all — no gRPC
+path exists). Fixes applied from findings:
+
+- **F1 (P1, fixed)**: out-of-spec `FAILED` melt states (a teller voids
+  the ticket) were coerced to UNPAID — coco restored proofs the mint
+  may have burned (phantom balance). The handler now fails loudly on
+  any state it cannot positively interpret; regression tests pin it.
+  Residual (open): a void AFTER the fund lock still leaves the op
+  pending (coco's checkPending throws on FAILED, polls swallow) —
+  needs an op-level failed mapping or an operator refund flow.
+- **F3 (P2, fixed)**: the sat-melt losing-driver race accepted
+  `rolled_back` as benign alongside `finalized` — rolled-back +
+  burned-inputs resurrects dead proofs. Only `finalized` is benign now.
+- **F2 (P1, documented)**: change re-serve on quote state checks is
+  an UNSPECIFIED mint extension and unverified for nonempty change
+  (every suite melt is exact). Comments aligned in handler +
+  lightning-mint.md; needs a forced-overpay e2e to close.
+- **NUT-04/20 F2/F3 (P2, open)**: the btc €50 minimum is enforced but
+  not advertised via method settings; unlocked-quote refusal may not
+  surface as spec error code 20009.
+
 ## Test rig runbook — e2e readiness
 
 The full ladder (`scripts/e2e.sh`) is only as ready as the rig around
@@ -134,12 +165,12 @@ the physical box.
 
 ## Known limitations and open issues (ranked)
 
-1. **Atom device offline (2026-09-04).** The physical charger stopped
-   acking (bridge logs show no acks for 2 days). The MQTT simulator
-   (`scripts/ev-device-sim.sh`, see the runbook above) stands in for
-   the firmware, so the ev rail stays fully testable; the wedged
-   gateway session was cleared by a bridge restart. When the box is
-   back: stop the sim, watch for its acks in the bridge log.
+1. **Spec-audit residuals (2026-09-05)** — see the spec-compliance
+   round above: voided-after-fund-lock leaves the op pending; the
+   forced-overpay change re-serve e2e (F2); btc minimum not advertised
+   in method settings; unlocked-quote error code mapping. The
+   device-sim remains available (`scripts/ev-device-sim.sh`) for
+   hardwareless runs, but the physical stick is back and LIVE.
 2. **Unresponsive-page suite flake (undiagnosed).** Mid-chain full-suite
    failures where Playwright's page-snapshot capture times out — the
    page's own JS keeps running (heartbeat-verified), so it is
@@ -239,9 +270,10 @@ the loose version of this).
 
 ## Test quick-reference
 
-`cd web && npm test` (69) → `cd processor && cargo test` (75) →
-`scripts/api-smoke.sh` → `scripts/e2e.sh --smoke` (~25 s) →
-`scripts/e2e.sh -g "SAT wallet"` (~20 s, ~21 sat) →
-`scripts/e2e.sh -g "deposit pattern"` (~30 s) → `scripts/e2e.sh` (full)
-→ `scripts/e2e.sh -g @stress`. Full ladder in AGENTS.md; rig
-pre-flight in the runbook above.
+`cd web && npm test` (72) → `cd processor && cargo test` (75) →
+`scripts/api-smoke.sh` (incl. signut liveness) →
+`scripts/e2e.sh --smoke` (~25 s) → `scripts/e2e.sh -g "SAT wallet"`
+(~30 s, ~47 sat) → `scripts/e2e.sh -g "deposit pattern"` (~30 s) →
+`scripts/e2e.sh` (full, 43) → `scripts/e2e.sh -g @stress`. Full ladder
+in AGENTS.md; rig pre-flight in the runbook above; spec-quote drift
+via `scripts/spec-quote-check.sh`.

@@ -106,6 +106,10 @@ test.describe("SAT wallet E2E (external signut mint, bolt11 only)", () => {
     const invoice = (await invoiceBox.textContent())?.trim() ?? ""
     expect(invoice.startsWith("lntbs")).toBeTruthy()
 
+    // signut quotes live 3300 s (~55 min), not the fiat pairs' 30 — the
+    // countdown must follow the MINT's expiry (DepositQuote.expiresAt).
+    await expect(page.getByText(/^Expires in 5[0-5]:\d{2}/)).toBeVisible()
+
     const preimage = payLightningInvoice(invoice)
     expect(preimage).toHaveLength(64)
 
@@ -113,6 +117,34 @@ test.describe("SAT wallet E2E (external signut mint, bolt11 only)", () => {
       .poll(async () => readBalance(page), { timeout: 60_000 })
       .toBe(before + DEPOSIT_SAT)
     await waitForDepositFormReset(page, "Create lightning invoice")
+    expectNoWalletErrors(walletErrors)
+  })
+
+  test("sat deposit survives reload: card restores, invoice still payable", async () => {
+    const page = sharedPage!
+    test.setTimeout(150_000)
+
+    // Reload mid-deposit on the EXTERNAL mint: the pending card must
+    // restore from getPendingDeposits (currencyOfMint → sat) and the
+    // invoice must still be payable afterward — the reload-resume
+    // machinery has deep EUR coverage only.
+    const before = await readBalance(page)
+    await page.getByPlaceholder("21").fill(String(DEPOSIT_SAT))
+    await page.getByRole("button", { name: "Create lightning invoice" }).click()
+    const invoiceBox = page.locator('p.font-mono:has-text("lntbs")')
+    await invoiceBox.waitFor({ state: "visible", timeout: 30_000 })
+    const invoice = (await invoiceBox.textContent())?.trim() ?? ""
+
+    await page.reload()
+    const restored = page.locator('p.font-mono:has-text("lntbs")')
+    await restored.waitFor({ state: "visible", timeout: 30_000 })
+    await expect(restored).toHaveText(invoice)
+
+    const preimage = payLightningInvoice(invoice)
+    expect(preimage).toHaveLength(64)
+    await expect
+      .poll(async () => readBalance(page), { timeout: 60_000 })
+      .toBe(before + DEPOSIT_SAT)
     expectNoWalletErrors(walletErrors)
   })
 

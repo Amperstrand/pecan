@@ -601,14 +601,16 @@ export async function createSatMeltWithdraw(
       .catch(async (err: unknown) => {
         // The settlement processor reacts to melt-op:pending and may
         // finalize the op concurrently; the losing driver gets the
-        // mint's "inputs already spent". That is benign ONLY when the
-        // op row itself reaches a terminal state — poll briefly, the
-        // winner may still be mid-write when the loser reads.
+        // mint's "inputs may already be spent". Benign ONLY when the op
+        // row FINALIZED — the winner (same wallet, same op row) holds
+        // the change. rolled_back is NOT benign: it restores proofs the
+        // mint says are burned, and a 10 s timeout means neither driver
+        // converged — both stay errors and the wallet-log gate sees it.
         if (/already (?:be|been) spent/i.test(String(err))) {
           const deadline = Date.now() + 10_000
           while (Date.now() < deadline) {
             const op = await coco.ops.melt.get(prepared.id).catch(() => null)
-            if (op && (op.state === "finalized" || op.state === "rolled_back")) {
+            if (op && op.state === "finalized") {
               return { state: op.state, error: null }
             }
             await new Promise((r) => setTimeout(r, 500))

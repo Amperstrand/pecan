@@ -232,15 +232,20 @@ shape the design; each was learned the hard way:
    burned, quote PENDING — which is both the teller's fund-lock and the
    signal to release the code (execute resolves in ~100ms).
 3. **Change signatures are one-time knowledge.** The mint burns inputs at
-   melt setup and defers change on async melts; quote state checks cannot
-   re-fetch them: cdk-mintd 0.18.0-rc.0's custom-method check response type
-   has no `change` field at all (verified in custom_handlers.rs; master
-   re-serves it from the `blind_signature` table — re-check when upgrading).
-   Hence `MeltBranchHandler.needsSwapFor` swaps to EXACT amounts on any
-   overshoot: exact melts carry no change, so there is nothing to lose when
-   a response dies. A lost SWAP response is recoverable because swap outputs
-   are deterministic and re-fetchable from the mint (restore path in coco's
-   executing-recovery).
+   melt setup and defers change on async melts. cdk-mintd 0.18.0-rc.0's
+   custom-method check response type had no `change` field at all
+   (verified in custom_handlers.rs then); the deployed 0.18.0 final's
+   check response OMITS `change` when there is none (live probe
+   2026-09-04) and its response TYPE carries the field — but whether it
+   re-serves NONEMPTY change on state checks is UNVERIFIED: every melt
+   in the suite is exact (zero-change, asserted), so no live quote has
+   ever carried change to check against. Until a forced-overpay e2e
+   exists (NUT-05/08 audit F2), treat re-serve as NOT guaranteed:
+   `MeltBranchHandler.needsSwapFor` swaps to EXACT amounts on any
+   overshoot — exact melts carry no change, so there is nothing to lose
+   when a response dies. A lost SWAP response is recoverable because
+   swap outputs are deterministic and re-fetchable from the mint
+   (restore path in coco's executing-recovery).
 4. **Reloads land anywhere in prepare → swap → melt.** Prepared melt ops
    are NOT auto-driven by coco (upstream leaves them for manual rollback),
    so the wallet's `resumePendingOperations` executes them once after a
