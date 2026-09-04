@@ -16,7 +16,7 @@ ranked backlog. Keep it current when the picture changes.
 | SAT mint | external: signut.cashu.exchange (Nutshell-CF) | bolt11+sat only, NUT-17 off (ws 410 → blackhole factory), CORS open; no console, no pecan rails |
 | ev-charge daemon | inr2 systemd `ev-charge.service` | watch mode: settle, expiry guards, at-most-once trigger, refund ledger |
 | atom-gateway | inr2 systemd `atom-bridge.service` | public session endpoints (ref = capability), remote stop, delivered metering |
-| Atom firmware | ESPHome dual-charger (atomA G26 / atomB G32) | G39 abort reports actual `{"delivered": s}`; LED matrix countdowns; **offline since ~2026-09-04 (gateway shows a wedged running session)** |
+| Atom firmware | ESPHome dual-charger (atomA G26 / atomB G32) | G39 abort reports actual `{"delivered": s}`; LED matrix countdowns; **offline since ~2026-09-04 — `scripts/ev-device-sim.sh` stands in** |
 | Deploy lane | `scripts/deploy.sh` → build on ai-legion-small → inr2 | builder disk pruned 2026-09-02 (was 99% full) |
 
 ## Verified working (evidence in the repo)
@@ -101,14 +101,45 @@ Audited the charger surface and fixed, all verified by tests:
 - **Refund honesty**: the wallet proves the refund with a balance delta
   before the summary claims it (pollAndMint reports FAILED as terminal).
 
+## Test rig runbook — e2e readiness
+
+The full ladder (`scripts/e2e.sh`) is only as ready as the rig around
+it. Pre-flight, in order:
+
+1. **Deployment health**: `scripts/api-smoke.sh` — keys/info, one-way
+   melt refusal, consoles, reconcile. ~30 s, read-only.
+2. **Charger fleet**: `scripts/ev-device-sim.sh status`. While the
+   physical Atom is away, `start` the MQTT simulator (it impersonates
+   the firmware on the shared HiveMQ topics: retained box status,
+   start-acked, countdown-finished; the gateway meters remote stops
+   itself, and the G39 button path is driven by the e2e's own
+   button-sim). **When the real box returns: `stop` the sim FIRST** —
+   it refuses to start against an already-online fleet, but nothing
+   stops it from running alongside, so the stop is a human duty. The
+   sim self-exits after 12 h (retained offline) as a backstop.
+3. **Onchain payer liquidity**: `scripts/payer-status.sh` on inr2 (or
+   read /opt/pecan-tools/payer-status.json, 10-min cron). Each full
+   run moves ~57 k sat; the 6-h refill cron tops payers up from the
+   cln-swap reservoir (80 k target) but top-ups need one signet block
+   to become spendable — run `refill-payers.sh` ahead of a planned
+   e2e session, not after the payers run dry mid-suite.
+4. **A wedged gateway session** (state `running`, device never acked —
+   immortal in the pruning sweep): `systemctl restart atom-bridge` —
+   session state is memory-only, the restart is the reset.
+
+Verified 2026-09-04 with the sim: full suite **41 passed / 0 skipped /
+0 failed** — the ev rail (slider, remote stop, device-button abort,
+reload resume, double-stop idempotence) is fully exercisable without
+the physical box.
+
 ## Known limitations and open issues (ranked)
 
 1. **Atom device offline (2026-09-04).** The physical charger stopped
-   acking (bridge logs show no acks for 2 days; the gateway holds a
-   wedged `running` session). Charger e2es skip via `deviceOnline()`
-   (the device-button test now carries the same guard); ev melts still
-   settle through the metering-loss TIMEOUT path. Needs the box back
-   (power/wifi) and possibly a gateway session reset.
+   acking (bridge logs show no acks for 2 days). The MQTT simulator
+   (`scripts/ev-device-sim.sh`, see the runbook above) stands in for
+   the firmware, so the ev rail stays fully testable; the wedged
+   gateway session was cleared by a bridge restart. When the box is
+   back: stop the sim, watch for its acks in the bridge log.
 2. **Unresponsive-page suite flake (undiagnosed).** Mid-chain full-suite
    failures where Playwright's page-snapshot capture times out — the
    page's own JS keeps running (heartbeat-verified), so it is
@@ -117,9 +148,12 @@ Audited the charger surface and fixed, all verified by tests:
    aggravated by today's added background traffic (daemon refund scan,
    gateway polls). A sibling symptom (2026-09-04, heavy evening of
    suites+deploys): fund-lock latency pushing the teller-code card past
-   `readTellerCode`'s budget — the helper now budgets 45 s (the
-   wallet's own worst-case chain); if flakes persist, run the trace
-   campaign below.
+   `readTellerCode`'s budget — the helper now budgets 70 s (the
+   wallet's own worst-case chain: 20 s quote + 15 s prepare + 30 s
+   lock); a standalone 17-iteration rail soak (@stress, 5.4 m) showed
+   zero stalls, pointing at suite-load contention, not the wallet. If
+   flakes persist, run the trace campaign: loop `--trace on` until it
+   recurs and read the trace.
 3. **Deposit expiry burn.** A deposit melt that expires while the daemon
    is down burns (reconcile DRIFT; manual write-off). Hardening: the
    daemon can distinguish never-triggered windows from delivered
@@ -148,10 +182,10 @@ Audited the charger surface and fixed, all verified by tests:
    partial settle is an upstream feature, not wiring. Documented with a
    live postmortem in `partial-delivery.md`; the refund quote is the
    working equivalent.
-10. **SAT pending-deposit expiry display.** The pending-card countdown
-   assumes the 30-min fiat TTL; signut invoices may live shorter — the
-   card can outlive the invoice (cosmetic; the quote check still
-   finalizes or expires it correctly).
+10. **SAT pending-deposit expiry display** — RESOLVED 2026-09-04: the
+   pending card now counts down to the MINT's own quote expiry
+   (carried on DepositQuote.expiresAt; signut invoices live 55 min vs
+   the fiat pairs' 30) instead of a hardcoded 30-min fallback.
 
 ## Improvement backlog
 
@@ -205,8 +239,9 @@ the loose version of this).
 
 ## Test quick-reference
 
-`cd web && npm test` (65) → `cd processor && cargo test` (75) →
+`cd web && npm test` (69) → `cd processor && cargo test` (75) →
 `scripts/api-smoke.sh` → `scripts/e2e.sh --smoke` (~25 s) →
 `scripts/e2e.sh -g "SAT wallet"` (~20 s, ~21 sat) →
 `scripts/e2e.sh -g "deposit pattern"` (~30 s) → `scripts/e2e.sh` (full)
-→ `scripts/e2e.sh -g @stress`. Full ladder in AGENTS.md.
+→ `scripts/e2e.sh -g @stress`. Full ladder in AGENTS.md; rig
+pre-flight in the runbook above.

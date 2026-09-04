@@ -243,14 +243,15 @@ const CURRENCY_SYMBOLS: Record<string, string> = { EUR: "€", USD: "$", SATS: "
  * The 6-character code shown under "Give this code to the teller:" for both
  * deposits (MINT-… quote tail) and withdrawals (MELT-… quote tail).
  *
- * Withdrawals surface the code only after the fund lock resolves — under
- * suite load (parallel workers, watcher lock contention) that can take
- * well past the usual sub-second, so the budget covers the wallet's own
- * worst-case chain (quote + prepare + 30s lock race).
+ * Withdrawals surface the code only after the fund lock resolves. The
+ * budget covers the wallet's own worst-case chain before that card can
+ * exist — quote race (20s) + prepare race (15s) + fund-lock race (30s) —
+ * because under suite load every leg can run slow while still
+ * succeeding; a shorter budget fails a melt that was about to render.
  */
 export async function readTellerCode(
   page: Page,
-  timeout = 45_000,
+  timeout = 70_000,
 ): Promise<string> {
   const code = page.locator("p.font-mono.text-3xl")
   await code.waitFor({ state: "visible", timeout })

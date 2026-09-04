@@ -94,7 +94,10 @@ with `test.for` (see the mobile rail cases in wallet.spec.ts) so a
 failure names the case and the rest still run. Tests sharing the
 serial-chain page must reset shared widgets (rail tab, withdraw form
 phase) at their start — whichever test ran before may have left them
-anywhere.
+anywhere. The charger e2es need the Atom fleet online: the physical
+box OR `scripts/ev-device-sim.sh start` (MQTT stand-in while the box
+is away — stop it when the box returns; see the rig runbook in
+docs/status.md).
 
 Current status, known limitations, and the ranked improvement backlog
 live in [docs/status.md](docs/status.md) — read it before planning work;

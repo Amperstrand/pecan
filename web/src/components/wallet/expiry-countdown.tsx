@@ -10,7 +10,18 @@ export function formatMsRemaining(msLeft: number): string | null {
   return `${minutes}:${String(seconds).padStart(2, "0")}`
 }
 
-export function ExpiryCountdown({ createdAt }: { createdAt: number }) {
+/**
+ * Invoice/quote life countdown. `expiresAt` (the mint's own expiry,
+ * epoch ms) wins when present — quote TTLs differ per mint (fiat pairs
+ * 30 min, signut 55) — else the 30-min wallet-side fallback applies.
+ */
+export function ExpiryCountdown({
+  createdAt,
+  expiresAt,
+}: {
+  createdAt: number
+  expiresAt?: number
+}) {
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
@@ -18,7 +29,8 @@ export function ExpiryCountdown({ createdAt }: { createdAt: number }) {
     return () => clearInterval(id)
   }, [])
 
-  const remaining = formatMsRemaining(createdAt + DEPOSIT_EXPIRY_MS - now)
+  const deadline = expiresAt ?? createdAt + DEPOSIT_EXPIRY_MS
+  const remaining = formatMsRemaining(deadline - now)
   if (remaining === null) {
     return (
       <p className="text-sm font-medium">

@@ -47,6 +47,12 @@ export interface DepositQuote {
   currency: Currency
   /** Wall-clock ms when the quote was created — drives the expiry countdown. */
   createdAt: number
+  /**
+   * Wall-clock ms when the MINT says the quote expires, when known —
+   * mints differ (fiat pairs 30 min, signut 55); the countdown prefers
+   * it over the createdAt+30min fallback.
+   */
+  expiresAt?: number
 }
 
 export interface WithdrawResult {
@@ -319,6 +325,11 @@ export async function createDepositQuote(
   const expectedSat = (
     quote as { quoteData?: { expected_sat?: number } }
   ).quoteData?.expected_sat
+  // coco normalizes NUT-04 expiry to epoch seconds (compared as ×1000).
+  const expiresAt =
+    typeof (quote as { expiry?: number | null }).expiry === "number"
+      ? (quote as { expiry: number }).expiry * 1000
+      : undefined
   return {
     method,
     quoteId: quote.quoteId,
@@ -328,6 +339,7 @@ export async function createDepositQuote(
     currency,
     createdAt: Date.now(),
     ...(expectedSat !== undefined ? { expectedSat } : {}),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
   }
 }
 
@@ -840,6 +852,10 @@ export async function getPendingDeposits(): Promise<DepositQuote[]> {
     const expectedSat = (
       quote as { quoteData?: { expected_sat?: number } }
     ).quoteData?.expected_sat
+    const expiresAt =
+      typeof (quote as { expiry?: number | null }).expiry === "number"
+        ? (quote as { expiry: number }).expiry * 1000
+        : undefined
     cards.push({
       method: op.method as DepositMethod,
       quoteId: op.quoteId,
@@ -852,6 +868,7 @@ export async function getPendingDeposits(): Promise<DepositQuote[]> {
       currency,
       createdAt: op.createdAt,
       ...(expectedSat !== undefined ? { expectedSat } : {}),
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
     })
   }
   return cards

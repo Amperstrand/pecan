@@ -1044,7 +1044,7 @@ export function WalletPage() {
                     <p className="text-sm text-muted-foreground">
                       Pay this lightning invoice (signet):
                     </p>
-                    <ExpiryCountdown createdAt={q.createdAt} />
+                    <ExpiryCountdown createdAt={q.createdAt} expiresAt={q.expiresAt} />
                     <div className="flex justify-center">
                       <QrCodeImg text={q.request} alt="Lightning invoice QR" />
                     </div>
