@@ -25,16 +25,17 @@ import {
  *
  * Coverage matrix (rail × currency — keep every cell owned exactly once):
  *
- *   flow                                EUR               USD
- *   teller deposit → auto-claim         suite             suite
- *   lightning deposit (+rate desc)      suite             suite
- *   onchain deposit → settle            wallet.spec EUR   usd.spec
- *   teller withdraw, zero change        suite             suite
- *   one-way mint: ln/btc melt refused   wallet.spec EUR   usd.spec
- *   generic payout rail (sim adapter)   wallet.spec EUR   —
- *   simulated EU bank rails (sepa)      wallet.spec EUR   —
- *   cross-currency concurrency          wallet.spec EUR   —
- *   currency-switcher isolation         (from USD side)   usd.spec
+ *   flow                                EUR               USD       SAT
+ *   teller deposit → auto-claim         suite             suite     —
+ *   lightning deposit (+rate desc)      suite             suite     sat.spec (bolt11, no rate)
+ *   onchain deposit → settle            wallet.spec EUR   usd.spec  —
+ *   teller withdraw, zero change        suite             suite     —
+ *   bolt11 melt withdraw → preimage     —                 —         sat.spec
+ *   one-way mint: ln/btc melt refused   wallet.spec EUR   usd.spec  — (signut melts ARE the rail)
+ *   generic payout rail (sim adapter)   wallet.spec EUR   —         —
+ *   simulated EU bank rails (sepa)      wallet.spec EUR   —         —
+ *   cross-currency concurrency          wallet.spec EUR   —         sat.spec (switch isolation)
+ *   currency-switcher isolation         (from USD side)   usd.spec  sat.spec (from SAT side)
  *
  * Deliberately EUR-only: the saga and wallet-UX rows exercise
  * currency-agnostic machinery (same code, different mint URL) — reload

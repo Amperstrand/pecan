@@ -198,9 +198,11 @@ fn font_response(bytes: &'static [u8]) -> Response {
 /// Content-Security-Policy for the served console/wallet HTML. The bundle is
 /// fully self-hosted (no CDNs, no inline scripts); inline style ATTRIBUTES
 /// (used heavily by the UI kit) stay allowed, which CSP governs separately
-/// from inline <style> elements.
+/// from inline <style> elements. connect-src also whitelists the external
+/// sat mint (signut — https for API calls AND wss for coco's websocket
+/// subscriptions; CSP source matching does not let https: imply wss:).
 const SPA_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-                       img-src 'self' data:; font-src 'self'; connect-src 'self' https://mempool.space/signet/api; \
+                       img-src 'self' data:; font-src 'self'; connect-src 'self' https://signut.cashu.exchange wss://signut.cashu.exchange https://mempool.space/signet/api; \
                        base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
 async fn spa_page() -> Response {

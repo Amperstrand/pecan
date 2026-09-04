@@ -1,8 +1,8 @@
 # Pecan + EV rail — status, limitations, and where to go next
 
-Snapshot: 2026-09-03 (updated after the hardening round — full suite
-33/33 including both onchain tests, both charger e2es, and the stress
-soak). Live at https://giftcard.cashu.exchange. This is
+Snapshot: 2026-09-04 (updated after the SAT currency round — signut
+bolt11 pair live end-to-end, full suite green incl. sat.spec). Live at
+https://giftcard.cashu.exchange. This is
 the honest map of what works, what is known-broken or limited, and the
 ranked backlog. Keep it current when the picture changes.
 
@@ -11,11 +11,12 @@ ranked backlog. Keep it current when the picture changes.
 | Piece | Version / state | Notes |
 |---|---|---|
 | cdk-mintd (both pairs) | **0.18.0 final** (upgraded from rc.3 2026-09-03) | DB-backed config; pre-upgrade DBs in `/root/backups/*-pre-0.18.0.sqlite` |
-| pecan processor | deployment `af21ffa` | EUR + USD pairs, 8 payout rails on EUR (7 sim + ev), 7 on USD (no ev yet) |
-| Wallet (coco 2) | same deploy | rail picker, deposit-pattern chargers, mint-call timeouts, reload-resume |
+| pecan processor | deployment branch (SAT round) | EUR + USD pairs, 8 payout rails on EUR (7 sim + ev), 7 on USD (no ev yet); CSP whitelists signut (https+wss) |
+| Wallet (coco 2) | same deploy | rail picker, deposit-pattern chargers, mint-call timeouts, reload-resume, **sat mode (bolt11, signut)** |
+| SAT mint | external: signut.cashu.exchange (Nutshell-CF) | bolt11+sat only, NUT-17 off (ws 410 → blackhole factory), CORS open; no console, no pecan rails |
 | ev-charge daemon | inr2 systemd `ev-charge.service` | watch mode: settle, expiry guards, at-most-once trigger, refund ledger |
 | atom-gateway | inr2 systemd `atom-bridge.service` | public session endpoints (ref = capability), remote stop, delivered metering |
-| Atom firmware | ESPHome dual-charger (atomA G26 / atomB G32) | G39 abort reports actual `{"delivered": s}`; LED matrix countdowns |
+| Atom firmware | ESPHome dual-charger (atomA G26 / atomB G32) | G39 abort reports actual `{"delivered": s}`; LED matrix countdowns; **offline since ~2026-09-04 (gateway shows a wedged running session)** |
 | Deploy lane | `scripts/deploy.sh` → build on ai-legion-small → inr2 | builder disk pruned 2026-09-02 (was 99% full) |
 
 ## Verified working (evidence in the repo)
@@ -38,6 +39,35 @@ ranked backlog. Keep it current when the picture changes.
 - **Ops**: reconcile clean; caddy reload fixed (systemd PrivateTmp
   recreation after the disk-full /tmp wipe); password/fixture fetching
   automated in `scripts/e2e.sh`.
+
+## SAT currency round 2026-09-04
+
+Third native currency: **sat** on the external signut mint (user's
+explicit single-mint choice, no multimint). Registry (scale 1, step "1",
+no console, `hasRails:false`, `nut17:false`) + wallet UI (Lightning-only
+deposit card, invoice-textarea withdraw, scale-aware amounts everywhere)
++ `createSatMeltWithdraw` (bolt11 methodData wrapper — the flat shape
+throws) + e2e `sat.spec.ts` (boot/deposit/melt/switch-isolation, all
+green). Lessons banked:
+
+- **CSP**: the wallet page's `connect-src` must whitelist the external
+  mint — and `https:` does NOT imply `wss:` (coco opens NUT-17 sockets);
+  both schemes needed.
+- **NUT-17-off mint**: signut answers `/v1/ws` with 410 and the browser
+  console-logs every failed handshake — a `webSocketFactory` that
+  blackholes non-NUT-17 mints (synthetic error/close so the hybrid
+  transport switches to fast polling) keeps the console clean while
+  polling carries the data.
+- **Concurrent melt drivers**: coco's MeltSettlementProcessor reacts to
+  `melt-op:pending` and can finalize the op concurrently with an
+  explicit `execute` — the loser sees the mint's "inputs may already be
+  spent" (exact text: *may already be spent*). The wallet now treats
+  that as benign only after polling the op row to a terminal state.
+- **Boot resilience**: `addMint` failures (external mint down) no
+  longer brick wallet boot for the same-origin pairs.
+- Melt fee reserves exist on signut (1 sat observed) — the sat e2e
+  asserts balance against the finalized op's effective fee, not a bare
+  subtraction.
 
 ## Hardening round 2026-09-03 (late)
 
@@ -73,43 +103,55 @@ Audited the charger surface and fixed, all verified by tests:
 
 ## Known limitations and open issues (ranked)
 
-1. **Unresponsive-page suite flake (undiagnosed).** Mid-chain full-suite
+1. **Atom device offline (2026-09-04).** The physical charger stopped
+   acking (bridge logs show no acks for 2 days; the gateway holds a
+   wedged `running` session). Charger e2es skip via `deviceOnline()`
+   (the device-button test now carries the same guard); ev melts still
+   settle through the metering-loss TIMEOUT path. Needs the box back
+   (power/wifi) and possibly a gateway session reset.
+2. **Unresponsive-page suite flake (undiagnosed).** Mid-chain full-suite
    failures where Playwright's page-snapshot capture times out — the
    page's own JS keeps running (heartbeat-verified), so it is
    driver/page contention, not a frozen app. Rate: ~2/4 historically,
    3 consecutive failures then a clean 32/32 on 2026-09-03 — possibly
    aggravated by today's added background traffic (daemon refund scan,
-   gateway polls). Next step: loop the suite with `--trace on` until it
-   recurs and read the trace; `scripts/e2e.sh -g @stress` carries the
-   instrumentation.
-2. **Deposit expiry burn.** A deposit melt that expires while the daemon
+   gateway polls). A sibling symptom (2026-09-04, heavy evening of
+   suites+deploys): fund-lock latency pushing the teller-code card past
+   `readTellerCode`'s budget — the helper now budgets 45 s (the
+   wallet's own worst-case chain); if flakes persist, run the trace
+   campaign below.
+3. **Deposit expiry burn.** A deposit melt that expires while the daemon
    is down burns (reconcile DRIFT; manual write-off). Hardening: the
    daemon can distinguish never-triggered windows from delivered
    partials and auto-refund expired-but-untriggered deposits.
-3. **ev rail is EUR-only.** The USD pair's on-server compose predates
+4. **ev rail is EUR-only.** The USD pair's on-server compose predates
    the rail; enabling is a one-line env change plus a second daemon
    instance pointed at the USD console (tariff/gateway shared).
-4. **Gateway session state is memory-only.** An atom-bridge restart
+5. **Gateway session state is memory-only.** An atom-bridge restart
    mid-session loses the ref↔session map: the slider stops updating and
    the browser Stop falls back to the physical button (the charger's
    own end anchor still finishes the window; the daemon still settles).
    Persistence (sqlite) if sessions outlive demo length.
-5. **Refund rounding.** Sub-euro remainders are unclaimed (mint-quote
+6. **Refund rounding.** Sub-euro remainders are unclaimed (mint-quote
    minimum). At the 1 s/€ demo tariff the exposure is < €1 per session;
    at finer tariffs, batch or accumulate refunds.
-6. **Tariff is daemon-global and read at settle time.** A mid-session
+7. **Tariff is daemon-global and read at settle time.** A mid-session
    daemon restart with a changed `--secs-per-eur` would misbill the
    in-flight session. Snapshot the tariff into the state record at
    trigger time (a tollgate-rs pricing-doc lesson).
-7. **Ambient gRPC churn.** `Error adding payment event to stream:
+8. **Ambient gRPC churn.** `Error adding payment event to stream:
    channel closed` appears 1–6/min under load, present in passing runs
    too; sagas always complete. Never root-caused; worth one look at
    mintd's reconnect cadence if it ever correlates with a failure.
-8. **Deposit-melt change-carrying + the amount floor.** cdk 0.18.0
+9. **Deposit-melt change-carrying + the amount floor.** cdk 0.18.0
    rejects `total_spent < quote.amount` (`IncorrectQuoteAmount`) —
    partial settle is an upstream feature, not wiring. Documented with a
    live postmortem in `partial-delivery.md`; the refund quote is the
    working equivalent.
+10. **SAT pending-deposit expiry display.** The pending-card countdown
+   assumes the 30-min fiat TTL; signut invoices may live shorter — the
+   card can outlive the invoice (cosmetic; the quote check still
+   finalizes or expires it correctly).
 
 ## Improvement backlog
 
@@ -163,7 +205,8 @@ the loose version of this).
 
 ## Test quick-reference
 
-`cd web && npm test` (56) → `cd processor && cargo test` (75) →
+`cd web && npm test` (65) → `cd processor && cargo test` (75) →
 `scripts/api-smoke.sh` → `scripts/e2e.sh --smoke` (~25 s) →
+`scripts/e2e.sh -g "SAT wallet"` (~20 s, ~21 sat) →
 `scripts/e2e.sh -g "deposit pattern"` (~30 s) → `scripts/e2e.sh` (full)
 → `scripts/e2e.sh -g @stress`. Full ladder in AGENTS.md.

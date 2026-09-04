@@ -5,6 +5,7 @@ import { ArrowDown, ArrowUp, Loader2, Wallet as WalletIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Card,
   CardContent,
@@ -23,6 +24,7 @@ import {
   type HistoryRow,
   createDepositQuote,
   createWithdraw,
+  createSatMeltWithdraw,
   getBalanceCents,
   getHistory,
   getPendingDeposits,
@@ -71,7 +73,7 @@ interface DepositReceipt {
 type WithdrawState =
   | { phase: "idle" }
   | { phase: "creating" }
-  | { phase: "pending"; quoteId: string; tail: string; auto: boolean; label: string }
+  | { phase: "pending"; quoteId: string; tail: string; auto: boolean; label: string; lightning?: boolean }
   | { phase: "charging"; label: string; device: string; budget: number; delivered: number; requested: number; ref: string }
   | { phase: "done"; preimage: string }
   | { phase: "charged"; label: string; seconds: number; spent: number; refunded: number; stopped: boolean; receipt: string | null }
@@ -355,6 +357,7 @@ export function WalletPage() {
   const [depositMethod, setDepositMethod] = useState<"branch" | "ln" | "btc">("branch")
   const [withdrawAmount, setWithdrawAmount] = useState("")
   const [withdrawRecipient, setWithdrawRecipient] = useState("")
+  const [withdrawInvoice, setWithdrawInvoice] = useState("")
   const [withdrawRail, setWithdrawRail] = useState<WithdrawRail>("teller")
   const [depositState, setDepositState] = useState<DepositState>({ phase: "idle" })
   const [pendingDeposits, setPendingDeposits] = useState<DepositQuote[]>([])
@@ -364,6 +367,15 @@ export function WalletPage() {
   const [withdrawState, setWithdrawState] = useState<WithdrawState>({ phase: "idle" })
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const multiTab = useMultiTabWarning()
+  const cfg = CURRENCIES[currency]
+  /** Rail-less currency (sat): mint-API only, no teller/on-chain/payout rails. */
+  const isSat = !cfg.hasRails
+
+  /** Amount in internal units (cents / sats) → display string. */
+  const fmtAmount = (units: number, c: Currency = currency): string => {
+    const scale = CURRENCIES[c].scale
+    return (units / scale).toFixed(scale === 1 ? 0 : 2)
+  }
 
   const refresh = useCallback(async (c?: Currency) => {
     const currency = c ?? activeCurrency()
@@ -437,7 +449,8 @@ export function WalletPage() {
         }
         if (pendingWithdraw) {
           // Resume shows the charging state when the melt's envelope names
-          // a fixed-destination rail (ev:atomA); otherwise the teller code.
+          // a fixed-destination rail (ev:atomA); the lightning spinner for
+          // external-mint bolt11 melts; otherwise the teller code.
           const resumedOption = WITHDRAW_OPTIONS.find(
             (o) => o.fixed && o.fixed === pendingWithdraw.description,
           )
@@ -446,6 +459,7 @@ export function WalletPage() {
             quoteId: pendingWithdraw.quoteId,
             tail: pendingWithdraw.tail,
             auto: Boolean(resumedOption),
+            lightning: pendingWithdraw.method === "bolt11",
             label: resumedOption?.label ?? "payout",
           })
           withdrawPollRef = setInterval(async () => {
@@ -536,8 +550,9 @@ export function WalletPage() {
   const startDeposit = async () => {
     const invalidAmount = validateDepositAmount(
       depositAmount,
-      depositMethod,
-      CURRENCIES[currency].symbol,
+      isSat ? "ln" : depositMethod,
+      cfg.symbol,
+      isSat,
     )
     if (invalidAmount) {
       setDepositState({ phase: "error", message: invalidAmount })
@@ -546,7 +561,10 @@ export function WalletPage() {
     const amount = parseFloat(depositAmount)
     setDepositState({ phase: "creating" })
     try {
-      const quote = await createDepositQuote(amount, depositMethod)
+      // The sat mint speaks coco's built-in bolt11; the fiat pairs map
+      // their Lightning tab onto the pecan "ln" rail.
+      const method: DepositMethod = isSat ? "bolt11" : depositMethod
+      const quote = await createDepositQuote(amount, method, currency)
       setDepositState({ phase: "idle" })
       setPendingDeposits((prev) => [...prev, quote])
       startDepositPolling()
@@ -808,9 +826,52 @@ export function WalletPage() {
     }
   }
 
-  const balanceText = balance !== null ? (balance / 100).toFixed(2) : "…"
+  const startSatWithdraw = async () => {
+    const invoice = withdrawInvoice.trim()
+    if (!/^ln[a-z0-9]+$/i.test(invoice)) {
+      setWithdrawState({
+        phase: "error",
+        message: "Paste a lightning invoice (lntbs…) to pay from your balance.",
+      })
+      return
+    }
+    setWithdrawState({ phase: "creating" })
+    try {
+      const result = await createSatMeltWithdraw(invoice, currency)
+      setWithdrawState({
+        phase: "pending",
+        quoteId: result.quoteId,
+        tail: result.tail,
+        auto: false,
+        lightning: true,
+        label: "lightning",
+      })
+      refresh()
+
+      const interval = setInterval(async () => {
+        const preimage = await pollWithdraw(result.quoteId, currency)
+        if (preimage) {
+          clearInterval(interval)
+          setWithdrawState({ phase: "done", preimage })
+          refresh()
+          setTimeout(() => setWithdrawState({ phase: "idle" }), 60_000)
+        }
+      }, 3000)
+    } catch (e) {
+      console.error("withdraw failed:", e)
+      const msg = e instanceof Error ? e.message : String(e)
+      let helpful = msg
+      if (msg.toLowerCase().includes("insufficient")) {
+        helpful =
+          "Not enough funds to pay this invoice (the balance may be stale — try again)."
+      }
+      setWithdrawState({ phase: "error", message: helpful })
+    }
+  }
+
+  const balanceText = balance !== null ? (balance / cfg.scale).toFixed(cfg.scale === 1 ? 0 : 2) : "…"
   const activeOption = WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)
-  const symbol = CURRENCIES[currency].symbol
+  const symbol = cfg.symbol
   const isDark = document.documentElement.classList.contains("dark")
 
   return (
@@ -855,7 +916,9 @@ export function WalletPage() {
             <ArrowDown className="size-4" /> Deposit
           </CardTitle>
           <CardDescription>
-            Mint ecash at the counter (teller) or over lightning.
+            {isSat
+              ? "Mint ecash over lightning (signet)."
+              : "Mint ecash at the counter (teller) or over lightning."}
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
@@ -866,14 +929,14 @@ export function WalletPage() {
                 Deposit confirmed
               </p>
               <p className="text-lg font-bold">
-                +{(depositReceipt.amount / 100).toFixed(2)}{" "}
+                +{fmtAmount(depositReceipt.amount, depositReceipt.currency)}{" "}
                 {CURRENCIES[depositReceipt.currency].symbol}
               </p>
               <div className="text-xs text-muted-foreground">
                 {depositReceipt.method === "btc" && depositReceipt.sat && (
                   <p>{depositReceipt.sat.toLocaleString()} sat on-chain</p>
                 )}
-                {depositReceipt.method === "ln" && <p>Lightning payment</p>}
+                {(depositReceipt.method === "ln" || depositReceipt.method === "bolt11") && <p>Lightning payment</p>}
                 {depositReceipt.method === "branch" && <p>Teller settlement</p>}
               </div>
               {depositReceipt.method === "btc" && depositReceipt.address && (
@@ -896,30 +959,32 @@ export function WalletPage() {
             </div>
           ) : depositState.phase === "idle" ? (
             <>
-              <div className="grid grid-cols-3 gap-1.5 rounded-lg bg-muted p-1 text-sm">
-                <button
-                  type="button"
-                  onClick={() => setDepositMethod("branch")}
-                  className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "branch" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
-                >
-                  Teller
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDepositMethod("ln")}
-                  className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "ln" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
-                >
-                  Lightning
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDepositMethod("btc")}
-                  className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "btc" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
-                >
-                  On-chain
-                </button>
-              </div>
-              {depositMethod === "btc" && (
+              {cfg.hasRails && (
+                <div className="grid grid-cols-3 gap-1.5 rounded-lg bg-muted p-1 text-sm">
+                  <button
+                    type="button"
+                    onClick={() => setDepositMethod("branch")}
+                    className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "branch" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
+                  >
+                    Teller
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDepositMethod("ln")}
+                    className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "ln" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
+                  >
+                    Lightning
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDepositMethod("btc")}
+                    className={`rounded-md px-3 py-1.5 transition-colors ${depositMethod === "btc" ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}`}
+                  >
+                    On-chain
+                  </button>
+                </div>
+              )}
+              {depositMethod === "btc" && cfg.hasRails && (
                 <p className="text-xs text-muted-foreground">
                   Minimum 50 {symbol} — on-chain deposits pay for dust and chain fees.
                 </p>
@@ -930,15 +995,15 @@ export function WalletPage() {
                   id="dep-amt"
                   type="number"
                   min="1"
-                  max="1000"
-                  step="0.01"
-                  placeholder="5.00"
+                  max={isSat ? "100000" : "1000"}
+                  step={cfg.step}
+                  placeholder={isSat ? "21" : "5.00"}
                   value={depositAmount}
                   onChange={(e) => setDepositAmount(e.target.value)}
                 />
               </div>
               <Button onClick={startDeposit} disabled={!depositAmount}>
-                {depositMethod === "ln"
+                {isSat || depositMethod === "ln"
                     ? "Create lightning invoice"
                     : depositMethod === "btc"
                       ? "Create on-chain address"
@@ -974,7 +1039,7 @@ export function WalletPage() {
                     {CURRENCIES[q.currency].label} deposit
                   </p>
                 )}
-                {q.method === "ln" ? (
+                {q.method === "ln" || q.method === "bolt11" ? (
                   <>
                     <p className="text-sm text-muted-foreground">
                       Pay this lightning invoice (signet):
@@ -1031,7 +1096,7 @@ export function WalletPage() {
                   </>
                 )}
                 <p className="text-sm text-muted-foreground">
-                  {(q.amount / 100).toFixed(2)} {cardSymbol} — waiting…
+                  {fmtAmount(q.amount, q.currency)} {cardSymbol} — waiting…
                 </p>
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
@@ -1056,35 +1121,51 @@ export function WalletPage() {
             <ArrowUp className="size-4" /> Withdraw
           </CardTitle>
           <CardDescription>
-            {WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)?.hint}
+            {isSat
+              ? "Pay a lightning invoice from your sats balance."
+              : WITHDRAW_OPTIONS.find((o) => o.id === withdrawRail)?.hint}
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
           {withdrawState.phase === "idle" || withdrawState.phase === "done" ? (
             <>
-              <div
-                className="grid grid-cols-3 gap-1.5 rounded-lg bg-muted p-1 text-sm"
-                role="tablist"
-                aria-label="Withdraw rail"
-              >
-                {WITHDRAW_OPTIONS.map((o) => (
-                  <button
-                    key={o.id}
-                    role="tab"
-                    type="button"
-                    aria-selected={withdrawRail === o.id}
-                    onClick={() => setWithdrawRail(o.id)}
-                    className={`rounded-md px-2 py-1.5 transition-colors ${
-                      withdrawRail === o.id
-                        ? "bg-background font-medium shadow-sm"
-                        : "text-muted-foreground"
-                    }`}
-                  >
-                    {o.label}
-                  </button>
-                ))}
-              </div>
-              {activeOption?.placeholder ? (
+              {isSat ? (
+                <div className="grid gap-1.5">
+                  <Label htmlFor="wd-invoice">Lightning invoice</Label>
+                  <Textarea
+                    id="wd-invoice"
+                    placeholder="lntbs…"
+                    rows={3}
+                    className="font-mono text-xs"
+                    value={withdrawInvoice}
+                    onChange={(e) => setWithdrawInvoice(e.target.value)}
+                  />
+                </div>
+              ) : (
+                <div
+                  className="grid grid-cols-3 gap-1.5 rounded-lg bg-muted p-1 text-sm"
+                  role="tablist"
+                  aria-label="Withdraw rail"
+                >
+                  {WITHDRAW_OPTIONS.map((o) => (
+                    <button
+                      key={o.id}
+                      role="tab"
+                      type="button"
+                      aria-selected={withdrawRail === o.id}
+                      onClick={() => setWithdrawRail(o.id)}
+                      className={`rounded-md px-2 py-1.5 transition-colors ${
+                        withdrawRail === o.id
+                          ? "bg-background font-medium shadow-sm"
+                          : "text-muted-foreground"
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {!isSat && activeOption?.placeholder ? (
                 <div className="grid gap-1.5">
                   <Label htmlFor="wd-recipient">Destination</Label>
                   <Input
@@ -1096,23 +1177,25 @@ export function WalletPage() {
                   />
                 </div>
               ) : null}
-              <div className="grid gap-1.5">
-                <Label htmlFor="wd-amt">
-                  {activeOption?.fixed?.startsWith("ev:")
-                    ? `Budget (${symbol})`
-                    : `Amount (${symbol})`}
-                </Label>
-                <Input
-                  id="wd-amt"
-                  type="number"
-                  min="1"
-                  max="1000"
-                  step="0.01"
-                  placeholder="1.00"
-                  value={withdrawAmount}
-                  onChange={(e) => setWithdrawAmount(e.target.value)}
-                />
-              </div>
+              {!isSat && (
+                <div className="grid gap-1.5">
+                  <Label htmlFor="wd-amt">
+                    {activeOption?.fixed?.startsWith("ev:")
+                      ? `Budget (${symbol})`
+                      : `Amount (${symbol})`}
+                  </Label>
+                  <Input
+                    id="wd-amt"
+                    type="number"
+                    min="1"
+                    max="1000"
+                    step="0.01"
+                    placeholder="1.00"
+                    value={withdrawAmount}
+                    onChange={(e) => setWithdrawAmount(e.target.value)}
+                  />
+                </div>
+              )}
               {withdrawState.phase === "done" ? (
                 <div className="grid gap-2 rounded-md border p-3 text-center">
                   <p className="break-all font-mono text-sm">
@@ -1132,10 +1215,12 @@ export function WalletPage() {
               ) : (
                 <Button
                   variant="outline"
-                  onClick={startWithdraw}
-                  disabled={!withdrawAmount || (!activeOption?.fixed && !withdrawRecipient)}
+                  onClick={isSat ? startSatWithdraw : startWithdraw}
+                  disabled={isSat ? !withdrawInvoice.trim() : !withdrawAmount || (!activeOption?.fixed && !withdrawRecipient)}
                 >
-                  {activeOption?.fixed?.startsWith("ev:") ? "Start charging" : "Send"}
+                  {isSat
+                    ? "Send"
+                    : activeOption?.fixed?.startsWith("ev:") ? "Start charging" : "Send"}
                 </Button>
               )}
             </>
@@ -1144,7 +1229,18 @@ export function WalletPage() {
               <Loader2 className="size-4 animate-spin" /> Creating…
             </div>
           ) : withdrawState.phase === "pending" ? (
-            withdrawState.auto ? (
+            withdrawState.lightning ? (
+              <div className="grid gap-3 text-center">
+                <p className="text-lg font-medium">⚡ Paying lightning invoice</p>
+                <p className="text-sm text-muted-foreground">
+                  The mint is settling the payment — this completes by itself.
+                </p>
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Settling
+                </div>
+              </div>
+            ) : withdrawState.auto ? (
               <div className="grid gap-3 text-center">
                 <p className="text-lg font-medium">
                   ⚡ Charging at {withdrawState.label}
@@ -1303,7 +1399,7 @@ export function WalletPage() {
                     className={`font-mono tabular-nums ${h.pending ? "text-muted-foreground" : ""}`}
                   >
                     {h.type === "deposit" ? "+" : "−"}
-                    {(h.amount / 100).toFixed(2)} {symbol}
+                    {fmtAmount(h.amount)} {symbol}
                   </span>
                 </div>
               ))}
@@ -1352,13 +1448,17 @@ export function WalletPage() {
 
       <p className="text-center text-xs text-muted-foreground">
         Self-custodied — Coco 2 · keys stay in your browser.
-        <br />
-        {/* The wallet is currency-agnostic (localStorage picks the
-            mint); the consoles are per-pair, so these links follow the
-            ACTIVE currency's processor instance. */}
-        <a href={`${consoleUrl(currency)}/`} className="underline">Operator console</a>
-        {" · "}
-        <a href={`${consoleUrl(currency)}/teller`} className="underline">Teller</a>
+        {cfg.hasRails && (
+          <>
+            <br />
+            {/* The wallet is currency-agnostic (localStorage picks the
+                mint); the consoles are per-pair, so these links follow the
+                ACTIVE currency's processor instance. */}
+            <a href={`${consoleUrl(currency)}/`} className="underline">Operator console</a>
+            {" · "}
+            <a href={`${consoleUrl(currency)}/teller`} className="underline">Teller</a>
+          </>
+        )}
       </p>
     </main>
   )

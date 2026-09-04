@@ -71,4 +71,9 @@ declare module "@cashu/coco-core/operations/mint" {
 
 export const BRANCH_METHOD = "branch" as const
 export const LN_METHOD = "ln" as const
-export type DepositMethod = "branch" | "ln" | "btc"
+/**
+ * Wallet-side deposit methods: the pecan rails (branch/ln/btc) plus
+ * coco's built-in bolt11 — used by the external sat mint, where the
+ * Lightning tab maps to the native Cashu method instead of our rail.
+ */
+export type DepositMethod = "branch" | "ln" | "btc" | "bolt11"

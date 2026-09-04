@@ -121,6 +121,26 @@ export function payLightningInvoice(invoice: string): string {
 }
 
 /**
+ * Creates a bolt11 invoice on the hub node — the melt destination for
+ * sat withdrawals (the wallet pays it, the lab node receives).
+ */
+export function createLightningInvoice(amountSat: number, label: string): string {
+  let out: string
+  try {
+    out = execSync(
+      `ssh root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet invoice ${amountSat * 1000}msat pecan-${label} e2e"`,
+      { timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString()
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
+    throw new Error(`invoice creation on cln-hub-signet failed: ${stderr.slice(0, 300)}`)
+  }
+  const match = out.match(/"bolt11":\s*"((?:[^"\\]|\\.)*)"/)
+  if (!match) throw new Error(`no bolt11 in invoice output: ${out.slice(0, 300)}`)
+  return match[1]
+}
+
+/**
  * Sends on-chain sats from a genuinely external lab wallet. The CLN nodes run
  * esplora chain mode; a withdraw can stall on slow esplora fetches, and
  * killing the RPC mid-flight strands the node's inputs as reserved for a long
@@ -217,15 +237,23 @@ export async function readBalance(page: Page): Promise<number> {
   }
 }
 
-const CURRENCY_SYMBOLS: Record<string, string> = { EUR: "€", USD: "$" }
+const CURRENCY_SYMBOLS: Record<string, string> = { EUR: "€", USD: "$", SATS: "sat" }
 
 /**
  * The 6-character code shown under "Give this code to the teller:" for both
  * deposits (MINT-… quote tail) and withdrawals (MELT-… quote tail).
+ *
+ * Withdrawals surface the code only after the fund lock resolves — under
+ * suite load (parallel workers, watcher lock contention) that can take
+ * well past the usual sub-second, so the budget covers the wallet's own
+ * worst-case chain (quote + prepare + 30s lock race).
  */
-export async function readTellerCode(page: Page): Promise<string> {
+export async function readTellerCode(
+  page: Page,
+  timeout = 45_000,
+): Promise<string> {
   const code = page.locator("p.font-mono.text-3xl")
-  await code.waitFor({ state: "visible", timeout: 30_000 })
+  await code.waitFor({ state: "visible", timeout })
   const text = (await code.textContent())?.trim() ?? ""
   if (!/^[A-Z0-9]{6}$/.test(text)) {
     throw new Error(`expected 6-char teller code, got: "${text}"`)

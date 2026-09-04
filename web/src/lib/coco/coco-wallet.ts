@@ -1,5 +1,10 @@
 import { Amount } from "@cashu/cashu-ts"
-import { initializeCoco, type HistoryEntry, type Manager } from "@cashu/coco-core"
+import {
+  initializeCoco,
+  type HistoryEntry,
+  type Manager,
+  type WebSocketLike,
+} from "@cashu/coco-core"
 import { IndexedDbRepositories } from "@cashu/coco-indexeddb"
 
 import type { DepositMethod } from "./branch-methods"
@@ -91,6 +96,38 @@ function isCancelledQuote(quoteId: string | undefined): boolean {
 
 let cocoInstance: Promise<Manager> | null = null
 
+type WsListener = Parameters<WebSocketLike["addEventListener"]>[1]
+
+/**
+ * A WebSocketLike that never connects: it fires synthetic error/close
+ * events so coco's hybrid transport marks the mint's WS as failed and
+ * switches to fast polling — without the browser console noise a real
+ * failed handshake produces (signut answers /v1/ws with 410, NUT-17 off).
+ */
+function blackholeSocket(): WebSocketLike {
+  const listeners = new Map<string, WsListener[]>()
+  const fire = (type: string) => {
+    for (const listener of [...(listeners.get(type) ?? [])]) listener({})
+  }
+  setTimeout(() => {
+    fire("error")
+    fire("close")
+  }, 0)
+  return {
+    send: () => {},
+    close: () => {},
+    addEventListener: (type, listener) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener])
+    },
+    removeEventListener: (type, listener) => {
+      listeners.set(
+        type,
+        (listeners.get(type) ?? []).filter((l) => l !== listener),
+      )
+    },
+  }
+}
+
 export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -134,9 +171,29 @@ export function getCoco(): Promise<Manager> {
       // opens the database.
       await migrateLegacyMintUrls(window.location.origin, mintUrl("eur"))
       const repo = new IndexedDbRepositories({ name: "giftcard-coco-wallet" })
+      const noWsHosts = new Set(
+        (Object.keys(CURRENCIES) as Currency[])
+          .filter((c) => !CURRENCIES[c].nut17)
+          .map((c) => {
+            try {
+              return new URL(mintUrl(c)).hostname
+            } catch {
+              return null
+            }
+          })
+          .filter((h): h is string => h !== null),
+      )
       const coco = await initializeCoco({
         repo,
         seedGetter: () => Promise.resolve(loadSeed()),
+        ...(typeof WebSocket !== "undefined"
+          ? {
+              webSocketFactory: (url: string) =>
+                noWsHosts.has(new URL(url).hostname)
+                  ? blackholeSocket()
+                  : new WebSocket(url),
+            }
+          : {}),
       })
       coco.registerMeltMethod("branch", new MeltBranchHandler())
       coco.registerMintMethod("branch", new MintBranchHandler("branch", coco.keyRingService))
@@ -144,7 +201,13 @@ export function getCoco(): Promise<Manager> {
       coco.registerMintMethod("btc", new MintBranchHandler("btc", coco.keyRingService))
       subscribeWalletLogging(coco)
       for (const currency of Object.keys(CURRENCIES) as Currency[]) {
-        await coco.mint.addMint(mintUrl(currency), { trusted: true })
+        // Best-effort: an unreachable external mint (sat) must not brick
+        // boot for the same-origin pairs — its ops fail per-use instead.
+        await coco.mint
+          .addMint(mintUrl(currency), { trusted: true })
+          .catch((err: unknown) => {
+            console.warn(`addMint ${currency} failed:`, err)
+          })
       }
       return coco
     })()
@@ -205,6 +268,11 @@ export function mapHistoryEntry(entry: HistoryEntry): HistoryRow | null {
   return null
 }
 
+/** Display/major units (5.00 €, 21 sat) → internal units (500 cents, 21 sat). */
+export function scaleAmount(amountInput: number, currency: Currency): number {
+  return Math.round(amountInput * CURRENCIES[currency].scale)
+}
+
 export async function createDepositQuote(
   amountInput: number,
   method: DepositMethod = "branch",
@@ -212,17 +280,29 @@ export async function createDepositQuote(
   description = "Wallet deposit",
 ): Promise<DepositQuote> {
   const coco = await getCoco()
-  const amount = Math.round(amountInput * 100)
+  const amount = scaleAmount(amountInput, currency)
 
+  // bolt11 is coco's built-in method (signut): its quote shape carries no
+  // description field — only the custom pecan rails accept one.
+  const input =
+    method === "bolt11"
+      ? {
+          mintUrl: mintUrl(currency),
+          method: "bolt11" as const,
+          amount,
+          unit: currency,
+          locked: true,
+        }
+      : {
+          mintUrl: mintUrl(currency),
+          method,
+          amount,
+          unit: currency,
+          description,
+          locked: true,
+        }
   const quote = await raceTimeout(
-    coco.quotes.mint.create({
-      mintUrl: mintUrl(currency),
-      method,
-      amount: amount,
-      unit: currency,
-      description,
-      locked: true,
-    }),
+    coco.quotes.mint.create(input),
     20_000,
     "mint quote",
   )
@@ -284,7 +364,7 @@ export async function createWithdraw(
   currency: Currency = activeCurrency(),
 ): Promise<WithdrawResult> {
   const coco = await getCoco()
-  const amount = Math.round(amountInput * 100)
+  const amount = scaleAmount(amountInput, currency)
 
   const quote = await raceTimeout(
     coco.quotes.melt.create({
@@ -467,14 +547,99 @@ export async function claimOrphanedEvRefunds(
   return refunded
 }
 
-export async function pollWithdraw(quoteId: string): Promise<string | null> {
+/**
+ * SAT withdraw: melt straight to a bolt11 invoice at the external mint
+ * (signut). No teller code — the mint pays the invoice itself (Nutshell
+ * settles fast), change rides the melt response/quote check (NUT-08),
+ * and the UI polls the op for the preimage receipt.
+ *
+ * The methodData wrapper is load-bearing: the flat {invoice} shape throws
+ * "Cannot use 'in' operator to search for 'amountSats' in undefined"
+ * (probe finding, 2026-09-04).
+ */
+export async function createSatMeltWithdraw(
+  invoice: string,
+  currency: Currency = activeCurrency(),
+): Promise<WithdrawResult> {
+  const coco = await getCoco()
+
+  const quote = await raceTimeout(
+    coco.quotes.melt.create({
+      mintUrl: mintUrl(currency),
+      method: "bolt11",
+      methodData: { invoice },
+      unit: currency,
+    }),
+    20_000,
+    "melt quote",
+  )
+  const amount = Number(quote.amount.toBigInt())
+
+  const prepared = await raceTimeout(
+    coco.ops.melt.prepare({ quote }),
+    15_000,
+    "melt prepare",
+  )
+
+  const lockStarted = Date.now()
+  const settled = await Promise.race([
+    coco.ops.melt
+      .execute(prepared.id)
+      .then((op) => ({ state: op.state, error: null }))
+      .catch(async (err: unknown) => {
+        // The settlement processor reacts to melt-op:pending and may
+        // finalize the op concurrently; the losing driver gets the
+        // mint's "inputs already spent". That is benign ONLY when the
+        // op row itself reaches a terminal state — poll briefly, the
+        // winner may still be mid-write when the loser reads.
+        if (/already (?:be|been) spent/i.test(String(err))) {
+          const deadline = Date.now() + 10_000
+          while (Date.now() < deadline) {
+            const op = await coco.ops.melt.get(prepared.id).catch(() => null)
+            if (op && (op.state === "finalized" || op.state === "rolled_back")) {
+              return { state: op.state, error: null }
+            }
+            await new Promise((r) => setTimeout(r, 500))
+          }
+        }
+        return { state: "error", error: String(err) }
+      }),
+    new Promise<{ state: "timeout"; error: null }>((resolve) =>
+      setTimeout(() => resolve({ state: "timeout", error: null }), 30_000),
+    ),
+  ])
+  walletLog(
+    settled.state === "error" ? "warn" : "info",
+    "withdraw fund-lock result",
+    {
+      quoteId: quote.quoteId,
+      state: settled.state,
+      waitedMs: Date.now() - lockStarted,
+      error: settled.error,
+    },
+  )
+
+  return {
+    quoteId: quote.quoteId,
+    tail: quote.quoteId.slice(-6).toUpperCase(),
+    amount,
+    submitted: true,
+  }
+}
+
+export async function pollWithdraw(
+  quoteId: string,
+  currency: Currency = activeCurrency(),
+): Promise<string | null> {
   const coco = await getCoco()
   // Polled from a bare setInterval: a timeout here must stay benign —
   // return null and let the next tick retry (same contract as refresh
-  // contention below), never an unhandled rejection.
+  // contention below), never an unhandled rejection. The currency is
+  // pinned at call time so a mid-poll tab switch keeps querying the
+  // mint the quote lives at.
   const operation = await raceTimeout(
     coco.ops.melt.getByQuote({
-      mintUrl: mintUrl(),
+      mintUrl: mintUrl(currency),
       quoteId,
     }),
     10_000,
@@ -732,6 +897,8 @@ export async function getPendingWithdraw(): Promise<{
   quoteId: string
   tail: string
   description: string | null
+  /** Op method — "bolt11" marks an external-mint lightning payout. */
+  method: string
 } | null> {
   const coco = await getCoco()
   const ops = await coco.ops.melt.listInFlight()
@@ -751,6 +918,7 @@ export async function getPendingWithdraw(): Promise<{
     description:
       methodData?.description ?? request?.description
       ?? sessionTargetFor(op.quoteId),
+    method: op.method ?? "branch",
   }
 }
 

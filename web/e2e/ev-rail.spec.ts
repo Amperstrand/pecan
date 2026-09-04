@@ -178,6 +178,9 @@ test("ev rail: deposit pattern — slider, remote stop, refund of the unspent de
 test("ev rail: device button abort meters actual delivery and refunds", async ({ page }) => {
   test.setTimeout(300_000)
   test.skip(!MQTT.url, "MQTT fixtures unavailable (run via scripts/e2e.sh)")
+  // The button sim reacts to the device's LIVE start ack — with the box
+  // unplugged there is no ack and the session degrades to TIMEOUT.
+  test.skip(!deviceOnline(), "charger offline (Atom unplugged/wedged)")
   const consoleBase = "/eur-console"
 
   const budget = 4

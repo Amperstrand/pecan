@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { Amount } from "@cashu/cashu-ts"
 import type { HistoryEntry } from "@cashu/coco-core"
-import { fromHex, mapHistoryEntry, toHex } from "./coco-wallet"
+import { fromHex, mapHistoryEntry, scaleAmount, toHex } from "./coco-wallet"
 
 function historyFixture(fields: {
   type: string
@@ -56,5 +56,18 @@ describe("seed hex helpers", () => {
 
   it("parses hex pairs into bytes", () => {
     expect(Array.from(fromHex("00ff7f"))).toEqual([0, 255, 127])
+  })
+})
+
+describe("scaleAmount", () => {
+  it("multiplies fiat inputs into cents", () => {
+    expect(scaleAmount(5, "eur")).toBe(500)
+    expect(scaleAmount(5.0, "usd")).toBe(500)
+    expect(scaleAmount(12.34, "eur")).toBe(1234)
+  })
+
+  it("keeps sats whole — the unit needs no scaling", () => {
+    expect(scaleAmount(21, "sat")).toBe(21)
+    expect(scaleAmount(100000, "sat")).toBe(100000)
   })
 })

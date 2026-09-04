@@ -31,6 +31,12 @@ export interface CurrencyConfig {
   step: string
   /** Whether this currency has pecan rails (teller + payout rails). */
   hasRails: boolean
+  /**
+   * NUT-17 websocket subscriptions on the mint. The sat mint (Nutshell-CF)
+   * answers /v1/ws with 410 — coco's hybrid transport must not open a
+   * socket there (browser consoles log every failed handshake).
+   */
+  nut17: boolean
 }
 
 const ORIGIN = () =>
@@ -46,6 +52,7 @@ export const CURRENCIES: Record<Currency, CurrencyConfig> = {
     scale: 100,
     step: "0.01",
     hasRails: true,
+    nut17: true,
   },
   usd: {
     mintUrl: "",
@@ -56,6 +63,7 @@ export const CURRENCIES: Record<Currency, CurrencyConfig> = {
     scale: 100,
     step: "0.01",
     hasRails: true,
+    nut17: true,
   },
   sat: {
     // External single mint (the user's explicit choice: single-mint sats,
@@ -69,6 +77,7 @@ export const CURRENCIES: Record<Currency, CurrencyConfig> = {
     scale: 1,
     step: "1",
     hasRails: false,
+    nut17: false,
   },
 }
 

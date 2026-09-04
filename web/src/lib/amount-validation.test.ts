@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   MAX_AMOUNT,
+  MAX_SAT,
   MIN_ONCHAIN_DEPOSIT,
   validateDepositAmount,
   validateWithdrawAmount,
@@ -40,6 +41,15 @@ describe("validateDepositAmount", () => {
     expect(validateDepositAmount("1000.01", "ln", sym)).toContain(`above ${MAX_AMOUNT}`)
     expect(validateDepositAmount("1000", "btc", sym)).toBeNull()
   })
+
+  it("sat deposits must be whole numbers within the mint limit", () => {
+    expect(validateDepositAmount("21", "ln", "sat", true)).toBeNull()
+    expect(validateDepositAmount("100000", "ln", "sat", true)).toBeNull()
+    expect(validateDepositAmount("21.5", "ln", "sat", true)).toContain("whole numbers")
+    expect(validateDepositAmount("100001", "ln", "sat", true)).toContain(
+      `above ${MAX_SAT.toLocaleString()}`,
+    )
+  })
 })
 
 describe("validateWithdrawAmount", () => {
@@ -61,5 +71,14 @@ describe("validateWithdrawAmount", () => {
     expect(validateWithdrawAmount("5", sym, 500)).toBeNull()
     // null balance = not loaded yet; skip the client-side check
     expect(validateWithdrawAmount("6", sym, null)).toBeNull()
+  })
+
+  it("sat withdrawals compare whole units against the balance — no cents division", () => {
+    expect(validateWithdrawAmount("21", "sat", 21, true)).toBeNull()
+    expect(validateWithdrawAmount("22", "sat", 21, true)).toContain("exceeds your balance")
+    expect(validateWithdrawAmount("21.5", "sat", 1000, true)).toContain("whole numbers")
+    expect(validateWithdrawAmount("100001", "sat", null, true)).toContain(
+      `above ${MAX_SAT.toLocaleString()}`,
+    )
   })
 })

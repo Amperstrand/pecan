@@ -49,6 +49,7 @@ describe("currency registry", () => {
     expect(CURRENCIES.sat.scale).toBe(1)
     expect(CURRENCIES.sat.step).toBe("1")
     expect(CURRENCIES.sat.hasRails).toBe(false)
+    expect(CURRENCIES.sat.nut17).toBe(false)
     expect(currencyOfMint("https://signut.cashu.exchange")).toBe("sat")
   })
 
