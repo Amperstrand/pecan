@@ -138,6 +138,13 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
                    "device": device, "seconds": seconds,
                    "reason": trig.get("reason", "trigger declined")}
 
+    # Tariff snapshot: bill at the rate the session was priced at, not
+    # whatever the daemon currently runs with (a restart with a changed
+    # --secs-per-eur mid-session must not reprice delivered energy).
+    # Looked up BEFORE any settle path — the timeout receipt needs it
+    # too (an unbound-variable crash here was caught by unit test).
+    tariff = getattr(a, "_tariffs", {}).get(tid, a.secs_per_eur)
+
     done_by = time.time() + seconds + a.settle_grace
     state = None
     while time.time() < done_by:
@@ -182,10 +189,6 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     suffix = "-STOPPED" if was_stopped else ""
     receipt = "EV-{}-{}s-{}{}".format(device, delivered,
                                       secrets.token_hex(4).upper(), suffix)
-    # Tariff snapshot: bill at the rate the session was priced at, not
-    # whatever the daemon currently runs with (a restart with a changed
-    # --secs-per-eur mid-session must not reprice delivered energy).
-    tariff = getattr(a, "_tariffs", {}).get(tid, a.secs_per_eur)
     cents = max(1, round(delivered * 100.0 / tariff))
 
     notes = f"payout rail {RAIL} (charge session) receipt={receipt}"

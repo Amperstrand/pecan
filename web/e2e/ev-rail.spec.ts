@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { execSync, spawn, type ChildProcess } from "node:child_process"
 import { test, expect, type Page } from "@playwright/test"
 import { apiLogin, matchAndSettle, readBalance, readTellerCode } from "./helpers/wallet"
 
@@ -71,6 +71,39 @@ async function pressDeviceButton(delivered: number) {
   await ready
 }
 
+function deviceOnline(): boolean {
+  // The charger e2es need the physical Atom (or its MQTT presence): the
+  // retained charger/<device>/status LWT flips to offline when the box
+  // is unplugged, and every charger test would otherwise degrade into
+  // the metering-loss path.
+  if (!MQTT.url) return false
+  try {
+    const out = execSync(
+      `python3 -c '
+import paho.mqtt.client as m, time, os
+c = m.Client(m.CallbackAPIVersion.VERSION2, client_id="liveness-" + str(time.time()))
+c.username_pw_set("${MQTT.user}", "${MQTT.pass}")
+c.tls_set()
+got = []
+c.on_message = lambda cl,u,msg: got.append(bytes(msg.payload))
+c.on_connect = lambda cl,u,f,rc,p=None: cl.subscribe("charger/atom/status")
+host = "${MQTT.url}".replace("mqtts://", "").split(":")[0].split("/")[0]
+c.connect(host, 8883, 15)
+c.loop_start()
+deadline = time.time() + 12
+while not got and time.time() < deadline:
+    time.sleep(0.25)
+c.loop_stop()
+print(got[0].decode() if got else "unknown")
+'`,
+      { timeout: 20_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString().trim()
+    return out === "online"
+  } catch {
+    return false
+  }
+}
+
 async function bootAndFund(page: Page, consoleBase: string, minBalance: number) {
   await page.addInitScript(() => {
     window.localStorage.setItem("pecan-debug", "1")
@@ -96,6 +129,7 @@ test("ev rail: deposit pattern — slider, remote stop, refund of the unspent de
   const consoleBase = "/eur-console"
   const password = process.env.PECAN_ADMIN_PASSWORD
   test.skip(!password, "admin password unavailable")
+  test.skip(!deviceOnline(), "charger offline (Atom unplugged/wedged)")
 
   const budget = 6
   await bootAndFund(page, consoleBase, budget + 1)
@@ -169,4 +203,114 @@ test("ev rail: device button abort meters actual delivery and refunds", async ({
   await expect
     .poll(async () => readBalance(page), { timeout: 120_000 })
     .toBeCloseTo(before - 2, 2)
+})
+
+test("ev rail: malformed charger envelope and over-budget are refused", async ({ page }) => {
+  test.setTimeout(180_000)
+  const consoleBase = "/eur-console"
+  const password = process.env.PECAN_ADMIN_PASSWORD
+  test.skip(!password, "admin password unavailable")
+  test.skip(!deviceOnline(), "charger offline (Atom unplugged/wedged)")
+  await bootAndFund(page, consoleBase, 5)
+
+  // A syntactically invalid device slug never becomes a ticket: the
+  // quote-time gate refuses it and the wallet names the likely cause.
+  await page.getByPlaceholder("Phone or reference").fill("ev:bogus!")
+  await page.getByPlaceholder("1.00").fill("1")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  await expect(page.getByText("the rail may not be enabled here")).toBeVisible({
+    timeout: 30_000,
+  })
+  await expect(page.locator("p.font-mono.text-3xl")).toHaveCount(0)
+  await page.getByRole("button", { name: "Try again" }).click()
+
+  // A budget beyond the balance is refused client-side: no quote, no
+  // code, the error names the balance.
+  await page.getByPlaceholder("Phone or reference").fill("ev:atomA")
+  await page.getByPlaceholder("1.00").fill("9999")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  await expect(page.getByText(/not supported \(mint limit\)/)).toBeVisible()
+  await expect(page.locator("p.font-mono.text-3xl")).toHaveCount(0)
+})
+
+test("ev rail: a mid-session reload resumes charging and still refunds", async ({ page }) => {
+  test.setTimeout(300_000)
+  const consoleBase = "/eur-console"
+  const password = process.env.PECAN_ADMIN_PASSWORD
+  test.skip(!password, "admin password unavailable")
+  test.skip(!deviceOnline(), "charger offline (Atom unplugged/wedged)")
+  await bootAndFund(page, consoleBase, 7)
+
+  // 15 s budget: the reload boot eats 5-8 s, and the Stop click needs
+  // the window still alive under it.
+  const budget = 15
+  const before = await readBalance(page)
+  await page.getByRole("tab", { name: TAB, exact: true }).click()
+  await page.getByPlaceholder("1.00").fill(String(budget))
+  await page.getByRole("button", { name: "Start charging" }).click()
+  await expect(page.getByText("⚡ Charging at " + TAB)).toBeVisible({ timeout: 60_000 })
+
+  // Reload mid-session: the resume path must NOT lose the session —
+  // whichever card renders (charging if the window survives the boot,
+  // the summary if it completed during it), the refund still lands and
+  // the balance is exact. A 10 s budget leaves room for the IDB boot.
+  await page.reload()
+  await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
+  const charging = page.getByText("⚡ Charging at " + TAB)
+  const summary = page.getByText(/Charged? \d+ s|Charging stopped — \d+ s/)
+  await Promise.race([
+    charging.waitFor({ state: "visible", timeout: 120_000 }),
+    summary.waitFor({ state: "visible", timeout: 120_000 }),
+  ])
+  const stillCharging = await charging.isVisible().catch(() => false)
+  if (stillCharging) {
+    // The window may complete under the click (button unmounts) — that
+    // is the completed-session path, not a failure.
+    await page
+      .getByRole("button", { name: "Stop charging" })
+      .click({ timeout: 10_000 })
+      .catch(() => undefined)
+  }
+  await expect(summary).toBeVisible({ timeout: 180_000 })
+  const receipt = await page.locator("p.break-all.font-mono").textContent()
+  const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
+  await expect
+    .poll(async () => readBalance(page), { timeout: 120_000 })
+    .toBeCloseTo(before - delivered, 2)
+})
+
+test("ev rail: double-stop is idempotent — one settle, one refund, exact balance", async ({ page }) => {
+  test.setTimeout(300_000)
+  const consoleBase = "/eur-console"
+  const password = process.env.PECAN_ADMIN_PASSWORD
+  test.skip(!password, "admin password unavailable")
+  test.skip(!deviceOnline(), "charger offline (Atom unplugged/wedged)")
+  await bootAndFund(page, consoleBase, 7)
+
+  const budget = 6
+  const before = await readBalance(page)
+  await page.getByRole("tab", { name: TAB, exact: true }).click()
+  await page.getByPlaceholder("1.00").fill(String(budget))
+  await page.getByRole("button", { name: "Start charging" }).click()
+  await expect(page.getByText("⚡ Charging at " + TAB)).toBeVisible({ timeout: 60_000 })
+  await expect(
+    page.getByText(/€\d+\.00 of the deposit remaining/),
+  ).toBeVisible({ timeout: 30_000 })
+
+  // A double-click (or an impatient retry) must not double-settle or
+  // double-refund: the gateway answers the second stop with
+  // stopped:false and the daemon's ledger caps refunds at one.
+  const stop = page.getByRole("button", { name: "Stop charging" })
+  await Promise.all([stop.click(), stop.click().catch(() => undefined)])
+
+  await expect(page.getByText(/Charging stopped — \d+ s delivered/)).toBeVisible({
+    timeout: 180_000,
+  })
+  const receipt = await page.locator("p.break-all.font-mono").textContent()
+  const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
+  await expect
+    .poll(async () => readBalance(page), { timeout: 120_000 })
+    .toBeCloseTo(before - delivered, 2)
+  // Exactly one refund line, one session record.
+  await expect(page.getByText(/refunded to your wallet/)).toHaveCount(1)
 })

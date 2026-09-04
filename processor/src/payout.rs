@@ -225,6 +225,28 @@ mod tests {
                 destination: "DE89 3704 0044 0532 0130 00".into()
             })
         );
+        // Envelope edges: the quote-time gate must reject the shapes a
+        // confused wallet could produce — no colon, empty destination,
+        // unknown rail, whitespace-only, case-mismatched rail.
+        assert_eq!(parse_payout_envelope("no-envelope"), None);
+        assert_eq!(parse_payout_envelope("ev:"), None);
+        assert_eq!(parse_payout_envelope("ev:   "), None);
+        // An unoperated-but-well-formed rail still parses: the envelope
+        // grammar and the deployment's rail gate are separate layers
+        // (backend::tests::melt_quote_gates_payout_rails pins the gate).
+        assert_eq!(
+            parse_payout_envelope("nope:whatever"),
+            Some(PayoutRequest {
+                rail: "nope".into(),
+                destination: "whatever".into()
+            })
+        );
+        assert_eq!(parse_payout_envelope("EV:atomA"), None);
+        assert_eq!(parse_payout_envelope(""), None);
+        // The destination keeps interior structure; only the envelope's
+        // edges are trimmed.
+        let inner = parse_payout_envelope("  ev:atom-1  ").unwrap();
+        assert_eq!(inner.destination, "atom-1");
     }
 
     #[test]

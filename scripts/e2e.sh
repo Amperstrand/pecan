@@ -74,8 +74,23 @@ if [ "$SMOKE" -eq 1 ]; then
   set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"} --grep @smoke --max-failures=1
 else
   # Default lane: everything except the @stress soak tool (~6 min, zero
-  # sat, run explicitly with `scripts/e2e.sh -g @stress`).
-  set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"} --grep-invert @stress
+  # sat, run explicitly with `scripts/e2e.sh -g @stress`). An explicit
+  # grep overrides the inversion — `-g @stress` must not combine with
+  # --grep-invert @stress into a contradiction that matches nothing.
+  has_grep=false
+  prev=""
+  for a in ${PW_ARGS[@]+"${PW_ARGS[@]}"}; do
+    case "$a" in
+      -g|--grep) has_grep=true ;;
+      *) [ "$prev" = "-g" ] || [ "$prev" = "--grep" ] || true ;;
+    esac
+    prev="$a"
+  done
+  if $has_grep; then
+    set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"}
+  else
+    set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"} --grep-invert @stress
+  fi
 fi
 
 # Not exec'd: the trailing verdict line lets agents and soak greps read

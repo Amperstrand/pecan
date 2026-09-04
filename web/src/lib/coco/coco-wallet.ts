@@ -13,6 +13,7 @@ import {
 import type { CoreEvents } from "@cashu/coco-core"
 import { subscribeWalletLogging, walletLog } from "./wallet-log"
 import { raceTimeout } from "./timeout"
+import { parseChargeReceipt, refundEuros } from "./charge-session"
 import { migrateLegacyMintUrls } from "./wallet-migration"
 
 export type { DepositMethod }
@@ -301,6 +302,7 @@ export async function createWithdraw(
     15_000,
     "melt prepare",
   )
+  rememberSessionTarget(quote.quoteId, recipient)
 
   // The teller can only pay out once this wallet has locked funds at the
   // mint, so the code must not appear before that. The melt is async
@@ -333,6 +335,136 @@ export async function createWithdraw(
     amount,
     submitted: true,
   }
+}
+
+/**
+ * Deposit-pattern crash recovery: the refund claim lives in the page's
+ * promise chain, so a reload mid-session (or a crash after the melt
+ * finalized but before the refund minted) orphans it. On boot, scan
+ * recent finalized ev melts and claim any un-refunded overpay. Safe to
+ * re-run: the daemon's ledger refuses duplicates and over-claims, so a
+ * repeated attempt just creates a quote that expires unsettled.
+ */
+/**
+ * Post-reload summary for a charge session that finalized while the page
+ * was closed: the "charged" card lived only in React state, so a reload
+ * that lands after the melt finalizes would show the idle form while
+ * the refund silently lands via claimOrphanedEvRefunds. Re-derive the
+ * summary from the most recent finalized ev melt (within 2 minutes) so
+ * the user still sees what was delivered and what came back.
+ */
+export async function getRecentChargedSession(
+  currency: Currency = activeCurrency(),
+): Promise<{
+  label: string
+  seconds: number
+  refunded: number
+  stopped: boolean
+  receipt: string
+} | null> {
+  const coco = await getCoco()
+  const entries = await coco.history.getPaginatedHistory(0, 15)
+  for (const entry of entries) {
+    if (entry.type !== "melt" || entry.state !== "finalized") continue
+    if (Date.now() - entry.createdAt > 2 * 60_000) continue
+    if (entry.mintUrl !== mintUrl(currency)) continue
+    let op
+    try {
+      op = await coco.ops.melt.getByQuote({
+        mintUrl: mintUrl(currency),
+        quoteId: entry.quoteId,
+      })
+    } catch {
+      continue
+    }
+    if (!op || op.state !== "finalized") continue
+    const target = (op.methodData as { description?: string }).description
+      ?? sessionTargetFor(entry.quoteId) ?? ""
+    if (!target.startsWith("ev:")) continue
+    const preimage = (op as { finalizedData?: { preimage?: string } })
+      .finalizedData?.preimage
+    if (!preimage) continue
+    const parsed = parseChargeReceipt(preimage)
+    if (!parsed) continue
+    const budgetEuros = Number(op.amount.toBigInt()) / 100
+    const claimable = refundEuros(budgetEuros, parsed.deliveredSeconds)
+    return {
+      label: `Charger ${parsed.device === "atomB" ? "B" : "A"}`,
+      seconds: parsed.deliveredSeconds,
+      refunded: claimable,
+      stopped: parsed.stopped,
+      receipt: preimage,
+    }
+  }
+  return null
+}
+
+/**
+ * getRecentChargedSession with a brief retry: the history projection
+ * can lag the melt op's finalize by a moment, and the resume poll fires
+ * the instant the preimage is visible.
+ */
+export async function getRecentChargedSessionWithRetry(
+  currency: Currency = activeCurrency(),
+  attempts = 6,
+): Promise<Awaited<ReturnType<typeof getRecentChargedSession>>> {
+  for (let i = 0; i < attempts; i++) {
+    const recent = await getRecentChargedSession(currency).catch(() => null)
+    if (recent) return recent
+    await new Promise((r) => setTimeout(r, 1_500))
+  }
+  return null
+}
+
+export async function claimOrphanedEvRefunds(
+  currency: Currency = activeCurrency(),
+): Promise<number> {
+  const coco = await getCoco()
+  const entries = await coco.history.getPaginatedHistory(0, 30)
+  let refunded = 0
+  for (const entry of entries) {
+    if (entry.type !== "melt" || entry.state !== "finalized") continue
+    if (Date.now() - entry.createdAt > 45 * 60_000) continue
+    if (entry.mintUrl !== mintUrl(currency)) continue
+    let op: Awaited<ReturnType<typeof coco.ops.melt.getByQuote>> | null = null
+    try {
+      op = await coco.ops.melt.getByQuote({
+        mintUrl: mintUrl(currency),
+        quoteId: entry.quoteId,
+      })
+    } catch {
+      continue
+    }
+    if (!op || op.state !== "finalized") continue
+    const target = (op.methodData as { description?: string }).description
+      ?? sessionTargetFor(entry.quoteId) ?? ""
+    if (!target.startsWith("ev:")) continue
+    const preimage = (op as { finalizedData?: { preimage?: string } })
+      .finalizedData?.preimage
+    if (!preimage) continue
+    const parsed = parseChargeReceipt(preimage)
+    if (!parsed) continue
+    const budgetEuros = Number(op.amount.toBigInt()) / 100
+    const claimable = refundEuros(budgetEuros, parsed.deliveredSeconds)
+    if (claimable < 1) continue
+    try {
+      const refundQuote = await createDepositQuote(
+        claimable,
+        "branch",
+        currency,
+        `refund:${entry.quoteId}`,
+      )
+      const deadline = Date.now() + 60_000
+      while (Date.now() < deadline) {
+        if (await pollAndMint(refundQuote.quoteId)) break
+        await new Promise((r) => setTimeout(r, 1_500))
+      }
+      refunded += claimable
+    } catch {
+      // Daemon-side dedup makes this a no-op for already-refunded melts.
+    }
+  }
+  return refunded
 }
 
 export async function pollWithdraw(quoteId: string): Promise<string | null> {
@@ -563,6 +695,39 @@ export async function getPendingDeposits(): Promise<DepositQuote[]> {
 /**
  * Returns the wallet's in-flight withdrawal (if any) for the same reason.
  */
+// Charge-session correlation: the melt OP does not persist the
+// rail:destination envelope (it lives in the quote's `request` on the
+// mint), so the wallet records quoteId -> target locally at melt time.
+// This is what lets a reload derive the charging card and the charged
+// summary without a round trip.
+const SESSION_MAP_KEY = "pecan-charge-sessions"
+
+function rememberSessionTarget(quoteId: string, target: string): void {
+  try {
+    const raw = window.localStorage.getItem(SESSION_MAP_KEY) ?? "{}"
+    const map = JSON.parse(raw) as Record<string, { target: string; at: number }>
+    map[quoteId] = { target, at: Date.now() }
+    // Keep the map bounded: drop entries older than a day.
+    const dayAgo = Date.now() - 24 * 60 * 60_000
+    for (const k of Object.keys(map)) {
+      if (map[k]!.at < dayAgo) delete map[k]
+    }
+    window.localStorage.setItem(SESSION_MAP_KEY, JSON.stringify(map))
+  } catch {
+    // Best-effort correlation only.
+  }
+}
+
+function sessionTargetFor(quoteId: string): string | null {
+  try {
+    const raw = window.localStorage.getItem(SESSION_MAP_KEY) ?? "{}"
+    const map = JSON.parse(raw) as Record<string, { target: string; at: number }>
+    return map[quoteId]?.target ?? null
+  } catch {
+    return null
+  }
+}
+
 export async function getPendingWithdraw(): Promise<{
   quoteId: string
   tail: string
@@ -579,10 +744,13 @@ export async function getPendingWithdraw(): Promise<{
   )
   if (!op || !op.quoteId) return null
   const request = (op as { request?: { description?: string } }).request
+  const methodData = (op as { methodData?: { description?: string } }).methodData
   return {
     quoteId: op.quoteId,
     tail: op.quoteId.slice(-6).toUpperCase(),
-    description: request?.description ?? null,
+    description:
+      methodData?.description ?? request?.description
+      ?? sessionTargetFor(op.quoteId),
   }
 }
 

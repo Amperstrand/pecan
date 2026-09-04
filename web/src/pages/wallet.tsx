@@ -31,6 +31,8 @@ import {
   pollAndMint,
   pollWithdraw,
   resumePendingOperations,
+  claimOrphanedEvRefunds,
+  getRecentChargedSessionWithRetry,
 } from "@/lib/coco/coco-wallet"
 import { parseChargeReceipt, refundEuros } from "@/lib/coco/charge-session"
 import { downloadWalletDump, exportWalletDump } from "@/lib/coco/wallet-backup"
@@ -409,7 +411,30 @@ export function WalletPage() {
           startDepositPolling()
         }
 
+        // Crash recovery for the deposit pattern: a reload mid-session
+        // orphans the in-page refund claim. Re-claim from history; the
+        // daemon's ledger makes this idempotent.
+        void claimOrphanedEvRefunds().then((euros) => {
+          if (euros >= 1) refresh()
+        })
+
         const pendingWithdraw = await getPendingWithdraw()
+        if (!pendingWithdraw) {
+          // A reload that lands after the melt finalized still deserves
+          // the summary; re-derive it from the recent finalized session.
+          const recent = await getRecentChargedSessionWithRetry().catch(() => null)
+          if (recent) {
+            setWithdrawState({
+              phase: "charged",
+              label: recent.label,
+              seconds: recent.seconds,
+              spent: recent.seconds,
+              refunded: recent.refunded,
+              stopped: recent.stopped,
+              receipt: recent.receipt,
+            })
+          }
+        }
         if (pendingWithdraw) {
           // Resume shows the charging state when the melt's envelope names
           // a fixed-destination rail (ev:atomA); otherwise the teller code.
@@ -428,6 +453,25 @@ export function WalletPage() {
             if (preimage) {
               if (withdrawPollRef) clearInterval(withdrawPollRef)
               withdrawPollRef = null
+              // A finalized ev melt resumes into the charged summary
+              // (delivered seconds + refund), not the generic receipt
+              // card — the session's meaning survives the reload.
+              if (resumedOption?.fixed?.startsWith("ev:")) {
+                const recent = await getRecentChargedSessionWithRetry().catch(() => null)
+                if (recent) {
+                  setWithdrawState({
+                    phase: "charged",
+                    label: recent.label,
+                    seconds: recent.seconds,
+                    spent: recent.seconds,
+                    refunded: recent.refunded,
+                    stopped: recent.stopped,
+                    receipt: recent.receipt,
+                  })
+                  refresh()
+                  return
+                }
+              }
               setWithdrawState({ phase: "done", preimage })
               refresh()
               setTimeout(() => setWithdrawState({ phase: "idle" }), 60_000)
