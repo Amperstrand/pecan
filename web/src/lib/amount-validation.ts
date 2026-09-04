@@ -9,6 +9,9 @@ export const MIN_AMOUNT = 1
 export const MAX_AMOUNT = 1000
 /** On-chain deposits must cover dust + fees (mint's MIN_ONCHAIN_ORE). */
 export const MIN_ONCHAIN_DEPOSIT = 50
+/** Sats (signut): whole-unit amounts, the mint caps at 100k sat. */
+export const MIN_SAT = 1
+export const MAX_SAT = 100000
 
 /**
  * Validate a deposit amount for a rail. Returns a user-facing error
@@ -18,10 +21,20 @@ export function validateDepositAmount(
   raw: string,
   rail: DepositRail,
   symbol: string,
+  isSat = false,
 ): string | null {
   const amount = Number.parseFloat(raw)
   if (!Number.isFinite(amount) || amount <= 0) {
     return `Enter an amount in ${symbol}.`
+  }
+  if (isSat) {
+    if (!Number.isInteger(amount)) {
+      return "Sats amounts are whole numbers."
+    }
+    if (amount > MAX_SAT) {
+      return `Amounts above ${MAX_SAT.toLocaleString()} ${symbol} are not supported (mint limit).`
+    }
+    return null
   }
   const min = rail === "btc" ? MIN_ONCHAIN_DEPOSIT : MIN_AMOUNT
   if (amount < min) {
@@ -43,10 +56,23 @@ export function validateWithdrawAmount(
   raw: string,
   symbol: string,
   balanceCents: number | null,
+  isSat = false,
 ): string | null {
   const amount = Number.parseFloat(raw)
   if (!Number.isFinite(amount) || amount <= 0) {
     return `Enter an amount in ${symbol}.`
+  }
+  if (isSat) {
+    if (!Number.isInteger(amount)) {
+      return "Sats amounts are whole numbers."
+    }
+    if (amount > MAX_SAT) {
+      return `Amounts above ${MAX_SAT.toLocaleString()} ${symbol} are not supported (mint limit).`
+    }
+    if (balanceCents !== null && amount > balanceCents) {
+      return `Amount exceeds your balance (${balanceCents.toLocaleString()} ${symbol}).`
+    }
+    return null
   }
   if (amount < MIN_AMOUNT) {
     return `Withdrawals must be at least ${MIN_AMOUNT} ${symbol}.`

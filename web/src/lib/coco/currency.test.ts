@@ -27,18 +27,29 @@ describe("currency registry", () => {
   beforeEach(() => stubWindow())
   afterEach(() => vi.unstubAllGlobals())
 
-  it("every currency maps to the {currency}/v1 and {currency}-console convention", () => {
+  it("fiat pairs map to the {currency}/v1 and {currency}-console convention", () => {
     expect(mintUrl("eur")).toBe("https://giftcard.cashu.exchange/eur")
     expect(mintUrl("usd")).toBe("https://giftcard.cashu.exchange/usd")
     expect(consoleUrl("eur")).toBe("https://giftcard.cashu.exchange/eur-console")
     expect(consoleUrl("usd")).toBe("https://giftcard.cashu.exchange/usd-console")
     for (const [code, cfg] of Object.entries(CURRENCIES)) {
+      if (!cfg.hasRails) continue
       expect(mintUrl(code as "eur")).toBe(
         `https://giftcard.cashu.exchange${cfg.mintPath}`,
       )
       expect(cfg.mintPath).toMatch(/^\/[a-z]+$/)
       expect(cfg.consolePath).toBe(`${cfg.mintPath}-console`)
     }
+  })
+
+  it("sat is the external single mint: different origin, no console, whole-unit scale", () => {
+    // The user's explicit design: single-mint sats on signut, no multimint.
+    expect(mintUrl("sat")).toBe("https://signut.cashu.exchange")
+    expect(consoleUrl("sat")).toBeUndefined()
+    expect(CURRENCIES.sat.scale).toBe(1)
+    expect(CURRENCIES.sat.step).toBe("1")
+    expect(CURRENCIES.sat.hasRails).toBe(false)
+    expect(currencyOfMint("https://signut.cashu.exchange")).toBe("sat")
   })
 
   it("defaults to eur and round-trips the persisted choice", () => {
