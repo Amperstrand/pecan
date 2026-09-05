@@ -171,6 +171,9 @@ the physical box.
    in method settings; unlocked-quote error code mapping. The
    device-sim remains available (`scripts/ev-device-sim.sh`) for
    hardwareless runs, but the physical stick is back and LIVE.
+   Device-side future work (field config, web installer on our fork of
+   lnbits/hardware-installer, an LNbits LNURLdevice mode) is planned in
+   evmap's `firmware/ESP32-ROADMAP.md`.
 2. **Unresponsive-page suite flake (undiagnosed).** Mid-chain full-suite
    failures where Playwright's page-snapshot capture times out — the
    page's own JS keeps running (heartbeat-verified), so it is
