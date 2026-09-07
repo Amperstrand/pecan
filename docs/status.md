@@ -17,7 +17,8 @@ ranked backlog. Keep it current when the picture changes.
 | SAT mint | external: signut.cashu.exchange (Nutshell-CF) | bolt11+sat only, NUT-17 off (ws 410 → blackhole factory), CORS open; no console, no pecan rails |
 | ev-charge daemon | inr2 systemd `ev-charge.service` | watch mode: settle, expiry guards, at-most-once trigger, refund ledger |
 | atom-gateway | inr2 systemd `atom-bridge.service` | public session endpoints (ref = capability), remote stop, delivered metering |
-| Charger firmware | **charger-stick-slint (Rust+Slint) LIVE 2026-09-05** — evmap `af24ed0` | M5StickC Plus; MQTT byte-parity; see FLASHING.md (USB-only at 92-95% flash: no OTA slots on 4MB; ESPHome sibling keeps wifi-OTA) |
+| Charger firmware | **charger-stick-slint (Rust+Slint)** — M5Stick Plus LIVE 2026-09-05 (evmap `af24ed0`); `tdisplay-s3` profile (charger C, LILYGO T-Display S3) compile-verified, awaiting board bring-up | MQTT byte-parity family; see FLASHING.md (USB-only at 92-95% flash: no OTA slots on 4MB; ESPHome sibling keeps wifi-OTA) |
+| Charger C rail | **LIVE** 2026-09-07 (pecan `720d8a8`): wallet option + e2e green — atomC needs zero backend wiring (slug passthrough) | T-Display S3 backend; sim serves atomA/B/C while hardware is away; display+backlight-blink is the indicator (no relay/buzzer on that board) |
 | Deploy lane | `scripts/deploy.sh` → build on ai-legion-small → inr2 | builder disk pruned 2026-09-02 (was 99% full) |
 
 ## Verified working (evidence in the repo)
