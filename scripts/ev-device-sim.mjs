@@ -26,7 +26,7 @@
 // do NOT leave this running once the physical box is back.
 import mqtt from "mqtt"
 
-const DEVICES = (process.env.DEVICES ?? "atomA,atomB")
+const DEVICES = (process.env.DEVICES ?? "atomA,atomB,atomC")
   .split(",")
   .map((d) => d.trim())
   .filter(Boolean)

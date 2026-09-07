@@ -157,6 +157,13 @@ const WITHDRAW_OPTIONS = [
     fixed: "ev:atomB",
     hint: "Demo EV charger — 1 € = 1 kW·s of charging, fires on send.",
   },
+  {
+    id: "atomC",
+    label: "Charger C",
+    placeholder: null,
+    fixed: "ev:atomC",
+    hint: "T-Display S3 charger — 1 € = 1 kW·s; the big screen IS the charging indicator.",
+  },
 ] as const
 
 type WithdrawRail = (typeof WITHDRAW_OPTIONS)[number]["id"]

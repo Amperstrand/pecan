@@ -72,10 +72,16 @@ async function pressDeviceButton(delivered: number) {
 }
 
 function deviceOnline(): boolean {
-  // The charger e2es need the physical Atom (or its MQTT presence): the
-  // retained charger/<device>/status LWT flips to offline when the box
-  // is unplugged, and every charger test would otherwise degrade into
-  // the metering-loss path.
+  // The charger e2es need the fleet's box (or its MQTT presence): the
+  // retained box-status LWT flips to offline when a box is unplugged,
+  // and every charger test would otherwise degrade into the
+  // metering-loss path. The M5Stick (A/B) publishes charger/atom/status;
+  // the T-Display S3 (C) its own charger/atomc/status; the sim publishes
+  // the shared atom topic for whichever devices it serves.
+  return deviceOnlineOn("charger/atom/status") || deviceOnlineOn("charger/atomc/status")
+}
+
+function deviceOnlineOn(topic: string): boolean {
   if (!MQTT.url) return false
   try {
     const out = execSync(
@@ -86,7 +92,7 @@ c.username_pw_set("${MQTT.user}", "${MQTT.pass}")
 c.tls_set()
 got = []
 c.on_message = lambda cl,u,msg: got.append(bytes(msg.payload))
-c.on_connect = lambda cl,u,f,rc,p=None: cl.subscribe("charger/atom/status")
+c.on_connect = lambda cl,u,f,rc,p=None: cl.subscribe("${topic}")
 host = "${MQTT.url}".replace("mqtts://", "").split(":")[0].split("/")[0]
 c.connect(host, 8883, 15)
 c.loop_start()
@@ -123,6 +129,53 @@ async function bootAndFund(page: Page, consoleBase: string, minBalance: number) 
       .toBeGreaterThanOrEqual(minBalance)
   }
 }
+
+test("ev rail: charger C (T-Display S3) — window runs to done, refund exact", async ({ page }) => {
+  test.setTimeout(300_000)
+  const consoleBase = "/eur-console"
+  const password = process.env.PECAN_ADMIN_PASSWORD
+  test.skip(!password, "admin password unavailable")
+  test.skip(!deviceOnline(), "charger offline (no box online)")
+
+  // Charger C is the display-only T-Display S3: no relay, no button
+  // metering — the window is the source of truth (full budget spent,
+  // TIMEOUT-path receipt naming atomC). Backend chain (processor slug
+  // passthrough → daemon → gateway wildcard) must treat it exactly
+  // like A/B with zero per-device wiring.
+  const budget = 3
+  await bootAndFund(page, consoleBase, budget + 1)
+
+  const before = await readBalance(page)
+  await page.getByRole("tab", { name: "Charger C", exact: true }).click()
+  await page.getByPlaceholder("1.00").fill(String(budget))
+  await page.getByRole("button", { name: "Start charging" }).click()
+
+  await expect(page.getByText("⚡ Charging at Charger C")).toBeVisible({
+    timeout: 60_000,
+  })
+  await expect
+    .poll(
+      async () =>
+        Number(await page.getByRole("progressbar").getAttribute("aria-valuenow")),
+      { timeout: 120_000 },
+    )
+    .toBeGreaterThanOrEqual(1)
+
+  // Let the full window elapse: the sim (and later the T-Display)
+  // confirms `done`, so the receipt carries no TIMEOUT suffix — clean
+  // completion is the happy path; TIMEOUT only when confirmation never
+  // lands.
+  await expect(page.getByText(/Charged \d+ s at Charger C/)).toBeVisible({
+    timeout: 180_000,
+  })
+  const receipt = await page.locator("p.break-all.font-mono").textContent()
+  expect(receipt).toMatch(/^EV-atomC-\d+s-[0-9A-F]{8}(-[A-Z]+)?$/)
+  const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
+
+  await expect
+    .poll(async () => readBalance(page), { timeout: 200_000 })
+    .toBeCloseTo(before - delivered, 2)
+})
 
 test("ev rail: charger B serves the same contract (atomB window)", async ({ page }) => {
   test.setTimeout(300_000)
