@@ -140,14 +140,17 @@ it. Pre-flight, in order:
 
 1. **Deployment health**: `scripts/api-smoke.sh` — keys/info, one-way
    melt refusal, consoles, reconcile. ~30 s, read-only.
-2. **Charger fleet**: `scripts/ev-device-sim.sh status`. While the
-   physical Atom is away, `start` the MQTT simulator (it impersonates
-   the firmware on the shared HiveMQ topics: retained box status,
-   start-acked, countdown-finished; the gateway meters remote stops
-   itself, and the G39 button path is driven by the e2e's own
-   button-sim). **When the real box returns: `stop` the sim FIRST** —
-   it refuses to start against an already-online fleet, but nothing
-   stops it from running alongside, so the stop is a human duty. The
+2. **Charger fleet**: `systemctl status ev-device-sim` on inr2 (it is
+   a systemd unit since 2026-09-08: `Restart=on-success` refreshes the
+   12 h TTL after host reboots, while the sim's own refusal guard —
+   exit 3 when the fleet is already online — keeps it down while the
+   real Atom is back). It impersonates the firmware on the shared
+   HiveMQ topics: retained box status, start-acked,
+   countdown-finished; the gateway meters remote stops itself, and the
+   G39 button path is driven by the e2e's own button-sim. **When the
+   real box returns: `systemctl stop ev-device-sim` FIRST** — the
+   refusal guard only blocks STARTS, nothing stops it from running
+   alongside, so the stop is a human duty. The
    sim self-exits after 12 h (retained offline) as a backstop.
 3. **Onchain payer liquidity**: `scripts/payer-status.sh` on inr2 (or
    read /opt/pecan-tools/payer-status.json, 10-min cron). Each full
