@@ -214,8 +214,13 @@ adding tests.
   lost swap responses are recoverable via restore. Full story:
   docs/lightning-mint.md § Melt saga.
 
-- **e2e onchain payer liquidity.** Every run burns ~7.4k sat (€50 is the
-  mint's onchain minimum). The helper fails over across
+- **e2e onchain payer liquidity.** Runs cost ~700 sat (€3 quotes; the
+  €50 policy minimum was removed 2026-09-09 — only the chain dust
+  floor remains, enforced server-side). Onchain detection watches OUR
+  OWN bitcoind (watch-only wallet per-quote descriptors via the inr2
+  forwarder at :38332, creds `pecan-watch` in /opt/pecan/.env on inr2
+  and /tmp/pecan-bitcoind-creds.txt) — never mempool.space (it banned
+  inr2's IP for 26-address/5s polling, 2026-09-09). The helper fails over across
   cln-hub/vls/nostr-signet. CLN reserves a wallet's inputs for ~144 blocks
   after a FAILED withdraw construction — a killed/stalled RPC bricks that
   node's wallet for a day, so the helper uses a 300s timeout and reports

@@ -39,6 +39,11 @@ services:
       # >= 1 (realistically >= 6).
       CDK_BRANCH_PROCESSOR_ONCHAIN: "true"
       CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "0"
+      # Own-node onchain watching (watch-only wallet on bitcoind):
+      # secrets come from the server-side .env next to this compose.
+      CDK_BRANCH_PROCESSOR_BITCOIND_RPC: "${PECAN_BITCOIND_RPC:-http://46.224.104.12:38332}"
+      CDK_BRANCH_PROCESSOR_BITCOIND_USER: "${PECAN_BITCOIND_USER:-pecan-watch}"
+      CDK_BRANCH_PROCESSOR_BITCOIND_PASS: "${PECAN_BITCOIND_PASS:?set in /opt/pecan/.env}"
       # Payout rails (see docs/payout-modules.md): melt destinations
       # written as `rail:destination` route to that rail's adapter;
       # envelopes naming anything else are refused at quote time.

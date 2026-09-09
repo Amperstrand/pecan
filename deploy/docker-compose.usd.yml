@@ -1,0 +1,39 @@
+# USD twin of /opt/pecan/docker-compose.prod.yml — same image, own ports,
+# dirs, and mint. Caddy path-routes: /usd/v1/* -> mintd (8090),
+# /usd-console/* -> this processor (9092). EUR stays at the root paths.
+services:
+  pecan:
+    image: pecan:nok
+    command: ["cdk-branch-processor"]
+    network_mode: host
+    environment:
+      RUST_LOG: "info,cdk_payment_processor=info"
+      CDK_BRANCH_PROCESSOR_WORK_DIR: /var/lib/cdk-branch-processor
+      CDK_BRANCH_PROCESSOR_CONFIG_DIR: /var/lib/pecan/config
+      CDK_BRANCH_PROCESSOR_GRPC_ADDR: "127.0.0.1"
+      CDK_BRANCH_PROCESSOR_GRPC_PORT: "50055"
+      CDK_BRANCH_PROCESSOR_HTTP_ADDR: "127.0.0.1"
+      CDK_BRANCH_PROCESSOR_HTTP_PORT: "9093"
+      CDK_BRANCH_PROCESSOR_INITIAL_UNIT: "usd"
+      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim,sepa,sepa-instant,swish,mobilepay,ideal,bizum"
+      CDK_BRANCH_PROCESSOR_PAYOUT_AUTOSIM: "true"
+      CDK_BRANCH_PROCESSOR_INITIAL_MINT_URL: "http://127.0.0.1:8097"
+      CDK_BRANCH_PROCESSOR_INITIAL_ADVERTISED_GRPC: "127.0.0.1:50055"
+      CDK_BRANCH_PROCESSOR_LN: "true"
+      CDK_BRANCH_PROCESSOR_CLN_SOCKET: "/run/pecan-cln/signet/lightning-rpc"
+      CDK_BRANCH_PROCESSOR_LN_MARKUP_PERCENT: "10"
+      CDK_BRANCH_PROCESSOR_ONCHAIN: "true"
+      CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS: "0"
+      CDK_BRANCH_PROCESSOR_BITCOIND_RPC: "${PECAN_BITCOIND_RPC:-http://46.224.104.12:38332}"
+      CDK_BRANCH_PROCESSOR_BITCOIND_USER: "${PECAN_BITCOIND_USER:-pecan-watch}"
+      CDK_BRANCH_PROCESSOR_BITCOIND_PASS: "${PECAN_BITCOIND_PASS:?set in /opt/pecan-usd/.env}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - /opt/pecan-usd-data:/var/lib/cdk-branch-processor
+      - /opt/pecan-usd-config:/var/lib/pecan/config
+      - /opt/inr2-swapnet/cln-swap-data:/run/pecan-cln
+    restart: unless-stopped

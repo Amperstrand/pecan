@@ -29,8 +29,10 @@ ssh "$BUILDER" "docker rmi pecan:eur 2>/dev/null; rm -rf $REMOTE_DIR"
 echo "==> load + deploy on server"
 ssh "$SERVER" "gunzip -f /tmp/pecan-eur.tar.gz && docker load -i /tmp/pecan-eur.tar && rm -f /tmp/pecan-eur.tar* && docker tag pecan:eur pecan:nok"
 
-echo "==> rsync compose file"
+echo "==> rsync compose files (both pairs are repo-tracked — a server-only
+USD copy once drifted and crash-looped the pair)"
 rsync -az deploy/docker-compose.prod.yml "$SERVER:$COMPOSE_DIR/docker-compose.prod.yml"
+rsync -az deploy/docker-compose.usd.yml "$SERVER:/opt/pecan-usd/docker-compose.yml"
 
 echo "==> recreate containers (no build on server)"
 ssh "$SERVER" "cd $COMPOSE_DIR && docker compose -f docker-compose.prod.yml up -d --force-recreate 2>&1 | tail -1"
@@ -38,7 +40,7 @@ ssh "$SERVER" "cd $COMPOSE_DIR && docker compose -f docker-compose.prod.yml up -
 # The USD twin runs the same pecan:nok image out of its own compose dir —
 # without this step it silently keeps serving the previous bundle (bit us
 # during the soak hardening: EUR fixed, USD stale).
-ssh "$SERVER" "cd /opt/pecan-usd && docker compose up -d 2>&1 | tail -1"
+ssh "$SERVER" "cd /opt/pecan-usd && docker compose up -d --force-recreate 2>&1 | tail -1"
 
 echo "==> restart mints (boot-order dependency)"
 ssh "$SERVER" "docker restart giftcard-mint-mintd-1 giftcard-mint-usd-mintd-1 >/dev/null 2>&1 && echo 'mints restarted' || echo 'WARN: mint restart failed'"
