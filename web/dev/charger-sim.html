@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Charger sim — firmware display mirror</title>
+<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
+<style>
+  body { font-family: ui-monospace, Menlo, monospace; background: #0b0e14; color: #d8dee9;
+         margin: 0; display: flex; gap: 16px; padding: 16px; }
+  canvas { background: #000; border: 2px solid #232a35; border-radius: 6px; image-rendering: pixelated; }
+  #side { flex: 1; display: flex; flex-direction: column; gap: 10px; max-width: 480px; }
+  .panel { background: #151a23; border: 1px solid #232a35; border-radius: 8px; padding: 10px; }
+  .led { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; background: #3a4252; }
+  .dot.on { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .dot.any.on { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+  input { background: #0b0e14; color: #d8dee9; border: 1px solid #232a35; border-radius: 4px;
+          padding: 4px 6px; font-family: inherit; width: 100%; box-sizing: border-box; }
+  button { background: #38bdf8; color: #0b0e14; border: 0; border-radius: 4px; padding: 4px 12px;
+           font-family: inherit; font-weight: 600; cursor: pointer; }
+  #log { height: 200px; overflow-y: auto; font-size: 12px; }
+  #log div { padding: 1px 0; border-bottom: 1px solid #1c2330; }
+  #log .rx { color: #38bdf8; } #log .tx { color: #22c55e; } #log .sys { color: #8b93a7; }
+  .ok { color: #22c55e; } .bad { color: #ef4444; }
+  h1 { font-size: 14px; margin: 0; color: #8b93a7; font-weight: normal; }
+</style>
+</head>
+<body>
+  <canvas id="canvas" width="170" height="320" style="width:340px;height:640px"></canvas>
+  <div id="side">
+    <div class="panel">
+      <h1>charger-sim — the firmware's own view (wasm) · <span id="board"></span> · <span id="buildid"></span></h1>
+    </div>
+    <div class="panel" id="outputs"></div>
+    <div class="panel">
+      <div style="margin-bottom:6px">broker <span id="mqstat" class="bad">disconnected</span></div>
+      <input id="wsurl" placeholder="wss://host:8884/mqtt">
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <input id="user" placeholder="user" style="flex:1">
+        <input id="pass" placeholder="pass" style="flex:1" type="password">
+        <button id="connect">connect</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div style="display:flex;gap:6px;margin-bottom:6px">
+        <input id="ptopic" value="charger/atomC/start" style="flex:1">
+        <button id="inject">inject</button>
+      </div>
+      <div style="display:flex;gap:6px">
+        <input id="ppayload" value='{"end":0}' style="flex:1">
+        <button id="pub">publish</button>
+      </div>
+    </div>
+    <div class="panel"><div id="log"></div></div>
+  </div>
+
+<script type="module">
+const board = new URLSearchParams(location.search).get("board") ?? "s3";
+const pip = new URLSearchParams(location.search).has("pip");
+if (pip) {
+  document.getElementById("side").style.display = "none";
+  const c = document.getElementById("canvas");
+  c.style.width = "190px";
+  c.style.height = "358px";
+}
+const mod = await import(`../vendor/charger-sim-${board}/charger_sim_wasm.js`);
+const init = mod.default;
+const { on_mqtt, tick, take_outbox, outputs_json, board_json } = mod;
+
+const log = (cls, msg) => {
+  const el = document.createElement("div");
+  el.className = cls;
+  el.textContent = `${new Date().toISOString().slice(11,23)} ${msg}`;
+  document.getElementById("log").prepend(el);
+};
+
+try {
+  await init();
+} catch (e) {
+  // slint's wasm uses exceptions for control flow; one escapes init
+  // after start() already ran its effects (the canvas renders). The
+  // module is alive — keep going.
+  console.warn("sim: init threw after start; continuing", e);
+  log("sys", "init threw after start (slint control-flow); continuing");
+}
+try {
+  console.log("sim: wasm init complete");
+  log("sys", `board ${board_json()}`);
+  fetch(`../vendor/charger-sim-${board}/build-id.txt`).then(r => r.text()).then(
+    t => document.getElementById("buildid").textContent = `build ${t.trim().slice(0,8)}`);
+  document.getElementById("board").textContent = JSON.parse(board_json()).chargers.join(", ");
+} catch (e) {
+  console.error("sim: post-init failed", e);
+  log("sys", "post-init failed: " + e);
+}
+
+let client = null;
+function connect(wsurl, user, pass) {
+  client = mqtt.connect(wsurl, { username: user, password: pass, reconnectPeriod: 2000 });
+  client.on("connect", () => {
+    document.getElementById("mqstat").className = "ok";
+    document.getElementById("mqstat").textContent = "connected";
+    client.subscribe("charger/#");
+    log("sys", "subscribed charger/#");
+  });
+  client.on("error", e => log("sys", "mqtt error: " + e.message));
+  client.on("close", () => {
+    document.getElementById("mqstat").className = "bad";
+    document.getElementById("mqstat").textContent = "disconnected";
+  });
+  client.on("message", (topic, payload) => {
+    const p = payload.toString();
+    if (on_mqtt(topic, p)) log("rx", `${topic} ← ${p}`);
+  });
+}
+document.getElementById("connect").onclick = () =>
+  connect(document.getElementById("wsurl").value,
+           document.getElementById("user").value,
+           document.getElementById("pass").value);
+// programmatic hooks for the e2e (same-origin page.evaluate)
+window.__connect = connect;
+
+// programmatic control for embedding (e2e overlay, scripts)
+window.addEventListener("message", ev => {
+  const m = ev.data;
+  if (m.type === "creds") connect(m.url, m.user, m.pass);
+  if (m.type === "mqtt" && on_mqtt(m.topic, m.payload)) log("rx", `inject ${m.topic} ← ${m.payload}`);
+});
+
+document.getElementById("inject").onclick = () => {
+  const t = document.getElementById("ptopic").value, p = document.getElementById("ppayload").value;
+  if (on_mqtt(t, p)) log("rx", `inject ${t} ← ${p}`);
+};
+document.getElementById("pub").onclick = () => {
+  if (!client) return log("sys", "not connected");
+  client.publish(document.getElementById("ptopic").value, document.getElementById("ppayload").value);
+  log("tx", "published " + document.getElementById("ptopic").value);
+};
+
+const ledEls = [];
+function renderOutputs() {
+  const o = JSON.parse(outputs_json());
+  document.getElementById("outputs").innerHTML = o.chargers.map((id, i) =>
+    `<span class="led"><span class="dot" id="led${i}"></span>${id}</span>`).join("") +
+    `<span class="led"><span class="dot any" id="ledany"></span>any-output</span>`;
+}
+renderOutputs();
+
+setInterval(() => {
+  tick();
+  for (const m of take_outbox()) log("tx", m);
+  const o = JSON.parse(outputs_json());
+  const dots = o.chargers.map((_, i) => document.getElementById("led" + i));
+  dots.forEach((el, i) => el && el.classList.toggle("on", o.active[i]));
+  document.getElementById("ledany")?.classList.toggle("on", o.any);
+}, 100);
+</script>
+</body>
+</html>
