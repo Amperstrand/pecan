@@ -993,7 +993,7 @@ export function WalletPage() {
               )}
               {depositMethod === "btc" && cfg.hasRails && (
                 <p className="text-xs text-muted-foreground">
-                  Minimum 50 {symbol} — on-chain deposits pay for dust and chain fees.
+                  Amounts under the chain dust floor are rejected by the mint.
                 </p>
               )}
               <div className="grid gap-1.5">

@@ -7,8 +7,12 @@ export type DepositRail = "branch" | "ln" | "btc"
 
 export const MIN_AMOUNT = 1
 export const MAX_AMOUNT = 1000
-/** On-chain deposits must cover dust + fees (mint's MIN_ONCHAIN_ORE). */
-export const MIN_ONCHAIN_DEPOSIT = 50
+/**
+ * On-chain deposits: no client-side amount gate. The mint rejects only
+ * amounts whose sat conversion falls under the chain dust floor (its
+ * message surfaces in the form) — the old €50 policy gate is gone.
+ */
+export const MIN_ONCHAIN_DEPOSIT = MIN_AMOUNT
 /** Sats (signut): whole-unit amounts, the mint caps at 100k sat. */
 export const MIN_SAT = 1
 export const MAX_SAT = 100000

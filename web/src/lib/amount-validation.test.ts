@@ -25,13 +25,12 @@ describe("validateDepositAmount", () => {
     expect(validateDepositAmount("1.00", "ln", sym)).toBeNull()
   })
 
-  it("enforces the on-chain minimum only on the btc rail", () => {
-    expect(validateDepositAmount("49.99", "btc", sym)).toContain(
-      `at least ${MIN_ONCHAIN_DEPOSIT}`,
-    )
-    expect(validateDepositAmount("50", "btc", sym)).toBeNull()
-    // same amount is fine on the other rails
-    expect(validateDepositAmount("49.99", "ln", sym)).toBeNull()
+  it("treats on-chain like any rail below the mint's dust floor (no policy gate)", () => {
+    // small amounts pass the client; the MINT rejects under-dust
+    // conversions with its own message
+    expect(validateDepositAmount("3", "btc", sym)).toBeNull()
+    expect(validateDepositAmount("1", "btc", sym)).toBeNull()
+    expect(validateDepositAmount("1", "ln", sym)).toBeNull()
   })
 
   it("rejects amounts above the mint maximum (the 1231234 regression)", () => {
