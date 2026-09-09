@@ -1,6 +1,7 @@
 import { execSync, spawn, type ChildProcess } from "node:child_process"
 import { test, expect, type Page } from "@playwright/test"
 import { apiLogin, matchAndSettle, readBalance, readTellerCode } from "./helpers/wallet"
+import { bootAndFund, chargeCOnly } from "./helpers/ev-rail"
 
 // Firmware-button simulation: publishes the exact MQTT message the G39
 // press sends (charger/<device>/aborted {"delivered": k}) the moment the
@@ -110,71 +111,14 @@ print(got[0].decode() if got else "unknown")
   }
 }
 
-async function bootAndFund(page: Page, consoleBase: string, minBalance: number) {
-  await page.addInitScript(() => {
-    window.localStorage.setItem("pecan-debug", "1")
-    window.localStorage.setItem("pecan-currency", "eur")
-  })
-  await page.goto(`${consoleBase}/wallet`)
-  await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
-  if ((await readBalance(page)) < minBalance) {
-    await page.getByPlaceholder("5.00").fill("15")
-    await page.getByRole("button", { name: "Create deposit quote" }).click()
-    const depCode = await readTellerCode(page)
-    const password = process.env.PECAN_ADMIN_PASSWORD!
-    await apiLogin(page, consoleBase, password)
-    await matchAndSettle(page, depCode, "ev rail funding", consoleBase)
-    await expect
-      .poll(async () => readBalance(page), { timeout: 45_000 })
-      .toBeGreaterThanOrEqual(minBalance)
-  }
-}
-
 test("ev rail: charger C (T-Display S3) — window runs to done, refund exact", async ({ page }) => {
   test.setTimeout(300_000)
-  const consoleBase = "/eur-console"
   const password = process.env.PECAN_ADMIN_PASSWORD
   test.skip(!password, "admin password unavailable")
   test.skip(!deviceOnline(), "charger offline (no box online)")
 
-  // Charger C is the display-only T-Display S3: no relay, no button
-  // metering — the window is the source of truth (full budget spent,
-  // TIMEOUT-path receipt naming atomC). Backend chain (processor slug
-  // passthrough → daemon → gateway wildcard) must treat it exactly
-  // like A/B with zero per-device wiring.
-  const budget = 3
-  await bootAndFund(page, consoleBase, budget + 1)
-
-  const before = await readBalance(page)
-  await page.getByRole("tab", { name: "Charger C", exact: true }).click()
-  await page.getByPlaceholder("1.00").fill(String(budget))
-  await page.getByRole("button", { name: "Start charging" }).click()
-
-  await expect(page.getByText("⚡ Charging at Charger C")).toBeVisible({
-    timeout: 60_000,
-  })
-  await expect
-    .poll(
-      async () =>
-        Number(await page.getByRole("progressbar").getAttribute("aria-valuenow")),
-      { timeout: 120_000 },
-    )
-    .toBeGreaterThanOrEqual(1)
-
-  // Let the full window elapse: the sim (and later the T-Display)
-  // confirms `done`, so the receipt carries no TIMEOUT suffix — clean
-  // completion is the happy path; TIMEOUT only when confirmation never
-  // lands.
-  await expect(page.getByText(/Charged \d+ s at Charger C/)).toBeVisible({
-    timeout: 180_000,
-  })
-  const receipt = await page.locator("p.break-all.font-mono").textContent()
-  expect(receipt).toMatch(/^EV-atomC-\d+s-[0-9A-F]{8}(-[A-Z]+)?$/)
-  const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
-
-  await expect
-    .poll(async () => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(before - delivered, 2)
+  await bootAndFund(page, "/eur-console", 4)
+  await chargeCOnly(page, 3)
 })
 
 test("ev rail: charger B serves the same contract (atomB window)", async ({ page }) => {

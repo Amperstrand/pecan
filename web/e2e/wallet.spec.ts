@@ -48,7 +48,7 @@ function registerEurExtras(ctx: SuiteContext): void {
     const before = await readBalance(page)
 
     await page.getByRole("button", { name: "On-chain", exact: true }).click()
-    await page.getByPlaceholder("5.00").fill("50")
+    await page.getByPlaceholder("5.00").fill("3")
     await page.getByRole("button", { name: "Create on-chain address" }).click()
 
     const addressBox = page.locator('p.font-mono:has-text("tb1")')
@@ -60,7 +60,7 @@ function registerEurExtras(ctx: SuiteContext): void {
       .getByText(/Send \d+ sat \(signet\)/)
       .textContent()
     const expectedSat = Number(sendCaption?.match(/\d+/)?.[0] ?? 0)
-    expect(expectedSat).toBeGreaterThan(1000)
+    expect(expectedSat).toBeGreaterThan(300) // dust floor
 
     const rail = await page.request
       .get(`${ctx.consoleBase}/api/onchain-status/${address}`)
@@ -80,7 +80,7 @@ function registerEurExtras(ctx: SuiteContext): void {
 
     await expect
       .poll(async () => readBalance(page), { timeout: settleTimeout })
-      .toBeCloseTo(before + 50, 2)
+      .toBeCloseTo(before + 3, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
 
@@ -204,7 +204,7 @@ function registerEurExtras(ctx: SuiteContext): void {
     await expect(cardA).toHaveCount(0)
 
     // Invoice B (€1) — a DIFFERENT amount, immediately after the cancel.
-    await page.getByPlaceholder("5.00").fill("1")
+    await page.getByPlaceholder("5.00").fill("3")
     await page.getByRole("button", { name: "Create lightning invoice" }).click()
     const cardB = page.locator('[data-testid="deposit-card"]').filter({
       hasText: "Pay this lightning invoice",
@@ -243,7 +243,7 @@ function registerEurExtras(ctx: SuiteContext): void {
     const page = ctx.page()
 
     await page.getByRole("button", { name: "Lightning", exact: true }).click()
-    await page.getByPlaceholder("5.00").fill("1")
+    await page.getByPlaceholder("5.00").fill("3")
     await page.getByRole("button", { name: "Create lightning invoice" }).click()
     const card = page.locator('[data-testid="deposit-card"]').filter({
       hasText: "Pay this lightning invoice",
@@ -537,7 +537,7 @@ function registerEurExtras(ctx: SuiteContext): void {
 
     // EUR lightning invoice stays pending across the whole USD detour.
     await page.getByRole("button", { name: "Lightning", exact: true }).click()
-    await page.getByPlaceholder("5.00").fill("1")
+    await page.getByPlaceholder("5.00").fill("3")
     await page.getByRole("button", { name: "Create lightning invoice" }).click()
     const lnCard = page.locator('[data-testid="deposit-card"]').filter({
       hasText: "Pay this lightning invoice",

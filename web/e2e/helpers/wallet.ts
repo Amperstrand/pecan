@@ -467,13 +467,18 @@ export async function fundLockReleaseEntry(
 
 
 // ---------------------------------------------------------------------------
-// Console/page error gate — the wallet itself must run clean
-// ---------------------------------------------------------------------------
-
+// Console/page error gate — the wallet itself must run clean. Only
+// OUR origin counts: third-party payer services (signut et al) flap
+// transiently on their edges, and their 500s say nothing about the
+// wallet. pageerror (uncaught JS) always counts.
 export function trackWalletErrors(page: Page): string[] {
   const errors: string[] = []
+  const ownHost = new URL(page.url()).hostname
   page.on("console", (msg) => {
-    if (msg.type() === "error") errors.push(`console: ${msg.text()}`)
+    if (msg.type() !== "error") return
+    const loc = msg.location()?.url ?? ""
+    if (loc && !loc.includes(ownHost)) return
+    errors.push(`console: ${msg.text()}${loc ? ` (${loc.slice(0, 90)})` : ""}`)
   })
   page.on("pageerror", (err) => errors.push(`pageerror: ${String(err)}`))
   return errors
