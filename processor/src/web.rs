@@ -113,6 +113,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/settings/attachment", post(api_set_attachment))
         .route("/api/mint/self-test", post(api_self_test))
         .route("/api/onchain-status/{address}", get(api_onchain_status))
+        .route("/api/onchain/chain-status", get(api_onchain_chain_status))
         .route("/api/users", post(api_users_create))
         .route("/api/users/{username}", delete(api_users_delete))
         .route(
@@ -808,6 +809,45 @@ struct MatchQuoteForm {
 /// or the full quote id from a scanner) to the one open quote it identifies.
 /// The full ticket is revealed only here — the open-quote list stays redacted
 /// so the code must come from the customer.
+/// Operator-facing chain-backend health: tip height, tip-block age,
+/// last-successful-poll age, reachability class. This is the surface
+/// that would have made 2026-09-09's silent esplora ban visible.
+async fn api_onchain_chain_status(
+    State(state): State<WebState>,
+) -> Response {
+    let Some(rail) = state.backend.onchain() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "onchain rail disabled");
+    };
+    let Some(h) = rail.chain_health_snapshot() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "chain health not yet sampled");
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now_ms = now_unix as u64 * 1000;
+    let tip_age = now_unix.max(0) as u64 - h.tip_time.min(now_unix.max(0) as u64);
+    let last_ok_age_ms = now_ms.saturating_sub(h.last_ok_ms);
+    let body = serde_json::json!({
+        "status": h.classify(now_unix, now_ms),
+        "chain": h.chain,
+        "tip_height": h.tip_height,
+        "headers_height": h.headers_height,
+        "tip_age_secs": tip_age,
+        "chain_quiet": h.quiet_chain(now_unix),
+        "last_ok_ms": h.last_ok_ms,
+        "last_ok_age_ms": last_ok_age_ms,
+        "pruned": h.pruned,
+        "watching": h.watching,
+        "chain_quiet_after_secs": crate::onchain::CHAIN_QUIET_AFTER_SECS,
+    });
+    (
+        [("content-type", "application/json")],
+        serde_json::to_string(&body).unwrap_or_default(),
+    )
+        .into_response()
+}
+
 /// Onchain deposit status for the wallet's display, answered from the
 /// OWNED bitcoind's watch wallet (same response shape the wallet has
 /// always consumed — tip + esplora-style utxo list). Same-origin by

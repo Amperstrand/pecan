@@ -56,6 +56,49 @@ struct AddressRecord {
     state: AddressState,
 }
 
+/// How the outside world should read chain-backend health. DOWN means
+/// the RPC stopped answering (the silent esplora-ban failure mode of
+/// 2026-09-09). STALE means OUR view lags the headers we already know
+/// (blocks < headers — a node stalled mid-download). A quiet chain
+/// (old tip but blocks == headers) is NOT an error: signet has no
+/// block-cadence guarantee, it surfaces as `chain_quiet_after_secs`
+/// for the dashboard's amber note instead.
+pub const RPC_DOWN_AFTER_MS: u64 = 60_000;
+pub const CHAIN_QUIET_AFTER_SECS: u64 = 2 * 60 * 60;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChainHealth {
+    pub chain: String,
+    pub tip_height: u64,
+    pub headers_height: u64,
+    /// unix secs of the tip block
+    pub tip_time: u64,
+    /// unix millis of the last RPC round-trip that succeeded
+    pub last_ok_ms: u64,
+    pub pruned: bool,
+    pub watching: usize,
+}
+
+impl ChainHealth {
+    pub fn classify(&self, now_unix: i64, now_ms: u64) -> &'static str {
+        let _ = now_unix;
+        if now_ms.saturating_sub(self.last_ok_ms) > RPC_DOWN_AFTER_MS {
+            "down"
+        } else if self.tip_height + 1 < self.headers_height {
+            "stale"
+        } else {
+            "ok"
+        }
+    }
+
+    /// Tip age beyond this is reported as a quiet-chain note, not a
+    /// fault (blocks agree with headers; the chain is just slow).
+    pub fn quiet_chain(&self, now_unix: i64) -> bool {
+        self.tip_time > 0
+            && (now_unix.max(0) as u64).saturating_sub(self.tip_time) > CHAIN_QUIET_AFTER_SECS
+    }
+}
+
 pub struct OnchainRail {
     cln: Arc<ClnClient>,
     fx: Arc<Fx>,
@@ -67,6 +110,7 @@ pub struct OnchainRail {
     addresses: Arc<tokio::sync::RwLock<HashMap<String, AddressRecord>>>,
     store: Option<std::path::PathBuf>,
     events: broadcast::Sender<Event>,
+    health: Arc<std::sync::RwLock<Option<ChainHealth>>>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +142,49 @@ fn settles(received_msat: u64, expected_sat: u64, confs: u32, required: u32) -> 
     received_msat >= expected_sat * 1000 && confs >= required
 }
 
+/// One getblockchaininfo probe; returns whether the RPC answered. On
+/// success the snapshot updates; on failure the last-known tip stays
+/// (its age keeps growing, which is the visible symptom).
+async fn update_health(
+    http: &reqwest::Client,
+    rpc_url: &str,
+    rpc_user: &str,
+    rpc_pass: &str,
+    health: &Arc<std::sync::RwLock<Option<ChainHealth>>>,
+    watching: usize,
+) -> bool {
+    let ok = async {
+        let resp = http
+            .post(rpc_url)
+            .basic_auth(rpc_user, Some(rpc_pass))
+            .json(&serde_json::json!({
+                "jsonrpc": "1.0", "id": "pecan", "method": "getblockchaininfo", "params": []
+            }))
+            .send()
+            .await
+            .ok()?;
+        let v: serde_json::Value = resp.json().await.ok()?;
+        let r = v.get("result")?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as u64;
+        let snapshot = ChainHealth {
+            chain: r.get("chain")?.as_str()?.to_string(),
+            tip_height: r.get("blocks")?.as_u64()?,
+            headers_height: r.get("headers")?.as_u64()?,
+            tip_time: r.get("mediantime")?.as_u64().or_else(|| r.get("time")?.as_u64())?,
+            last_ok_ms: now_ms,
+            pruned: r.get("pruned")?.as_bool().unwrap_or(false),
+            watching,
+        };
+        *health.write().ok()? = Some(snapshot);
+        Some(())
+    }
+    .await;
+    ok.is_some()
+}
+
 impl OnchainRail {
     pub async fn start(
         cln: Arc<ClnClient>,
@@ -110,6 +197,7 @@ impl OnchainRail {
         events: broadcast::Sender<Event>,
     ) -> Arc<Self> {
         let addresses = Arc::new(tokio::sync::RwLock::new(load_store(&store).await));
+        let health = Arc::new(std::sync::RwLock::new(None));
         let rail = Arc::new(Self {
             cln,
             fx,
@@ -124,6 +212,7 @@ impl OnchainRail {
             addresses,
             store,
             events,
+            health,
         });
         rail.ensure_watch_wallet().await;
         rail.reimport_watching().await;
@@ -194,9 +283,11 @@ impl OnchainRail {
         let addresses = self.addresses.clone();
         let store = self.store.clone();
         let events = self.events.clone();
+        let health = self.health.clone();
         let required = self.confirmations;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
+            let mut was_reachable: Option<bool> = None;
             loop {
                 tick.tick().await;
                 let watching: Vec<String> = {
@@ -207,6 +298,18 @@ impl OnchainRail {
                         .map(|(id, _)| id.clone())
                         .collect()
                 };
+                // Chain health rides every tick regardless of active
+                // watches — "when did we last talk to the chain" must
+                // not depend on open quotes.
+                let reachable = update_health(
+                    &http, &rpc_url, &rpc_user, &rpc_pass, &health, watching.len(),
+                ).await;
+                match (was_reachable, reachable) {
+                    (Some(true), false) => tracing::warn!("chain backend UNREACHABLE — onchain detection stalled"),
+                    (Some(false), true) => tracing::info!("chain backend reachable again"),
+                    _ => {}
+                }
+                was_reachable = Some(reachable);
                 if watching.is_empty() {
                     continue;
                 }
@@ -381,6 +484,12 @@ impl OnchainRail {
         tracing::info!("watch wallet re-import: {n} watching address(es) ensured");
     }
 
+    /// Current chain-backend health for the operator dashboard. None
+    /// until the first poll lands.
+    pub fn chain_health_snapshot(&self) -> Option<ChainHealth> {
+        self.health.read().ok().and_then(|g| g.clone())
+    }
+
     /// Per-address status for the console's onchain widget, in the
     /// historical esplora response shape so the wallet UI stays
     /// unchanged: `{tip, utxos:[{value, status:{confirmed, block_height}}]}`.
@@ -501,6 +610,64 @@ mod tests {
         assert!(!settles(1_000_000, 1000, 0, 1));
         assert!(settles(1_000_000, 1000, 1, 1));
         assert!(settles(1_000_000, 1000, 6, 1));
+    }
+
+    fn health(tip_lag: u64, last_ok_age_ms: u64) -> (ChainHealth, i64, u64) {
+        let now_unix = 1_800_000_000i64;
+        let now_ms = now_unix as u64 * 1000;
+        (
+            ChainHealth {
+                chain: "signet".into(),
+                tip_height: 321_375 - tip_lag,
+                headers_height: 321_375,
+                tip_time: now_unix as u64 - 60,
+                last_ok_ms: now_ms.saturating_sub(last_ok_age_ms),
+                pruned: true,
+                watching: 3,
+            },
+            now_unix,
+            now_ms,
+        )
+    }
+
+    #[test]
+    fn fresh_chain_and_fresh_rpc_is_ok() {
+        let (h, now, now_ms) = health(0, 5_000);
+        assert_eq!(h.classify(now, now_ms), "ok");
+    }
+
+    #[test]
+    fn blocks_lagging_headers_is_stale() {
+        let (h, now, now_ms) = health(5, 5_000);
+        assert_eq!(h.classify(now, now_ms), "stale");
+    }
+
+    #[test]
+    fn quiet_chain_is_ok_not_stale() {
+        // blocks == headers, tip old: the chain is just slow
+        let (h, now, now_ms) = health(0, 5_000);
+        assert_eq!(h.classify(now, now_ms), "ok");
+        assert!(!h.quiet_chain(now));
+    }
+
+    #[test]
+    fn quiet_beyond_two_hours_flags_the_note() {
+        let (mut h, now, now_ms) = health(0, 5_000);
+        h.tip_time = (now as u64).saturating_sub(CHAIN_QUIET_AFTER_SECS + 60);
+        assert_eq!(h.classify(now, now_ms), "ok");
+        assert!(h.quiet_chain(now));
+    }
+
+    #[test]
+    fn rpc_silent_past_one_budget_is_down_even_with_fresh_tip() {
+        let (h, now, now_ms) = health(60, RPC_DOWN_AFTER_MS + 1);
+        assert_eq!(h.classify(now, now_ms), "down");
+    }
+
+    #[test]
+    fn down_beats_stale_when_both_hold() {
+        let (h, now, now_ms) = health(50, RPC_DOWN_AFTER_MS * 5);
+        assert_eq!(h.classify(now, now_ms), "down");
     }
 
     #[test]
