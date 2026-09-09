@@ -266,6 +266,25 @@ export function runSelfTest() {
   return post<SelfTestOutcome>("/api/mint/self-test")
 }
 
+// ---- chain backend health ----
+
+export interface ChainStatus {
+  status: "ok" | "stale" | "down"
+  chain: string
+  tip_height: number
+  headers_height: number
+  tip_age_secs: number
+  chain_quiet: boolean
+  last_ok_age_ms: number
+  pruned: boolean
+  watching: number
+  chain_quiet_after_secs: number
+}
+
+export function fetchChainStatus() {
+  return requestJson<ChainStatus>("/api/onchain/chain-status")
+}
+
 // ---- users ----
 
 export function createUser(username: string, password: string, passwordConfirm: string) {

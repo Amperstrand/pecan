@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import {
   CircleAlert,
   CircleCheck,
@@ -17,6 +17,8 @@ import {
   type CheckStatus,
   type ChecklistItem,
   type SelfTestLeg,
+  fetchChainStatus,
+  type ChainStatus,
 } from "@/lib/api"
 import { formatAge, formatDateTime } from "@/lib/format"
 import { useSnapshot } from "@/lib/snapshot"
@@ -50,10 +52,89 @@ export function MintTab({ snapshot }: { snapshot: AppSnapshot }) {
       <AttachmentCard snapshot={snapshot} />
       <ChecklistCard snapshot={snapshot} />
       <SnippetCard snapshot={snapshot} />
+      <ChainBackendCard />
       <SelfTestCard snapshot={snapshot} />
       {snapshot.mint_identity && <IdentityCard snapshot={snapshot} />}
       {snapshot.setup.unit && snapshot.setup.attached && <KeysetsCard snapshot={snapshot} />}
     </div>
+  )
+}
+
+/// "When did we last talk to the chain" made visible — tip block,
+/// its age, and the last-successful poll of our own bitcoind. The
+/// 2026-09-09 esplora ban was invisible for hours; this card is the
+/// antidote: down (RPC silent) or stale (tip frozen) both read at a
+/// glance.
+function ChainBackendCard() {
+  const [status, setStatus] = useState<ChainStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = () =>
+      fetchChainStatus()
+        .then(s => alive && (setStatus(s), setError(null)))
+        .catch(e => alive && setError(e.message))
+    load()
+    const timer = setInterval(load, 10_000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [])
+
+  const tone =
+    error ? "down" : status?.status ?? "pending"
+  const color =
+    tone === "ok" ? "bg-emerald-500" :
+    tone === "stale" ? "bg-amber-500" :
+    tone === "down" ? "bg-red-500" : "bg-muted-foreground/40"
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <span className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} aria-hidden />
+          Chain backend
+        </CardTitle>
+        <CardDescription>
+          The owned bitcoind watching onchain deposits — polled every few seconds.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-1 text-sm">
+        {error ? (
+          <p className="text-red-500">
+            Unreachable — onchain deposits are not being detected ({error})
+          </p>
+        ) : status ? (
+          <>
+            <p>
+              Block <span className="font-mono">{status.tip_height.toLocaleString()}</span>{" "}
+              on {status.chain}
+              {status.pruned ? " (pruned)" : ""} — mined{" "}
+              <span className="font-mono">{Math.round(status.tip_age_secs / 60)} min</span> ago
+            </p>
+            <p>
+              Chain polled <span className="font-mono">
+                {Math.round(status.last_ok_age_ms / 1000)} s
+              </span> ago · {status.watching} watch{status.watching === 1 ? "" : "es"} active
+              {tone === "stale" && (
+                <span className="text-amber-500">
+                  {" "}— block view lags headers ({status.headers_height.toLocaleString()} known) — node stalled?
+                </span>
+              )}
+              {tone === "ok" && status.chain_quiet && (
+                <span className="text-amber-500">
+                  {" "}— no block for over {Math.round(status.chain_quiet_after_secs / 3600)} h (headers agree: chain is quiet)
+                </span>
+              )}
+            </p>
+          </>
+        ) : (
+          <p className="text-muted-foreground">Sampling…</p>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
