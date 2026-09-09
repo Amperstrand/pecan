@@ -321,28 +321,49 @@ async fn main() -> Result<()> {
         None
     };
     let onchain_rail = if onchain_env_on {
-        let confirmations: u32 = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(1);
-        let esplora = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| "https://mempool.space/signet/api".into());
-        let rail = onchain::OnchainRail::start(
-            cln_client.expect("onchain enabled implies client"),
-            Arc::new(ln::Fx::new(app_config.unit.clone(), Some(rate_url), markup)),
-            confirmations,
-            esplora,
-            Some(work_dir.join("onchain-rail-store.json")),
-            branch.event_sender(),
-        )
-        .await;
-        tracing::info!(
-            "onchain rail enabled (settlement after {confirmations} confirmation(s))"
+        // Missing bitcoind config must not take the mint down: the
+        // rail stays off (onchain quotes get refused with a clear
+        // error at create), teller and lightning keep serving.
+        let rail_env = (
+            std::env::var("CDK_BRANCH_PROCESSOR_BITCOIND_RPC").ok(),
+            std::env::var("CDK_BRANCH_PROCESSOR_BITCOIND_USER").ok(),
+            std::env::var("CDK_BRANCH_PROCESSOR_BITCOIND_PASS").ok(),
         );
-        Some(rail)
+        match rail_env {
+            (Some(url), Some(user), Some(pass))
+                if !url.trim().is_empty()
+                    && !user.trim().is_empty()
+                    && !pass.trim().is_empty() =>
+            {
+                let confirmations: u32 = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(1);
+                let rail = onchain::OnchainRail::start(
+                    cln_client.expect("onchain enabled implies client"),
+                    Arc::new(ln::Fx::new(app_config.unit.clone(), Some(rate_url), markup)),
+                    confirmations,
+                    url.trim().trim_end_matches('/').to_string(),
+                    user.trim().to_string(),
+                    pass.trim().to_string(),
+                    Some(work_dir.join("onchain-rail-store.json")),
+                    branch.event_sender(),
+                )
+                .await;
+                tracing::info!(
+                    "onchain rail enabled (settlement after {confirmations} confirmation(s))"
+                );
+                Some(rail)
+            }
+            _ => {
+                tracing::error!(
+                    "onchain rail DISABLED: CDK_BRANCH_PROCESSOR_BITCOIND_RPC/_USER/_PASS \
+                     must all be set (point them at the owned bitcoind); onchain quotes \
+                     will be refused until configured"
+                );
+                None
+            }
+        }
     } else {
         None
     };

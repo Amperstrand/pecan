@@ -808,11 +808,13 @@ struct MatchQuoteForm {
 /// or the full quote id from a scanner) to the one open quote it identifies.
 /// The full ticket is revealed only here — the open-quote list stays redacted
 /// so the code must come from the customer.
-/// Proxies esplora address-utxo data so the wallet's onchain status
-/// display stays same-origin (the CSP blocks external fetches, and this
-/// avoids teaching the browser about our chain backend). No session
-/// needed: the bech32 address is a fresh per-quote secret — knowing it is
-/// the proof you created the deposit.
+/// Onchain deposit status for the wallet's display, answered from the
+/// OWNED bitcoind's watch wallet (same response shape the wallet has
+/// always consumed — tip + esplora-style utxo list). Same-origin by
+/// design: the CSP blocks external fetches, and the browser never
+/// learns our chain backend credentials. No session needed: the bech32
+/// address is a fresh per-quote secret — knowing it is the proof you
+/// created the deposit.
 async fn api_onchain_status(
     State(state): State<WebState>,
     AxumPath(address): AxumPath<String>,
@@ -820,33 +822,18 @@ async fn api_onchain_status(
     if !address.starts_with("tb1") || address.len() > 100 {
         return api_error(StatusCode::BAD_REQUEST, "not a bech32 address");
     }
-    let esplora = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_ESPLORA_URL")
-        .unwrap_or_else(|_| "https://mempool.space/signet/api".into());
-    let tip_url = format!("{esplora}/blocks/tip/height");
-    let utxo_url = format!("{esplora}/address/{address}/utxo");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("reqwest client");
-    let (tip, utxos) = match tokio::join!(
-        client.get(&tip_url).send(),
-        client.get(&utxo_url).send()
-    ) {
-        (Ok(t), Ok(u)) => (
-            t.text().await.unwrap_or_default().trim().to_string(),
-            u.text().await.unwrap_or_default(),
-        ),
-        _ => {
-            return api_error(StatusCode::BAD_GATEWAY, "esplora unreachable");
-        }
+    let Some(rail) = state.backend.onchain() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "onchain rail disabled");
+    };
+    let Some((tip, utxos)) = rail.address_status(&address).await else {
+        return api_error(StatusCode::BAD_GATEWAY, "chain backend unreachable");
     };
     let required: u32 = std::env::var("CDK_BRANCH_PROCESSOR_ONCHAIN_CONFIRMATIONS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(1);
-    let esplora_base = esplora.trim_end_matches("/api");
     let body = format!(
-        r#"{{"tip":{tip},"utxos":{utxos},"required_confirmations":{required},"explorer":"{esplora_base}"}}"#
+        r#"{{"tip":{tip},"utxos":{utxos},"required_confirmations":{required},"explorer":"https://mempool.space/signet"}}"#
     );
     (
         [("content-type", "application/json")],

@@ -41,9 +41,6 @@ use crate::payout::parse_payout_envelope;
 use crate::state::{BranchState, Ticket};
 use std::collections::HashSet;
 
-/// Onchain deposits carry real chain weight; keep them well above dust.
-const MIN_ONCHAIN_ORE: u64 = 5_000;
-
 /// Single-unit payment processor for one attached mint; routes mint quotes
 /// per method: the teller rail (`branch`) and, when configured, the
 /// lightning rail (`ln`). Melt quotes exist for `branch` only.
@@ -248,6 +245,11 @@ impl BranchBackend {
     /// flattened extra carries `expected_sat` so the wallet can render the
     /// exact amount to send. Settlement needs the expected sats on-chain
     /// (plus confirmations per config).
+    /// The onchain rail handle, for the console's status endpoints.
+    pub fn onchain(&self) -> Option<&Arc<OnchainRail>> {
+        self.onchain.as_ref()
+    }
+
     async fn onchain_create(
         &self,
         opts: cdk_common::payment::CustomIncomingPaymentOptions,
@@ -257,13 +259,6 @@ impl BranchBackend {
             .as_ref()
             .ok_or_else(|| Error::Custom("an amount is required".into()))?;
         self.check_unit(amount.unit())?;
-        if amount.value() < MIN_ONCHAIN_ORE {
-            return Err(Error::Custom(format!(
-                "onchain deposits must be at least {} {} (dust + chain fees); use lightning                  or the teller for smaller amounts",
-                MIN_ONCHAIN_ORE / 100,
-                amount.unit(),
-            )));
-        }
         // Same NUT-20 lock policy as the other rails.
         if opts.pubkey.is_none() {
             return Err(Error::Custom(
