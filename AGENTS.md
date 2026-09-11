@@ -141,6 +141,12 @@ adding tests.
   /opt/giftcard-mint) needs `cdk-mintd config init --file mint.toml` after
   its sqlite is wiped, and crash-loops until the processor is listening —
   start pecan first.
+- Mint seed backup: `scripts/mint-backup.sh` — encrypted (aes-256) off-box
+  archive of BOTH mints' seeds + config + consistent sqlite snapshots to
+  `~/backups/pecan-mint/`. Passphrase in macOS Keychain
+  (`pecan-mint-backup-passphrase`) — ALSO record it physically. This is the
+  only artifact that can re-issue outstanding giftcard ecash after inr2
+  dies; re-run after keyset rollovers or quarterly.
 - Re-vendor the coco fork: `scripts/vendor-coco.sh [version]` (typecheck +
   build + test the fork, pack, vendor). Then regenerate the LINUX lockfile
   (no local docker? rsync `web/` to ai-legion-small and run the
