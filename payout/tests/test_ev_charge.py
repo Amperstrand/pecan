@@ -9,6 +9,7 @@ metering-loss settle policy without any network or device.
 Run: python3 -m unittest discover -s payout/tests -v
 """
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -210,6 +211,110 @@ class DeliverEnergyTests(unittest.TestCase):
         ev_charge.deliver_energy(a, gw, "t-1", 100, "atomA", {},
                                  session_ref="q-9")
         self.assertEqual(gw.triggers[0][2], "q-9")
+
+
+class CanonicalEventTests(unittest.TestCase):
+    """P3 alignment: the daemon must additionally emit glossary-canonical
+    grant/progress/terminal/settle/refund events to a JSONL journal,
+    without changing any legacy behavior."""
+
+    def _args_with_journal(self, tmpdir):
+        a, console = self._base_args()
+        import canonical_events
+        a.canonical = canonical_events.journal(tmpdir + "/events.jsonl")
+        return a, console, tmpdir + "/events.jsonl"
+
+    def _base_args(self):
+        a, console = daemon(1.0)
+        a._tariffs["t-1"] = 1.0
+        ev_charge.console = console
+        self.addCleanup(lambda: setattr(ev_charge, "console", None))
+        return a, console
+
+    def _events(self, path):
+        out = []
+        with open(path) as f:
+            for line in f:
+                out.append(json.loads(line))
+        return out
+
+    def test_stopped_session_emits_full_canonical_chain(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a, console, path = self._args_with_journal(d)
+            gw = FakeGateway([{"state": "running", "seconds": 1},
+                              {"state": "done", "seconds": 2,
+                               "stopped": True}])
+            ev_charge.deliver_energy(a, gw, "t-1", 600, "atomA", {},
+                                     session_ref="q-1")
+            ev = self._events(path)
+            types = [e["type"] for e in ev]
+            self.assertEqual(types[0], "grant")
+            self.assertEqual(types[-2], "terminal")
+            self.assertEqual(types[-1], "settle")
+            self.assertIn("progress", types)
+            term = [e for e in ev if e["type"] == "terminal"][0]
+            self.assertEqual(term["kind"], "completed")
+            self.assertEqual(term["seconds_total"], 2)
+            self.assertEqual(term["nonce"], "t-1")
+            self.assertTrue(term["receipt"].endswith("-STOPPED"))
+            settle = [e for e in ev if e["type"] == "settle"][0]
+            self.assertEqual(settle["amount_millis"], 2000)
+
+    def test_full_window_is_cap_seconds(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a, console, path = self._args_with_journal(d)
+            gw = FakeGateway([{"state": "done", "seconds": 6}])
+            ev_charge.deliver_energy(a, gw, "t-1", 600, "atomA", {})
+            term = [e for e in self._events(path)
+                    if e["type"] == "terminal"][0]
+            self.assertEqual(term["kind"], "cap_seconds")
+
+    def test_metering_loss_is_lease_expired(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a, console, path = self._args_with_journal(d)
+            gw = FakeGateway([])
+            gw.status = lambda device: {"state": "running", "seconds": 5}
+            ev_charge.deliver_energy(a, gw, "t-1", 600, "atomA", {})
+            term = [e for e in self._events(path)
+                    if e["type"] == "terminal"][0]
+            self.assertEqual(term["kind"], "lease_expired")
+            self.assertEqual(term["legacy"], "device-timeout-settled")
+
+    def test_refusal_is_failed_terminal(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a, console, path = self._args_with_journal(d)
+            gw = FakeGateway([])
+            gw.trigger = lambda device, seconds, session_ref=None: {
+                "triggered": False, "reason": "declined"}
+            ev_charge.deliver_energy(a, gw, "t-1", 600, "atomA", {})
+            term = [e for e in self._events(path)
+                    if e["type"] == "terminal"][0]
+            self.assertEqual(term["kind"], "failed")
+            self.assertEqual(term["seconds_total"], 0)
+
+    def test_refund_settle_emits_refund_event(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a, console, path = self._args_with_journal(d)
+            state = {"t-1": settled_record()}
+            a.state_file = d + "/state.json"
+            refund_console = FakeConsole([refund_ticket(400)])
+            ev_charge.settle_refunds(a, refund_console, state)
+            ev = self._events(path)
+            refunds = [e for e in ev if e["type"] == "refund"]
+            self.assertEqual(len(refunds), 1)
+            self.assertEqual(refunds[0]["amount_millis"], 4000)
+            self.assertEqual(refunds[0]["nonce"], "t-1")
+
+    def test_journal_disabled_by_default_is_silent(self):
+        a, console = self._base_args()  # no a.canonical at all
+        gw = FakeGateway([{"state": "done", "seconds": 1}])
+        code, _ = ev_charge.deliver_energy(a, gw, "t-1", 100, "atomA", {})
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

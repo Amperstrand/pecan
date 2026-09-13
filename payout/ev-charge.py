@@ -51,6 +51,9 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import canonical_events
+
 RAIL = "ev"
 
 
@@ -136,6 +139,13 @@ class Gateway:
         return self._req("GET", f"/device/{device}/status")
 
 
+from canonical_events import journal as canonical_journal
+
+
+def _canonical(a):
+    return getattr(a, "canonical", None) or canonical_events.NullJournal()
+
+
 def log(obj: dict) -> None:
     print(json.dumps(obj), flush=True)
 
@@ -153,17 +163,26 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     try:
         trig = gateway.trigger(device, seconds, session_ref=session_ref)
     except urllib.error.HTTPError as e:
+        _canonical(a).terminal(tid, "failed", 0, 0, 0, receipt="",
+                               legacy=f"gateway-rejected-{e.code}")
         return 2, {"result": "refused", "id": tid, "destination": slug,
                    "device": device, "seconds": seconds,
                    "reason": f"device gateway rejected: {e.code}"}
     except urllib.error.URLError as e:
+        _canonical(a).terminal(tid, "failed", 0, 0, 0, receipt="",
+                               legacy=f"gateway-unreachable")
         return 2, {"result": "refused", "id": tid, "destination": slug,
                    "device": device,
                    "reason": f"device gateway unreachable: {e.reason}"}
     if not trig.get("triggered"):
+        _canonical(a).terminal(tid, "failed", 0, 0, 0,
+                               receipt="",
+                               legacy="trigger-declined")
         return 2, {"result": "refused", "id": tid, "destination": slug,
                    "device": device, "seconds": seconds,
                    "reason": trig.get("reason", "trigger declined")}
+    _canonical(a).grant(tid, seconds, amount * 10, device,
+                        session_ref=session_ref)
 
     # Tariff snapshot: bill at the rate the session was priced at, not
     # whatever the daemon currently runs with (a restart with a changed
@@ -172,7 +191,8 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     # too (an unbound-variable crash here was caught by unit test).
     tariff = getattr(a, "_tariffs", {}).get(tid, a.secs_per_eur)
 
-    done_by = time.time() + seconds + a.settle_grace
+    started = time.time()
+    done_by = started + seconds + a.settle_grace
     state = None
     while time.time() < done_by:
         try:
@@ -181,6 +201,9 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
             state = None  # transient poll failure — keep waiting
         if state and state.get("state") == "done":
             break
+        elapsed = min(int(time.time() - started), seconds)
+        _canonical(a).progress(
+            tid, 0, elapsed, int(elapsed * 1000.0 / tariff))
         time.sleep(1.0)
     if not (state and state.get("state") == "done"):
         # Metering lost: the window was granted (the relay was commanded
@@ -193,6 +216,9 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
         receipt = "EV-{}-{}s-{}-TIMEOUT".format(
             device, seconds, secrets.token_hex(4).upper())
         cents = max(1, round(seconds * 100.0 / tariff))
+        _canonical(a).terminal(tid, "lease_expired", 0, seconds,
+                               seconds * 1000, receipt=receipt,
+                               legacy="device-timeout-settled")
         notes = (f"payout rail {RAIL} (charge session, metering lost) "
                  f"receipt={receipt}")
         try:
@@ -201,6 +227,7 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
                           "delivered": cents})
         except (urllib.error.HTTPError, urllib.error.URLError):
             return 6, {"result": "device-timeout-settle-failed", "id": tid}
+        _canonical(a).settle(tid, cents * 10)
         return 6, {"result": "device-timeout-settled", "id": tid,
                    "destination": slug, "device": device,
                    "seconds": seconds, "receipt": receipt}
@@ -217,6 +244,10 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     receipt = "EV-{}-{}s-{}{}".format(device, delivered,
                                       secrets.token_hex(4).upper(), suffix)
     cents = max(1, round(delivered * 100.0 / tariff))
+    _canonical(a).terminal(
+        tid, "completed" if was_stopped else "cap_seconds", 0, delivered,
+        delivered * 1000, receipt=receipt,
+        legacy="stopped" if was_stopped else "full-window")
 
     notes = f"payout rail {RAIL} (charge session) receipt={receipt}"
     # `delivered` rides along as rail metadata — the mint settles the melt
@@ -232,6 +263,7 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     except urllib.error.URLError as e:
         return 4, {"result": "api-error", "id": tid,
                    "stage": "mark-paid-transport", "error": str(e.reason)}
+    _canonical(a).settle(tid, cents * 10)
     return 0, {"result": "settled", "id": tid, "rail": RAIL,
                "amount": amount, "destination": slug, "device": device,
                "seconds": delivered, "stopped": was_stopped,
@@ -253,6 +285,13 @@ def save_state(path, state):
     with open(tmp, "w") as f:
         json.dump(state, f)
     os.replace(tmp, path)
+
+
+def tid_of_record(state, quote_id):
+    for tid, r in state.items():
+        if r.get("quote_id") == quote_id:
+            return tid
+    return quote_id
 
 
 def settle_refunds(a, console, state):
@@ -302,6 +341,7 @@ def settle_refunds(a, console, state):
             continue
         rec["refunded"] = True
         save_state(a.state_file, state)
+        _canonical(a).refund(tid_of_record(state, quote_id), claimed * 10)
         log({"result": "refund-settled", "quote_id": quote_id,
              "amount": claimed, "receipt": receipt})
 
@@ -349,6 +389,9 @@ def watch(a, console, gateway, device_map):
                 state[tid] = {"status": "open", "at": int(time.time()),
                               "result": "expired-before-trigger",
                               "refund_due_cents": int(t.get("amount", 0))}
+                _canonical(a).terminal(tid, "lease_expired", 0, 0, 0,
+                                       receipt="",
+                                       legacy="expired-before-trigger")
                 save_state(a.state_file, state)
                 try:
                     console.post(
@@ -373,6 +416,9 @@ def watch(a, console, gateway, device_map):
                 state[tid] = {"status": "open", "at": int(time.time()),
                               "result": "expired-waiting-fund-lock",
                               "refund_due_cents": 0}
+                _canonical(a).terminal(tid, "lease_expired", 0, 0, 0,
+                                       receipt="",
+                                       legacy="expired-waiting-fund-lock")
                 save_state(a.state_file, state)
                 try:
                     console.post(
@@ -449,10 +495,15 @@ def main() -> int:
                         "device to report done")
     p.add_argument("--poll-interval", type=float, default=3.0,
                    help="--watch: seconds between open-ticket polls")
+    p.add_argument("--canonical-events", default="",
+                   help="append canonical grant/progress/terminal/settle/"
+                        "refund events as JSONL to this path (glossary-"
+                        "aligned; empty disables)")
     p.add_argument("--state-file", default="",
                    help="--watch: JSON file of per-ticket delivery state "
                         "(crash-safe: a ticket is claimed before trigger)")
     a = p.parse_args()
+    a.canonical = canonical_journal(a.canonical_events)
 
     raw_map = a.device_map.lstrip("@")
     if a.device_map.startswith("@"):
