@@ -8,3 +8,7 @@ web/dist/
 __pycache__/
 
 .omo/
+
+# local agent/browser artifacts
+.playwright-mcp/
+web/e2e/.results-video/

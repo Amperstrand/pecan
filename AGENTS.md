@@ -18,6 +18,7 @@ and `{currency}-console/*` for its pecan console:
 |---|---|---|---|
 | EUR | `giftcard-mint-mintd-1` :8089 | `pecan-pecan-1` :50054/:9091 | `/eur/v1/*`, `/eur-console/*` |
 | USD | `giftcard-mint-usd-mintd-1` :8097 | `pecan-usd-pecan-1` :50055/:9093 | `/usd/v1/*`, `/usd-console/*` |
+| NOK | `giftcard-mint-nok-mintd-1` :8098 | `pecan-nok-pecan-1` :50057/:9097 | `/nok/v1/*`, `/nok-console/*` |
 
 The ROOT `/v1` and `/console` are RESERVED for a future sats pair
 (`/v1/*` answers 404 until then). Amounts are cents internally; one unit
@@ -85,6 +86,14 @@ seconds with zero side effects:
 7. `scripts/e2e.sh -g @stress` — alternating-rail soak on one page
    (~6 min, zero sat, main-thread heartbeat + stall probes).
 8. `scripts/soak.sh N` — repetition under liquidity/reconcile guards.
+9. Demo lane (not a test): `make demo` — one command, visible browser on
+   the Mac: preflights the NOK pair + charger fleet, funds the wallet via
+   a teller-approved deposit in the admin window, melts to charger D and
+   streams delivered kW·s from the gateway until the receipt. Wallet
+   profile persists in /tmp/pecan-demo-profile (balance carries; tops up
+   only when short). atomD liveness = the t-relay box's
+   `charger/atom/status` LWT (NOT charger/atomD/status — the box serves
+   multiple charger ids).
 
 E2E knobs and rules: `PECAN_E2E_ONCHAIN_CONF=<n>` pins the expected
 onchain confirmation policy (unset = trust the deployment; mismatch
@@ -108,8 +117,8 @@ rows are deliberately EUR-only shared machinery) lives as a comment
 block atop `web/e2e/helpers/wallet-suite.ts` — keep it current when
 adding tests.
 
-- Browser wallet tests: `scripts/e2e.sh` (fetches BOTH generated admin
-  passwords — EUR and USD — from the server and runs Playwright against
+- Browser wallet tests: `scripts/e2e.sh` (fetches ALL generated admin
+  passwords — EUR, USD and NOK — from the server and runs Playwright against
   prod; teller match-and-settle happen through the real HTTP API, waiting
   for the wallet's fund lock before paying out). The per-currency core
   (teller/lightning deposits, zero-change withdraw) lives in
@@ -124,8 +133,10 @@ adding tests.
   artifact; enable the console mirror with `?debug=1` or localStorage
   `pecan-debug`. The processor generates a RANDOM
   admin password on first boot and persists it to
-  /opt/pecan-config/initial-admin-password.txt (0600; delete after first
-  login). /api/login is throttled: 10 failures per (IP, username) per 60s.
+  /opt/pecan-config/initial-admin-password.txt (0600; do NOT delete it —
+  e2e.sh and demo.sh read it to log in; rotate the password through the
+  console instead). /api/login is throttled: 10 failures per (IP,
+  username) per 60s.
 - Unit tests: `cd web && npm test` (vitest). Fast inner loop — handler
   payload shapes, error mappings, and pure utils are pinned here; run these
   BEFORE deploying to iterate on logic without the e2e cycle.
@@ -237,6 +248,19 @@ adding tests.
   escape hatch (signet only). The EUR switch means old NOK operations in
   user browsers are inert (unit filter in getPendingDeposit skips them).
 
+- **Console sessions share one cookie across pairs.** `branch_session`
+  is set with `Path=/` under one name on the shared origin: signing into
+  a second pair's console replaces the first's session (last cookie
+  wins). Fine for one operator at a time; per-pair cookie names or paths
+  needed before tellers work two pairs in one browser.
+
+- **The console SPA derives its base from the URL** (web/src/lib/
+  console-base.ts): API calls, SSE, and router paths are prefixed with
+  the serving `/{currency}-console` segment at runtime. Do not add
+  root-relative `/api/*` fetches in console code — under a pair prefix
+  they land on the domain root (static site) and the page dies with a
+  `must_change_password` TypeError (the 2026-09-14 blank-console bug).
+
 - Lessons that shaped the tooling (first soak session): single green
   runs hide ordering races — the two soak-found wallet bugs (backups
   exported in the boot window carrying `seed: null` because coco's
@@ -249,3 +273,23 @@ adding tests.
   flight is invisible to confirmed-only balance reads: refill top-ups
   sit unconfirmed for one signet block, so liquidity guards must count
   pending outputs or freshly-refilled payers read as dry.
+
+## NOK pair (2026-09-14)
+
+Deployed for the Charger Zero demo. Ports: mintd :8098, grpc :50057,
+HTTP :9097, prometheus :9098. Mint mnemonic in `/opt/giftcard-mint-nok/.env`.
+Admin password in container: `/var/lib/pecan/config/initial-admin-password.txt`.
+
+**Post-deploy:** `deploy.sh` recreates ALL pairs (eur+usd+nok) and
+restarts all three mints (since 2026-09-14). If nok ever serves a stale
+bundle anyway: `cd /opt/pecan-nok && docker compose up -d --force-recreate`
+then `docker restart giftcard-mint-nok-mintd-1`.
+
+The ev-charge daemon for NOK runs as `ev-charge-nok.service` on inr2,
+watching the nok-console for `ev:atomD` melts. Stand-in sim:
+`atomd-standin.service` (stopped when the physical box is online).
+
+Wallet currency: `activeCurrency()` in `web/src/lib/coco/currency.ts` uses
+`stored in CURRENCIES` — new currencies must be added there AND the wallet
+init must be click-driven (stored localStorage value is not honored on boot;
+the spec asserts "kr" after clicking the NOK tab).

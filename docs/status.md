@@ -1,9 +1,9 @@
 # Pecan + EV rail — status, limitations, and where to go next
 
-Snapshot: 2026-09-05 (updated after the hardware-return round — Rust
-firmware live on the M5Stick, greatspectations Layer-1 expansion, two
-AI spec audits with fixes, full suite 43 green incl. atomB + sat
-reload-resume). Live at https://giftcard.cashu.exchange. This is
+Snapshot: 2026-09-14 (updated after the multi-pair console + live-demo
+round — NOK pair, pair-prefixed console SPA, teller camera scan,
+`make demo`, atomD relay live; see the 2026-09-14 section). Live at
+https://giftcard.cashu.exchange. This is
 the honest map of what works, what is known-broken or limited, and the
 ranked backlog. Keep it current when the picture changes.
 
@@ -41,6 +41,51 @@ ranked backlog. Keep it current when the picture changes.
 - **Ops**: reconcile clean; caddy reload fixed (systemd PrivateTmp
   recreation after the disk-full /tmp wipe); password/fixture fetching
   automated in `scripts/e2e.sh`.
+
+## Multi-pair console + live-demo round 2026-09-14
+
+The NOK pair went live (charger-D demo) and three gaps surfaced and
+closed same-day:
+
+- **Pair-prefixed console SPA (the blank-console bug).** One bundle
+  serves every pair under `{currency}-console/*` with the prefix
+  stripped at the proxy, but the console app called root-relative
+  `/api/*` + `/events` and matched routes on raw pathnames — under any
+  prefix those calls landed on the origin-root static site (HTML instead
+  of JSON) and the page died with a `must_change_password` TypeError.
+  Broken on EUR and USD consoles too, not just NOK. Fix:
+  `web/src/lib/console-base.ts` derives the base from the URL at load
+  time (`withBase` for API/SSE, `stripBase` for the router) — URLs stay
+  reload-safe under the prefix. Unit-pinned + `console.spec.ts` boots
+  and admin-logs-in on all three pairs (@smoke).
+- **Teller camera scan.** The teller page now has "Scan with camera"
+  (platform `BarcodeDetector`; Chromium-only, graceful message
+  elsewhere). The wallet already renders the deposit's teller code as a
+  QR encoding the quote id, and the server's match input accepts
+  scanned full ids — phone → webcam → match is one hold-up. Camera
+  permission pre-granted in the demo profile. NOT yet hand-verified
+  with a physical phone (needs a human holding one up).
+- **`make demo`** (`scripts/demo.sh` + `web/e2e/demo/live-demo.mjs`):
+  one command, two visible windows (wallet left, admin teller right),
+  funds via a teller-approved deposit in the admin UI, melts to charger
+  D, streams `delivered/requested` kW·s from the gateway's public
+  session endpoint until the receipt, and asserts balance = before −
+  delivered. Proven live 2026-09-14: NOK 25 top-up → 12 kW·s session,
+  receipt `EV-atomD-12s-4A034F58`, balance 13.00 exact, ~27 s.
+- **atomD liveness mapping.** The t-relay box publishes its LWT on the
+  ORIGINAL `charger/atom/status` topic — "both chargers go dark with
+  the box" (bridge.mjs) — not on `charger/atomD/status`. demo.sh's
+  fleet gate knows this; so should any future fleet dashboard.
+- **deploy.sh owns all three pairs** (recreate eur+usd+nok + restart
+  all mints + per-pair bundle verification); e2e.sh fetches the NOK
+  admin password too.
+
+Known-new: the `branch_session` cookie (`Path=/`, one name, shared
+origin) means signing into one pair's console replaces another's —
+needs per-pair cookie names/paths before multi-pair tellers share a
+browser. The dial (angle sensor) on atomD sets the delivery RATE; only
+delivered kW·s is metered/reported — the angle itself never leaves the
+box (a fleet-dashboard candidate).
 
 ## SAT currency round 2026-09-04
 
