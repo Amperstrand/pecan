@@ -10,7 +10,7 @@
 // The customer wallet talks to mint URLs directly; pecan-scoped endpoints
 // (onchain-status, teller login) use the console path per currency.
 
-export type Currency = "eur" | "usd" | "sat"
+export type Currency = "eur" | "nok" | "usd" | "sat"
 
 export interface CurrencyConfig {
   /**
@@ -54,6 +54,17 @@ export const CURRENCIES: Record<Currency, CurrencyConfig> = {
     hasRails: true,
     nut17: true,
   },
+  nok: {
+    mintUrl: "",
+    mintPath: "/nok",
+    consolePath: "/nok-console",
+    symbol: "kr",
+    label: "NOK",
+    scale: 100,
+    step: "0.01",
+    hasRails: true,
+    nut17: true,
+  },
   usd: {
     mintUrl: "",
     mintPath: "/usd",
@@ -86,7 +97,7 @@ const ACTIVE_KEY = "pecan-currency"
 export function activeCurrency(): Currency {
   if (typeof window === "undefined") return "eur"
   const stored = window.localStorage.getItem(ACTIVE_KEY)
-  return stored === "usd" || stored === "sat" || stored === "eur" ? stored : "eur"
+  return stored && stored in CURRENCIES ? (stored as Currency) : "eur"
 }
 
 export function setActiveCurrency(currency: Currency): void {

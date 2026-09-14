@@ -62,7 +62,7 @@ describe("currency registry", () => {
   })
 
   it("falls back to eur for corrupted storage", () => {
-    window.localStorage.setItem("pecan-currency", "nok")
+    window.localStorage.setItem("pecan-currency", "bogus")
     expect(activeCurrency()).toBe("eur")
   })
 
