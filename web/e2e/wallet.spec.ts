@@ -366,9 +366,12 @@ function registerEurExtras(ctx: SuiteContext): void {
 
     await page.getByRole("button", { name: "Try again" }).click()
     await page.getByRole("button", { name: "On-chain", exact: true }).click()
-    await page.getByPlaceholder("5.00").fill("10")
+    // No €50 policy gate anymore (2026-09-09): the client enforces only the
+    // €1 minimum; dust is the mint's call. Sub-minimum input must still be
+    // refused client-side — no quote, no teller ticket.
+    await page.getByPlaceholder("5.00").fill("0.50")
     await page.getByRole("button", { name: "Create on-chain address" }).click()
-    await expect(page.getByText("at least 50 €")).toBeVisible()
+    await expect(page.getByText("On-chain deposits must be at least 1 €")).toBeVisible()
 
     // refused client-side: no quote is created, no teller ticket appears
     await page.getByRole("button", { name: "Try again" }).click()
