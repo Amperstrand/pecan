@@ -148,21 +148,28 @@ const WITHDRAW_OPTIONS = [
     label: "Charger A",
     placeholder: null,
     fixed: "ev:atomA",
-    hint: "Demo EV charger — 1 € = 1 kW·s of charging, fires on send.",
+    hint: "Demo EV charger — 1 unit = 1 kW·s of charging, fires on send.",
   },
   {
     id: "atomB",
     label: "Charger B",
     placeholder: null,
     fixed: "ev:atomB",
-    hint: "Demo EV charger — 1 € = 1 kW·s of charging, fires on send.",
+    hint: "Demo EV charger — 1 unit = 1 kW·s of charging, fires on send.",
   },
   {
     id: "atomC",
     label: "Charger C",
     placeholder: null,
     fixed: "ev:atomC",
-    hint: "T-Display S3 charger — 1 € = 1 kW·s; the big screen IS the charging indicator.",
+    hint: "T-Display S3 charger — 1 unit = 1 kW·s; the big screen IS the charging indicator.",
+  },
+  {
+    id: "atomD",
+    label: "Charger D",
+    placeholder: null,
+    fixed: "ev:atomD",
+    hint: "The t-relay lineage box — the fleet's ancestor hardware, real relay click. 1 unit = 1 kW·s.",
   },
 ] as const
 
@@ -1310,16 +1317,16 @@ export function WalletPage() {
                   />
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  {`≈ €${Math.max(
+                  {`≈ ${Math.max(
                     0,
                     withdrawState.budget - withdrawState.delivered,
-                  )}.00 of the deposit remaining`}
+                  ).toFixed(2)} ${CURRENCIES[currency].symbol} of the deposit remaining`}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Deposit €
-                  {withdrawState.budget}
-                  .00 · 1 € per second — the unspent part refunds
-                  automatically when the session ends.
+                  Deposit {withdrawState.budget.toFixed(2)}{" "}
+                  {CURRENCIES[currency].symbol} · 1 {CURRENCIES[currency].label}{" "}
+                  per second — the unspent part refunds automatically when
+                  the session ends.
                 </p>
                 <Button
                   variant="outline"
