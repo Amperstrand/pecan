@@ -29,10 +29,11 @@ ssh "$BUILDER" "docker rmi pecan:eur 2>/dev/null; rm -rf $REMOTE_DIR"
 echo "==> load + deploy on server"
 ssh "$SERVER" "gunzip -f /tmp/pecan-eur.tar.gz && docker load -i /tmp/pecan-eur.tar && rm -f /tmp/pecan-eur.tar* && docker tag pecan:eur pecan:nok"
 
-echo "==> rsync compose files (both pairs are repo-tracked — a server-only
+echo "==> rsync compose files (all pairs are repo-tracked — a server-only
 USD copy once drifted and crash-looped the pair)"
 rsync -az deploy/docker-compose.prod.yml "$SERVER:$COMPOSE_DIR/docker-compose.prod.yml"
 rsync -az deploy/docker-compose.usd.yml "$SERVER:/opt/pecan-usd/docker-compose.yml"
+rsync -az deploy/docker-compose.nok.yml "$SERVER:/opt/pecan-nok/docker-compose.yml"
 
 echo "==> recreate containers (no build on server)"
 ssh "$SERVER" "cd $COMPOSE_DIR && docker compose -f docker-compose.prod.yml up -d --force-recreate 2>&1 | tail -1"
@@ -42,14 +43,17 @@ ssh "$SERVER" "cd $COMPOSE_DIR && docker compose -f docker-compose.prod.yml up -
 # during the soak hardening: EUR fixed, USD stale).
 ssh "$SERVER" "cd /opt/pecan-usd && docker compose up -d --force-recreate 2>&1 | tail -1"
 
+# NOK pair: same image again (tagged pecan:eur) out of /opt/pecan-nok.
+ssh "$SERVER" "cd /opt/pecan-nok && docker compose up -d --force-recreate 2>&1 | tail -1"
+
 echo "==> restart mints (boot-order dependency)"
-ssh "$SERVER" "docker restart giftcard-mint-mintd-1 giftcard-mint-usd-mintd-1 >/dev/null 2>&1 && echo 'mints restarted' || echo 'WARN: mint restart failed'"
+ssh "$SERVER" "docker restart giftcard-mint-mintd-1 giftcard-mint-usd-mintd-1 giftcard-mint-nok-mintd-1 >/dev/null 2>&1 && echo 'mints restarted' || echo 'WARN: mint restart failed'"
 
 rm -f /tmp/pecan-eur.tar.gz
 
 sleep 6
 fail=0
-for pair in eur usd; do
+for pair in eur usd nok; do
   BUNDLE=$(curl -s -m 10 "$URL/$pair-console/wallet" | grep -o 'index-[^"]*\.js' | head -1)
   if [ -z "$BUNDLE" ]; then
     echo "!! deploy verification failed: no bundle at $URL/$pair-console/wallet" >&2

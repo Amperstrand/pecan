@@ -54,6 +54,11 @@ USD_PW=$(ssh root@46.224.104.12 \
 if [ -n "$USD_PW" ]; then
   export PECAN_USD_ADMIN_PASSWORD="$USD_PW"
 fi
+NOK_PW=$(ssh root@46.224.104.12 \
+  "cat /opt/pecan-nok-config/initial-admin-password.txt 2>/dev/null" || true)
+if [ -n "$NOK_PW" ]; then
+  export PECAN_NOK_ADMIN_PASSWORD="$NOK_PW"
+fi
 
 # EV-rail test fixtures (the ev-rail spec's simulated charger-button
 # press): the gateway shared secret and the fleet MQTT account, both from
