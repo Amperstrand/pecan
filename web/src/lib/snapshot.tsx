@@ -8,6 +8,7 @@ import {
 } from "react"
 
 import { ApiRequestError, fetchSnapshot, type AppSnapshot } from "@/lib/api"
+import { withBase } from "@/lib/console-base"
 import { navigate } from "@/lib/router"
 
 interface SnapshotContextValue {
@@ -60,7 +61,7 @@ export function SnapshotProvider({
   useEffect(() => {
     if (!snapshot) return
     let timer: number | undefined
-    const source = new EventSource("/events")
+    const source = new EventSource(withBase("/events"))
     source.addEventListener("change", () => {
       window.clearTimeout(timer)
       timer = window.setTimeout(() => void refresh(), 220)

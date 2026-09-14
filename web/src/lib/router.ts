@@ -1,15 +1,22 @@
 import { useCallback, useSyncExternalStore } from "react"
 
+import { stripBase, withBase } from "@/lib/console-base"
+
 /**
  * Minimal SPA routing: three flat routes need no router library. pushState +
  * a custom event keep Console ↔ Teller switches instant (no full reloads).
+ *
+ * Paths are app-relative ("/", "/login", "/teller"): navigate() re-adds the
+ * serving pair's console prefix (caddy strips it upstream) so the URL stays
+ * reload-safe, and usePathname() reports it stripped so route matching works
+ * identically at the root and under /{currency}-console.
  */
 
 const NAVIGATE_EVENT = "app:navigate"
 
 export function navigate(path: string) {
-  if (window.location.pathname === path) return
-  window.history.pushState(null, "", path)
+  if (stripBase(window.location.pathname) === path) return
+  window.history.pushState(null, "", withBase(path))
   window.dispatchEvent(new Event(NAVIGATE_EVENT))
 }
 
@@ -23,7 +30,7 @@ function subscribe(callback: () => void) {
 }
 
 export function usePathname() {
-  return useSyncExternalStore(subscribe, () => window.location.pathname)
+  return useSyncExternalStore(subscribe, () => stripBase(window.location.pathname))
 }
 
 /**

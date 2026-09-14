@@ -1,3 +1,5 @@
+import { withBase } from "@/lib/console-base"
+
 export type TicketKind = "incoming" | "outgoing"
 export type TicketStatus = "waiting" | "pending" | "paid" | "failed"
 
@@ -169,7 +171,7 @@ export async function requestJson<T>(path: string, init: RequestInit = {}): Prom
     headers.set("content-type", "application/json")
   }
 
-  const response = await fetch(path, {
+  const response = await fetch(withBase(path), {
     credentials: "same-origin",
     ...init,
     headers,
