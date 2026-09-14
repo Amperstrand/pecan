@@ -1,5 +1,7 @@
 # Pecan
 
+> **Vocabulary:** pecan's deposit pattern is the Meter-module + settlement side of the shared TollGate contract — see the ecosystem [glossary](https://github.com/Amperstrand/tollgate-rs-ai-research-and-experiments/blob/experimental/docs/design/glossary.md).
+
 **P**rocessor and **E**cash **C**onsole for **A**lternative **N**umeraires —
 a cash counter for a [Cashu](https://cashu.space) mint. It lets a mint issue
 ecash for a unit of your choice (a local currency, a voucher, a community
