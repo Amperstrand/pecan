@@ -766,6 +766,7 @@ async fn api_login(
     login_throttle_clear(&throttle_key);
     let sid = uuid::Uuid::new_v4().to_string();
     state.sessions.insert(&sid, &username).await;
+    let unit = state.config.read().await.unit.clone();
     let mut resp = Json(LoginResponse {
         message: "signed_in",
         // Tells the login page to go straight into the set-a-new-password
@@ -776,7 +777,7 @@ async fn api_login(
     .into_response();
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        session_cookie(&sid, request_is_https(&headers))
+        session_cookie(&unit, &sid, request_is_https(&headers))
             .parse()
             .unwrap(),
     );
@@ -784,7 +785,8 @@ async fn api_login(
 }
 
 async fn api_logout(State(state): State<WebState>, headers: HeaderMap) -> Response {
-    if let Some(c) = cookie_value(&headers) {
+    let unit = state.config.read().await.unit.clone();
+    if let Some(c) = cookie_value(&unit, &headers) {
         state.sessions.remove(&c).await;
     }
     let mut resp = Json(ApiMessage {
@@ -793,7 +795,7 @@ async fn api_logout(State(state): State<WebState>, headers: HeaderMap) -> Respon
     .into_response();
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        clear_session_cookie(request_is_https(&headers))
+        clear_session_cookie(&unit, request_is_https(&headers))
             .parse()
             .unwrap(),
     );
@@ -1381,6 +1383,19 @@ async fn api_users_reset_password(
 
 const COOKIE_NAME: &str = "branch_session";
 
+/// One origin serves every pair's console; a fixed cookie name let the
+/// pairs evict each other's sessions (last login wins). The cookie name
+/// carries this install's unit — `branch_session_nok` — so an operator's
+/// sessions for different pairs coexist in one browser. Pre-setup (unit
+/// still empty) keeps the bare name.
+fn cookie_name(unit: &str) -> String {
+    if unit.is_empty() {
+        COOKIE_NAME.to_string()
+    } else {
+        format!("{COOKIE_NAME}_{unit}")
+    }
+}
+
 /// True when the request reached us over HTTPS through the reverse proxy.
 /// X-Forwarded-Proto is trusted as-is: the bundled Caddy always sets it, and
 /// a client faking the header on a direct HTTP connection only marks its own
@@ -1396,24 +1411,31 @@ fn request_is_https(headers: &HeaderMap) -> bool {
 /// SameSite=Lax (Strict would drop the cookie on top-level navigations and
 /// bounce operators to /login); no `__Host-` prefix, which would forbid the
 /// cookie entirely on plain-HTTP dev/LAN deployments.
-fn session_cookie(session_id: &str, secure: bool) -> String {
+fn session_cookie(unit: &str, session_id: &str, secure: bool) -> String {
     let secure_attr = if secure { "; Secure" } else { "" };
-    format!("{COOKIE_NAME}={session_id}; Path=/; HttpOnly; SameSite=Lax{secure_attr}")
+    format!(
+        "{}={session_id}; Path=/; HttpOnly; SameSite=Lax{secure_attr}",
+        cookie_name(unit)
+    )
 }
 
 /// Cookie identity is name+path, so clearing works regardless of the Secure
 /// attribute; carrying it keeps strict-secure-cookie browsers happy. The
 /// server-side session removal is the real logout.
-fn clear_session_cookie(secure: bool) -> String {
+fn clear_session_cookie(unit: &str, secure: bool) -> String {
     let secure_attr = if secure { "; Secure" } else { "" };
-    format!("{COOKIE_NAME}=deleted; Path=/; Max-Age=0{secure_attr}")
+    format!(
+        "{}=deleted; Path=/; Max-Age=0{secure_attr}",
+        cookie_name(unit)
+    )
 }
 
-fn cookie_value(headers: &HeaderMap) -> Option<String> {
+fn cookie_value(unit: &str, headers: &HeaderMap) -> Option<String> {
     let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+    let prefix = format!("{}=", cookie_name(unit));
     for c in cookie_header.split(';') {
         let c = c.trim();
-        if let Some(rest) = c.strip_prefix(&format!("{COOKIE_NAME}=")) {
+        if let Some(rest) = c.strip_prefix(&prefix) {
             return Some(rest.to_string());
         }
     }
@@ -1421,7 +1443,8 @@ fn cookie_value(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn authenticated(state: &WebState, headers: &HeaderMap) -> Option<Authed> {
-    let session_id = cookie_value(headers)?;
+    let unit = state.config.read().await.unit.clone();
+    let session_id = cookie_value(&unit, headers)?;
     let username = state.sessions.username_for(&session_id).await?;
     // Defense in depth: a persisted session of a since-deleted (or
     // corruption-reset) user must not authenticate.
@@ -1615,20 +1638,49 @@ mod tests {
     #[test]
     fn session_cookies_carry_secure_only_over_https() {
         assert_eq!(
-            session_cookie("sid-1", false),
+            session_cookie("", "sid-1", false),
             "branch_session=sid-1; Path=/; HttpOnly; SameSite=Lax"
         );
         assert_eq!(
-            session_cookie("sid-1", true),
+            session_cookie("", "sid-1", true),
             "branch_session=sid-1; Path=/; HttpOnly; SameSite=Lax; Secure"
         );
         assert_eq!(
-            clear_session_cookie(false),
+            clear_session_cookie("", false),
             "branch_session=deleted; Path=/; Max-Age=0"
         );
         assert_eq!(
-            clear_session_cookie(true),
+            clear_session_cookie("", true),
             "branch_session=deleted; Path=/; Max-Age=0; Secure"
         );
+    }
+
+    #[test]
+    fn cookie_names_are_unit_scoped_so_pairs_do_not_evict_each_other() {
+        assert_eq!(cookie_name(""), "branch_session");
+        assert_eq!(cookie_name("nok"), "branch_session_nok");
+        assert_eq!(
+            session_cookie("nok", "sid-1", false),
+            "branch_session_nok=sid-1; Path=/; HttpOnly; SameSite=Lax"
+        );
+        assert_eq!(
+            clear_session_cookie("usd", true),
+            "branch_session_usd=deleted; Path=/; Max-Age=0; Secure"
+        );
+    }
+
+    #[test]
+    fn cookie_value_picks_this_pair_s_cookie_from_a_shared_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "branch_session_eur=eur-sid; branch_session_nok=nok-sid"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(cookie_value("nok", &headers).as_deref(), Some("nok-sid"));
+        assert_eq!(cookie_value("eur", &headers).as_deref(), Some("eur-sid"));
+        // The bare (pre-setup) name must not latch onto a pair-scoped value.
+        assert_eq!(cookie_value("", &headers), None);
     }
 }

@@ -55,3 +55,31 @@ for (const pair of PAIRS_WITH_PASSWORD) {
     })
   })
 }
+
+// The pairs share one origin, so session cookies carry the unit in their
+// name (branch_session_nok…) — with a shared name, the second sign-in
+// evicted the first (last cookie wins). Both pages share one context here.
+test.skip(
+  PAIRS_WITH_PASSWORD.length < 2,
+  "needs admin passwords for at least two pairs",
+)
+test("signing into a second pair's console keeps the first signed in @smoke", async ({
+  page,
+}) => {
+  const [first, second] = PAIRS_WITH_PASSWORD
+  async function signIn(pair: (typeof PAIRS_WITH_PASSWORD)[number], target: typeof page) {
+    await target.goto(`${pair.consoleBase}/login`)
+    await target.getByRole("textbox", { name: "Username" }).fill("admin")
+    await target.getByRole("textbox", { name: "Password" }).fill(pair.password)
+    await target.getByRole("button", { name: "Sign in" }).click()
+    await expect(target.getByText("Open quotes").first()).toBeVisible()
+  }
+
+  await signIn(first, page)
+  const secondPage = await page.context().newPage()
+  await signIn(second, secondPage)
+
+  await page.reload()
+  await expect(page.getByText("Open quotes").first()).toBeVisible()
+  await secondPage.close()
+})

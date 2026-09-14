@@ -80,12 +80,14 @@ closed same-day:
   all mints + per-pair bundle verification); e2e.sh fetches the NOK
   admin password too.
 
-Known-new: the `branch_session` cookie (`Path=/`, one name, shared
-origin) means signing into one pair's console replaces another's —
-needs per-pair cookie names/paths before multi-pair tellers share a
-browser. The dial (angle sensor) on atomD sets the delivery RATE; only
-delivered kW·s is metered/reported — the angle itself never leaves the
-box (a fleet-dashboard candidate).
+Known-new: the `branch_session` cookie was shared across pairs on the
+one origin (`Path=/`, one name — last login evicted the others); FIXED
+same day — cookie names now carry the unit (`branch_session_nok`), all
+pairs' sessions coexist in one browser (regression-pinned by
+console.spec.ts). The dial (angle sensor) on atomD sets the delivery
+RATE; only delivered kW·s is metered/reported — the angle itself never
+leaves the box (needs the charger-firmware repo; a fleet-dashboard
+candidate).
 
 ## SAT currency round 2026-09-04
 

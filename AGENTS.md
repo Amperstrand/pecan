@@ -140,10 +140,10 @@ adding tests.
 - Unit tests: `cd web && npm test` (vitest). Fast inner loop — handler
   payload shapes, error mappings, and pure utils are pinned here; run these
   BEFORE deploying to iterate on logic without the e2e cycle.
-- Processor tests: `cd processor && cargo test` (66 tests, includes the
-  onchain settle predicate for both 0- and ≥1-conf modes). CI runs them,
-  but ONLY on `main` pushes and PRs — run locally before pushing
-  `deployment`.
+- Processor tests: `cd processor && cargo test` (83 tests, includes the
+  onchain settle predicate for both 0- and ≥1-conf modes). CI runs them
+  on `main` AND `deployment` pushes + PRs — still run locally before
+  pushing `deployment` to iterate fast.
 - Deploy: `scripts/deploy.sh` — rsync source to **ai-legion-small**,
   Docker build THERE (32GB RAM; inr2 OOMs on Rust builds), ship the image
   tar to inr2, compose up, restart the mint, verify the bundle. Fresh-Deploy
@@ -248,11 +248,11 @@ adding tests.
   escape hatch (signet only). The EUR switch means old NOK operations in
   user browsers are inert (unit filter in getPendingDeposit skips them).
 
-- **Console sessions share one cookie across pairs.** `branch_session`
-  is set with `Path=/` under one name on the shared origin: signing into
-  a second pair's console replaces the first's session (last cookie
-  wins). Fine for one operator at a time; per-pair cookie names or paths
-  needed before tellers work two pairs in one browser.
+- **Console session cookies are per-pair** (`branch_session_{unit}` —
+  set by the processor, name derived from its unit). Signing into
+  several pairs' consoles in one browser keeps all sessions; before
+  2026-09-14 one shared `branch_session` name meant the last login
+  evicted the others (regression-pinned by console.spec.ts).
 
 - **The console SPA derives its base from the URL** (web/src/lib/
   console-base.ts): API calls, SSE, and router paths are prefixed with
