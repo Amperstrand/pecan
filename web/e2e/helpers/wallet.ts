@@ -237,7 +237,7 @@ export async function readBalance(page: Page): Promise<number> {
   }
 }
 
-const CURRENCY_SYMBOLS: Record<string, string> = { EUR: "€", USD: "$", SATS: "sat" }
+const CURRENCY_SYMBOLS: Record<string, string> = { EUR: "€", USD: "$", NOK: "kr", SATS: "sat" }
 
 /**
  * The 6-character code shown under "Give this code to the teller:" for both
