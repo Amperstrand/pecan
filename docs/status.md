@@ -225,7 +225,8 @@ the physical box.
    Device-side future work (field config, web installer on our fork of
    lnbits/hardware-installer, an LNbits LNURLdevice mode) is planned in
    evmap's `firmware/ESP32-ROADMAP.md`.
-2. **Unresponsive-page suite flake (undiagnosed).** Mid-chain full-suite
+2. **Unresponsive-page suite flake (undiagnosed; data point 2026-09-15).**
+   Mid-chain full-suite
    failures where Playwright's page-snapshot capture times out — the
    page's own JS keeps running (heartbeat-verified), so it is
    driver/page contention, not a frozen app. Rate: ~2/4 historically,
@@ -238,7 +239,16 @@ the physical box.
    lock); a standalone 17-iteration rail soak (@stress, 5.4 m) showed
    zero stalls, pointing at suite-load contention, not the wallet. If
    flakes persist, run the trace campaign: loop `--trace on` until it
-   recurs and read the trace.
+   recurs and read the trace. 2026-09-15 hunt (#19): a full-suite
+   baseline on a machine at load-average ~470 (five concurrent agent
+   browser drivers) failed 7 — but decomposed into the physical charger
+   fleet dying that evening (5 charger tests, daemons correctly
+   device-timeout-settling; atomC offline, the atom box
+   MQTT-connected-but-unresponsive) plus chain skips, not the
+   page-snapshot signature; the deposit lane then ran 8×16 tests GREEN
+   under the same load (3-6× wall inflation, zero flakes). Contention
+   costs latency, not correctness, in the deposit lane; the historical
+   signature remains unreproduced — keep the trace campaign armed.
 3. **Deposit expiry burn.** A deposit melt that expires while the daemon
    is down burns (reconcile DRIFT; manual write-off). Hardening: the
    daemon can distinguish never-triggered windows from delivered
@@ -279,7 +289,8 @@ All remaining work is tracked as GitHub issues
 lives here; the issues carry acceptance criteria and code pointers.
 
 Short (days):
-- Enable ev on USD (env + second daemon) — #10.
+- Enable ev on USD — DONE 2026-09-15 (#10): ev-charge-usd daemon active,
+  rail in the USD compose, USD charger lane in the suite (usd.spec).
 - Expiry auto-refund for never-triggered deposits — #13.
 - Tariff snapshot at trigger time — #12.
 - Refund rounding: batch/accumulate sub-unit remainders — #26.
