@@ -76,3 +76,13 @@ http://localhost:9090 (demo `admin`/`admin`). Frontend in `web/`, processor
 in `processor/`, installer in `mintctl/`; CI tests every PR and publishes
 multi-arch images to `ghcr.io/zeugmaster/pecan`. The upstream research and
 rescope record live in `docs/`.
+
+## Live deployment
+
+Our production instance (multi-currency pairs + the EV-charging payout
+rail, at https://giftcard.cashu.exchange) is documented separately:
+[docs/architecture.md](docs/architecture.md) maps the running system,
+and [docs/status.md](docs/status.md) tracks what is verified, known
+limitations, and the ranked backlog (also mirrored as GitHub issues).
+`make demo` runs the full customer→teller→charger story in a visible
+browser on a Mac.

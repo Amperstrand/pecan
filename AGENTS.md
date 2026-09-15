@@ -110,7 +110,10 @@ docs/status.md).
 
 Current status, known limitations, and the ranked improvement backlog
 live in [docs/status.md](docs/status.md) — read it before planning work;
-keep it current when the picture changes.
+keep it current when the picture changes. The live deployment's
+architecture map is [docs/architecture.md](docs/architecture.md);
+remaining work is tracked as GitHub issues (status.md § backlog links
+them).
 
 Coverage matrix (rail × currency, which file owns each cell, and which
 rows are deliberately EUR-only shared machinery) lives as a comment

@@ -274,38 +274,42 @@ the physical box.
 
 ## Improvement backlog
 
+All remaining work is tracked as GitHub issues
+(github.com/Amperstrand/pecan — open issues #8–#27). The ranked intent
+lives here; the issues carry acceptance criteria and code pointers.
+
 Short (days):
-- Enable ev on USD (env + second daemon) or document EUR-only as demo
-  scope.
-- Expiry auto-refund for never-triggered deposits (daemon ledger
-  already knows the difference).
-- Tariff snapshot at trigger time.
-- `soak.sh`-style repetition over the deposit flow (the single-green-run
-  lesson).
+- Enable ev on USD (env + second daemon) — #10.
+- Expiry auto-refund for never-triggered deposits — #13.
+- Tariff snapshot at trigger time — #12.
+- Refund rounding: batch/accumulate sub-unit remainders — #26.
 
 Medium:
-- The flake hunt (trace capture campaign) — highest-value quality work
-  in the repo right now.
-- Gateway session persistence + caddy rate-limit on the public stop
-  endpoint (the unguessable ref is the real gate; a limiter is belt and
-  braces).
-- Live slider over NUT-17 websockets instead of 1 s polling.
-- Physical-button e2e: the G39 path is manually verified; a spec can
-  simulate it (MQTT aborted publish) the way the deposit spec drives the
-  remote stop — worth adding so both stop paths stay covered.
+- The flake hunt (trace capture campaign) + deposit-flow soak — #19,
+  the highest-value quality work in the repo right now.
+- Gateway session persistence + rate-limit on the public stop
+  endpoint — #11.
+- Live slider via websocket push instead of 1 s polling — #20.
+- Physical-button e2e (MQTT aborted publish) — #14.
+- Charger fleet status card in the console — #8 (+ dial telemetry #9,
+  firmware-side).
+- NOK lane in defineWalletSuite — #16; camera scanner verification +
+  decode-path test — #17.
 
 Long / strategic:
-- Upstream: file the partial-settle use case with cashubtc/cdk (the
-  amount-floor discovery + our deposit-pattern workaround is a strong
-  issue write-up; design C would become possible).
-- Upstream PRs from our generic work (per branch-ownership rules):
-  wallet mint-call timeouts, smoke-tier test structure, the fee-lesson
-  input-consolidation note, `/api/tickets/open` as a daemon surface.
-- Real metering: when a metered socket exists, `delivered` becomes Wh
+- Upstream: file the partial-settle use case with cashubtc/cdk — #23
+  (design C would become possible).
+- Upstream PRs from our generic work — #24 (mint-call timeouts,
+  smoke-tier structure, fee-lesson note, /api/tickets/open).
+- Real metering: `delivered` becomes Wh
   unchanged through the whole stack (device → gateway → daemon →
-  receipt); tariff becomes €/kWh.
-- Commercial CSMS integration: the gateway's HTTP contract is the seam;
-  an OCPP adapter maps RemoteStart/MeterValues/StopTransaction onto it.
+  receipt); tariff becomes €/kWh — #15 (CSMS/OCPP seam included).
+- Crash-recovery suite in the tollgate style + meter-trust policy —
+  #25.
+- Ambient gRPC churn investigation — #27.
+- Ops polish: root-domain landing branding — #21; deploy.sh
+  image-tag hygiene — #22; scanner fallback decoder for non-Chromium —
+  #18.
 
 ## tollgate-rs: adopted vs pending
 
@@ -324,10 +328,12 @@ the loose version of this).
 
 ## Test quick-reference
 
-`cd web && npm test` (72) → `cd processor && cargo test` (75) →
+`cd web && npm test` (76) → `cd processor && cargo test` (83) →
 `scripts/api-smoke.sh` (incl. signut liveness) →
-`scripts/e2e.sh --smoke` (~25 s) → `scripts/e2e.sh -g "SAT wallet"`
-(~30 s, ~47 sat) → `scripts/e2e.sh -g "deposit pattern"` (~30 s) →
-`scripts/e2e.sh` (full, 43) → `scripts/e2e.sh -g @stress`. Full ladder
+`scripts/e2e.sh --smoke` (14 tests, ~30 s) →
+`scripts/e2e.sh -g "SAT wallet"` (~30 s, ~47 sat) →
+`scripts/e2e.sh -g "deposit pattern"` (~30 s) →
+`scripts/e2e.sh` (full suite) → `scripts/e2e.sh -g @stress` →
+`make demo` (visible live demo, not a test). Full ladder
 in AGENTS.md; rig pre-flight in the runbook above; spec-quote drift
 via `scripts/spec-quote-check.sh`.
