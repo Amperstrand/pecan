@@ -9,6 +9,9 @@ const DEPOSIT = 6
 const BUDGET = 4
 
 test("NOK: lightning deposit then charger D session end to end", async ({ page }) => {
+  // Internal waits (invoice, charge receipt, refund) budget up to 180s;
+  // the default 60s test timeout would cut them off mid-wait.
+  test.setTimeout(240_000)
   await page.addInitScript(() => {
     localStorage.setItem("pecan-debug", "1")
     localStorage.setItem("pecan-currency", "nok")

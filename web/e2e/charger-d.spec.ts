@@ -9,6 +9,9 @@ import { readBalance } from "./helpers/wallet"
 const BUDGET = 2
 
 test("charger D deposit-pattern session end to end", async ({ page }) => {
+  // The charge + refund legs alone budget 120s + 180s inside; the default
+  // 60s test timeout would cut them off mid-wait on any slow delivery.
+  test.setTimeout(240_000)
   await bootAndFund(page, "/eur-console", BUDGET + 1)
   const before = await readBalance(page)
 
