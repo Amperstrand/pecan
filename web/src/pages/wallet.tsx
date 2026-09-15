@@ -171,6 +171,13 @@ const WITHDRAW_OPTIONS = [
     fixed: "ev:atomD",
     hint: "The t-relay lineage box — the fleet's ancestor hardware, real relay click. 1 unit = 1 kW·s.",
   },
+  {
+    id: "atomV",
+    label: "Charger V",
+    placeholder: null,
+    fixed: "ev:atomV",
+    hint: "Virtual charger — an API, no hardware. Always available, even with the fleet unplugged. 1 unit = 1 kW·s.",
+  },
 ] as const
 
 type WithdrawRail = (typeof WITHDRAW_OPTIONS)[number]["id"]

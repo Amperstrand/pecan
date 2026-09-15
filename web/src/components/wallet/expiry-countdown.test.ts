@@ -20,16 +20,20 @@ describe("formatMsRemaining", () => {
 
 describe("countdown deadline", () => {
   it("falls back to createdAt + the 30-min wallet TTL without expiresAt", () => {
-    const createdAt = Date.now() - 10_000
+    // One clock read: two Date.now() calls drift apart under suite load
+    // (a 2026-09-15 flake — 10s of drift turned 54:5x into 54:49).
+    const now = Date.now()
+    const createdAt = now - 10_000
     const deadline = createdAt + DEPOSIT_EXPIRY_MS
-    expect(formatMsRemaining(deadline - Date.now())).toMatch(/^29:5/)
+    expect(formatMsRemaining(deadline - now)).toMatch(/^29:5/)
   })
 
   it("prefers the mint's own expiry when present (signut lives 55 min)", () => {
-    const createdAt = Date.now() - 10_000
+    const now = Date.now()
+    const createdAt = now - 10_000
     const expiresAt = createdAt + 55 * 60 * 1000
     const deadline = expiresAt
-    expect(formatMsRemaining(deadline - Date.now())).toMatch(/^54:5/)
+    expect(formatMsRemaining(deadline - now)).toMatch(/^54:5/)
     // Long after the 30-min fallback would have declared it dead.
     expect(formatMsRemaining(deadline - (createdAt + DEPOSIT_EXPIRY_MS))).toBe(
       "25:00",

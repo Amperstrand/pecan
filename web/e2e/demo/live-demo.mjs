@@ -25,7 +25,13 @@ const SHOTS = "/tmp/pecan-demo"
 const FUND = Number(process.env.PECAN_DEMO_FUND ?? 25)
 const BUDGET = Number(process.env.PECAN_DEMO_BUDGET ?? 12)
 const DEVICE = process.env.PECAN_DEMO_DEVICE ?? "atomD"
-const CHARGER_TAB = { atomA: "Charger A", atomB: "Charger B", atomC: "Charger C", atomD: "Charger D" }[DEVICE]
+const CHARGER_TAB = {
+  atomA: "Charger A",
+  atomB: "Charger B",
+  atomC: "Charger C",
+  atomD: "Charger D",
+  atomV: "Charger V",
+}[DEVICE]
 const PASSWORD = process.env.PECAN_DEMO_ADMIN_PASSWORD ?? ""
 
 if (!PASSWORD) {
@@ -33,7 +39,7 @@ if (!PASSWORD) {
   process.exit(1)
 }
 if (!CHARGER_TAB) {
-  console.error(`FAIL: unknown charger device "${DEVICE}" (atomA..atomD)`)
+  console.error(`FAIL: unknown charger device "${DEVICE}" (atomA..atomD, atomV = virtual)`)
   process.exit(1)
 }
 
@@ -210,7 +216,11 @@ async function main() {
   await wallet.getByPlaceholder("1.00").fill(String(BUDGET))
   await wallet.getByRole("button", { name: "Start charging" }).click()
   await wallet.getByText(`Charging at ${CHARGER_TAB}`).first().waitFor({ timeout: 60_000 })
-  ok(`charging window open — the relay on ${DEVICE} should click now`)
+  ok(
+    DEVICE === "atomV"
+      ? "charging window open — the virtual charger is delivering"
+      : `charging window open — the relay on ${DEVICE} should click now`,
+  )
   await shot(wallet, "6-charging")
 
   step("monitor the live session via the gateway (delivered kW·s)")

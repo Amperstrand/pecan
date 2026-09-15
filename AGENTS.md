@@ -93,7 +93,10 @@ seconds with zero side effects:
    profile persists in /tmp/pecan-demo-profile (balance carries; tops up
    only when short). atomD liveness = the t-relay box's
    `charger/atom/status` LWT (NOT charger/atomD/status — the box serves
-   multiple charger ids).
+   multiple charger ids). Hardware-free variant: `PECAN_DEMO_DEVICE=atomV
+   make demo` — the virtual charger (ev-virtual-charger.service on inr2,
+   `scripts/virtual-charger.sh status`) is an API-only device with no
+   physical twin; it must be online or the @smoke charger-V spec fails.
 
 E2E knobs and rules: `PECAN_E2E_ONCHAIN_CONF=<n>` pins the expected
 onchain confirmation policy (unset = trust the deployment; mismatch
@@ -156,7 +159,8 @@ adding tests.
   its sqlite is wiped, and crash-loops until the processor is listening —
   start pecan first.
 - Mint seed backup: `scripts/mint-backup.sh` — encrypted (aes-256) off-box
-  archive of BOTH mints' seeds + config + consistent sqlite snapshots to
+  archive of EVERY mint's seeds + config + consistent sqlite snapshots
+  (EUR/USD/NOK — driven by `scripts/pairs.sh`) to
   `~/backups/pecan-mint/`. Passphrase in macOS Keychain
   (`pecan-mint-backup-passphrase`) — ALSO record it physically. This is the
   only artifact that can re-issue outstanding giftcard ecash after inr2

@@ -1,8 +1,8 @@
 # Pecan + EV rail — status, limitations, and where to go next
 
-Snapshot: 2026-09-14 (updated after the multi-pair console + live-demo
-round — NOK pair, pair-prefixed console SPA, teller camera scan,
-`make demo`, atomD relay live; see the 2026-09-14 section). Live at
+Snapshot: 2026-09-15 (updated after the hygiene round — canonical pair
+manifest, NOK into backup/smoke/reconcile, one deploy image tag, ev on
+USD, fleet card; see the 2026-09-15 section). Live at
 https://giftcard.cashu.exchange. This is
 the honest map of what works, what is known-broken or limited, and the
 ranked backlog. Keep it current when the picture changes.
@@ -11,15 +11,15 @@ ranked backlog. Keep it current when the picture changes.
 
 | Piece | Version / state | Notes |
 |---|---|---|
-| cdk-mintd (both pairs) | **0.18.0 final** (upgraded from rc.3 2026-09-03) | DB-backed config; pre-upgrade DBs in `/root/backups/*-pre-0.18.0.sqlite` |
-| pecan processor | deployment branch | EUR + USD pairs, 8 payout rails on EUR (7 sim + ev), 7 on USD (no ev yet); CSP whitelists signut (https+wss) |
+| cdk-mintd (all pairs) | **0.18.0 final** (upgraded from rc.3 2026-09-03) | DB-backed config; pre-upgrade DBs in `/root/backups/*-pre-0.18.0.sqlite` |
+| pecan processor | deployment branch | EUR + USD + NOK pairs, ev rail on every fiat pair (8 payout rails each); CSP whitelists signut (https+wss) |
 | Wallet (coco 2) | same deploy | rail picker, deposit-pattern chargers, mint-call timeouts, reload-resume, **sat mode (bolt11, signut)** |
 | SAT mint | external: signut.cashu.exchange (Nutshell-CF) | bolt11+sat only, NUT-17 off (ws 410 → blackhole factory), CORS open; no console, no pecan rails |
-| ev-charge daemon | inr2 systemd `ev-charge.service` | watch mode: settle, expiry guards, at-most-once trigger, refund ledger |
+| ev-charge daemon | inr2 systemd, one per fiat pair (`ev-charge`, `-usd`, `-nok`) | watch mode: settle, expiry guards, at-most-once trigger, refund ledger |
 | atom-gateway | inr2 systemd `atom-bridge.service` | public session endpoints (ref = capability), remote stop, delivered metering |
 | Charger firmware | **charger-stick-slint (Rust+Slint)** — M5Stick Plus LIVE 2026-09-05 (evmap `af24ed0`); `tdisplay-s3` profile (charger C, LILYGO T-Display S3) compile-verified, awaiting board bring-up | MQTT byte-parity family; see FLASHING.md (USB-only at 92-95% flash: no OTA slots on 4MB; ESPHome sibling keeps wifi-OTA) |
 | Charger C rail | **LIVE on REAL hardware** 2026-09-07 (pecan `720d8a8`, evmap `5a446bf`): LILYGO T-Display S3 flashed, contract + charger C e2e green; atomC needs zero backend wiring (slug passthrough) | Display+backlight-blink is the indicator (no relay/buzzer on that board); sim serves atomA/B only while the M5Stick is away |
-| Deploy lane | `scripts/deploy.sh` → build on ai-legion-small → inr2 | builder disk pruned 2026-09-02 (was 99% full) |
+| Deploy lane | `scripts/deploy.sh` → build on ai-legion-small → inr2 | one `pecan:deployment` tag for all pairs; also syncs /opt/pecan-tools (reconcile + pairs.sh) |
 
 ## Verified working (evidence in the repo)
 
@@ -41,6 +41,48 @@ ranked backlog. Keep it current when the picture changes.
 - **Ops**: reconcile clean; caddy reload fixed (systemd PrivateTmp
   recreation after the disk-full /tmp wipe); password/fixture fetching
   automated in `scripts/e2e.sh`.
+
+## Hygiene round 2026-09-15
+
+A duplication audit (pair list hand-enumerated in six scripts; compose
+image tags scrambled) found gaps that were live risks, all closed and
+verified in one deploy:
+
+- **Canonical pair manifest** — `scripts/pairs.sh` (POSIX, bash-3.2
+  safe) is the one table of per-pair facts (compose paths, server dirs,
+  password files/env names, containers, mint dirs). deploy.sh,
+  api-smoke.sh, e2e.sh, rails-audit.sh, mint-backup.sh, and
+  reconcile-server.sh all consume it; deploy.sh rsyncs it to
+  /opt/pecan-tools with the reconcile scripts (the server copy can no
+  longer lag the repo).
+- **NOK was outside every operational net** (the audit's top finding):
+  not in the encrypted mint backup, not in api-smoke, not in
+  reconcile, not in rails-audit — all fixed from the manifest. First
+  post-fix backup decrypt-verified with all three pairs' seeds
+  (compose + mint.toml + sqlite + .env each); reconcile-status.json
+  now gates nok; api-smoke prints the nok section.
+- **One image tag** (#22 closed): the three composes referenced a
+  scrambled mix (`prod.yml` said `pecan:nok`, `nok.yml` said
+  `pecan:eur`) that only worked because deploy.sh retagged one build
+  into every name. Now a single `pecan:deployment` tag; deploy.sh
+  drops the legacy tags (inr2 disk hygiene).
+- **ev rail on USD** (#10 closed): env + fleet card on the USD compose,
+  `ev-charge-usd.service` watching the usd-console, and a USD charger
+  e2e (self-funding via teller so a standalone grep needs no payer
+  liquidity) — green against the physical atomD.
+- **Console-error gate learned the slider's warmup polls**: the charge
+  slider polls the gateway session endpoint from melt submission; the
+  daemon triggers asynchronously, so 1–3 pre-trigger 404s are inherent
+  (wallet already treats !ok as null). trackWalletErrors filters
+  exactly that shape — first gated charger test surfaced it.
+- Rig note: **payer reservoir nearly dry** (26k sat vs 150k reserve) —
+  onchain e2e legs will fail until a signet faucet refill; teller and
+  lightning legs unaffected.
+- Stale-entry cleanup: tariff snapshot (#12) was already done
+  (2026-09-03 hardening, `payout/ev-charge.py` `_tariffs` +
+  test-pinned) — removed from backlog/limitations. #13's true scope
+  recorded: an expiry refund needs a wallet-side claim flow (the
+  daemon cannot mint to a pubkey it never saw) — medium, not short.
 
 ## Multi-pair console + live-demo round 2026-09-14
 
@@ -88,6 +130,33 @@ console.spec.ts). The dial (angle sensor) on atomD sets the delivery
 RATE; only delivered kW·s is metered/reported — the angle itself never
 leaves the box (needs the charger-firmware repo; a fleet-dashboard
 candidate).
+
+## Virtual charger round 2026-09-15 (evening)
+
+The physical fleet went dark mid-evening (atomC retained status
+offline; the atom/t-relay box MQTT-connected but unresponsive — the
+daemons correctly device-timeout-settle with -TIMEOUT receipts). The
+answer to demo-blocking hardware: **atomV**, an API-only virtual
+charger with no physical twin.
+
+- `scripts/ev-virtual-charger.mjs` + `virtual-charger.sh` — speaks the
+  exact firmware MQTT contract (retained online, ack, countdown-finished
+  at window end, wall-clock 1 s per kW·s) as the always-on
+  `ev-virtual-charger.service` on inr2. No TTL, no start-refusal —
+  nothing physical to collide with.
+- Wallet gains **Charger V** (`ev:atomV`); the demo lane runs
+  hardware-free (`PECAN_DEMO_DEVICE=atomV make demo` — proven 2026-09-15
+  with the whole fleet down: NOK 8 melt → 8 kW·s → receipt
+  EV-atomV-8s-452335AE, balance exact). The fleet-gate failure message
+  points at the virtual variant.
+- @smoke gains the charger-V end-to-end spec (zero sat, ~15 s) — the
+  hardware-free critical path is now part of every post-deploy check.
+- Fleet-card env (EUR+NOK composes) lists atomV, so the Mint-tab card
+  shows it online while the boxes are dark.
+- Bonus flake fix (found under load-average ~470):
+  expiry-countdown.test.ts read Date.now() twice — 10 s of suite-load
+  drift turned 54:5x into 54:49 (#19 data point; single clock read
+  now).
 
 ## SAT currency round 2026-09-04
 
@@ -253,9 +322,9 @@ the physical box.
    is down burns (reconcile DRIFT; manual write-off). Hardening: the
    daemon can distinguish never-triggered windows from delivered
    partials and auto-refund expired-but-untriggered deposits.
-4. **ev rail is EUR-only.** The USD pair's on-server compose predates
-   the rail; enabling is a one-line env change plus a second daemon
-   instance pointed at the USD console (tariff/gateway shared).
+4. **ev rail is EUR-only** — RESOLVED 2026-09-15: env + second daemon
+   (`ev-charge-usd.service`) + USD charger e2e green on the physical
+   atomD.
 5. **Gateway session state is memory-only.** An atom-bridge restart
    mid-session loses the ref↔session map: the slider stops updating and
    the browser Stop falls back to the physical button (the charger's
@@ -264,10 +333,10 @@ the physical box.
 6. **Refund rounding.** Sub-euro remainders are unclaimed (mint-quote
    minimum). At the 1 s/€ demo tariff the exposure is < €1 per session;
    at finer tariffs, batch or accumulate refunds.
-7. **Tariff is daemon-global and read at settle time.** A mid-session
-   daemon restart with a changed `--secs-per-eur` would misbill the
-   in-flight session. Snapshot the tariff into the state record at
-   trigger time (a tollgate-rs pricing-doc lesson).
+7. **Tariff is daemon-global and read at settle time** — RESOLVED
+   2026-09-03 (stale entry, removed from the backlog 2026-09-15): the
+   daemon snapshots `secs_per_eur` per ticket at trigger time
+   (`payout/ev-charge.py`, unit-pinned) and settles from the snapshot.
 8. **Ambient gRPC churn.** `Error adding payment event to stream:
    channel closed` appears 1–6/min under load, present in passing runs
    too; sagas always complete. Never root-caused; worth one look at
@@ -291,8 +360,9 @@ lives here; the issues carry acceptance criteria and code pointers.
 Short (days):
 - Enable ev on USD — DONE 2026-09-15 (#10): ev-charge-usd daemon active,
   rail in the USD compose, USD charger lane in the suite (usd.spec).
-- Expiry auto-refund for never-triggered deposits — #13.
-- Tariff snapshot at trigger time — #12.
+- Expiry auto-refund for never-triggered deposits — #13 (medium, not
+  short: also needs the wallet-side `refund:<quote>` claim flow, since
+  the daemon cannot mint to a pubkey it never saw).
 - Refund rounding: batch/accumulate sub-unit remainders — #26.
 
 Medium:
@@ -322,7 +392,8 @@ Long / strategic:
   #25.
 - Ambient gRPC churn investigation — #27.
 - Ops polish: root-domain landing branding — #21; deploy.sh
-  image-tag hygiene — #22; scanner fallback decoder for non-Chromium —
+  image-tag hygiene — DONE 2026-09-15 (single `pecan:deployment` tag,
+  see the hygiene round); scanner fallback decoder for non-Chromium —
   #18.
 
 ## tollgate-rs: adopted vs pending
@@ -333,7 +404,7 @@ in the state ledger); server-side validation against delivery truth;
 reload-safe wallet claims (refund = ordinary pending deposit card);
 at-least-once mark-paid (Paid-settle is a no-op).
 
-Pending: tariff snapshotting per session; a crash-recovery test suite
+Pending: a crash-recovery test suite
 in the tollgate style (SIGKILL the daemon at each refund stage and
 assert convergence — their `tests/crash_recovery.py` is the template);
 an explicit meter-trust policy doc for telemetry gaps (freeze vs
@@ -342,7 +413,7 @@ the loose version of this).
 
 ## Test quick-reference
 
-`cd web && npm test` (76) → `cd processor && cargo test` (83) →
+`cd web && npm test` (76) → `cd processor && cargo test` (88) →
 `scripts/api-smoke.sh` (incl. signut liveness) →
 `scripts/e2e.sh --smoke` (14 tests, ~30 s) →
 `scripts/e2e.sh -g "SAT wallet"` (~30 s, ~47 sat) →

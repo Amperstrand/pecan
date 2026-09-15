@@ -71,7 +71,8 @@ PY
       echo "    $DEVICE is online (status topic: $online_via)"
     else
       echo "!! $DEVICE is not online (fleet: $fleet)." >&2
-      echo "   Power the t-relay box, or start the stand-in: scripts/ev-device-sim.sh start" >&2
+      echo "   Power the physical box — or demo hardware-free instead:" >&2
+      echo "   PECAN_DEMO_DEVICE=atomV make demo   (virtual charger, always on)" >&2
       echo "   Override with PECAN_DEMO_SKIP_FLEET_CHECK=1 (the charge leg will then fail)." >&2
       exit 1
     fi
