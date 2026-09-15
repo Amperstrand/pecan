@@ -291,8 +291,11 @@ Medium:
   endpoint — #11.
 - Live slider via websocket push instead of 1 s polling — #20.
 - Physical-button e2e (MQTT aborted publish) — #14.
-- Charger fleet status card in the console — #8 (+ dial telemetry #9,
-  firmware-side).
+- Charger fleet status card — DONE 2026-09-15 (#8): /api/fleet proxies
+  the atom-gateway per device (X-API-key stays server-side; env-wired
+  on the EUR + NOK pairs), Mint-tab card with 10 s refresh, degrades to
+  "unreachable". Caught in review: device ids must keep their case —
+  the gateway keys sessions by the id as triggered (atomD).
 - NOK lane in defineWalletSuite — #16; camera scanner verification +
   decode-path test — #17.
 
