@@ -21,6 +21,7 @@ mod backends;
 mod checks;
 mod clients;
 mod config;
+mod fleet;
 mod ln;
 mod onchain;
 mod payout;

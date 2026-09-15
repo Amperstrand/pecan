@@ -18,7 +18,9 @@ import {
   type ChecklistItem,
   type SelfTestLeg,
   fetchChainStatus,
+  fetchFleet,
   type ChainStatus,
+  type FleetStatus,
 } from "@/lib/api"
 import { formatAge, formatDateTime } from "@/lib/format"
 import { useSnapshot } from "@/lib/snapshot"
@@ -53,6 +55,7 @@ export function MintTab({ snapshot }: { snapshot: AppSnapshot }) {
       <ChecklistCard snapshot={snapshot} />
       <SnippetCard snapshot={snapshot} />
       <ChainBackendCard />
+      <ChargerFleetCard />
       <SelfTestCard snapshot={snapshot} />
       {snapshot.mint_identity && <IdentityCard snapshot={snapshot} />}
       {snapshot.setup.unit && snapshot.setup.attached && <KeysetsCard snapshot={snapshot} />}
@@ -149,6 +152,81 @@ function MigrationNotice() {
         and backups now belong to whoever operates it.
       </AlertDescription>
     </Alert>
+  )
+}
+
+/// Is the charger fleet there before a demo? One row per configured
+/// device straight off the gateway's device contract (proxied by the
+/// processor — the bridge key never reaches the browser). Hidden on
+/// pairs without the fleet env; a down gateway reads "unreachable".
+function ChargerFleetCard() {
+  const [status, setStatus] = useState<FleetStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = () =>
+      fetchFleet()
+        .then(s => alive && (setStatus(s), setError(null)))
+        .catch(e => alive && setError(e.message))
+    load()
+    const timer = setInterval(load, 10_000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [])
+
+  if (error?.includes("fleet not configured")) return null
+
+  const color =
+    status?.gateway === "ok" ? "bg-emerald-500" :
+    status ? "bg-red-500" : "bg-muted-foreground/40"
+  const running = status?.devices.find(d => d.state === "running")
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <span className={`inline-block h-2.5 w-2.5 rounded-full ${color}`} aria-hidden />
+          Charger fleet
+        </CardTitle>
+        <CardDescription>
+          The atom-gateway's virtual chargers — state per device, refreshed every 10 s.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-1 text-sm">
+        {status ? (
+          status.gateway === "unreachable" ? (
+            <p className="text-red-500">
+              Gateway unreachable — charging sessions would not start ({error ?? "no answer"})
+            </p>
+          ) : (
+            <>
+              {running && (
+                <p className="text-emerald-500">
+                  {running.id} is delivering — {running.delivered_secs} kW·s and counting
+                </p>
+              )}
+              <ul className="grid gap-1">
+                {status.devices.map(d => (
+                  <li key={d.id} className="flex items-center justify-between gap-3">
+                    <span className="font-mono">{d.id}</span>
+                    <span className={d.state === "running" ? "text-emerald-500" : "text-muted-foreground"}>
+                      {d.state === "done"
+                        ? `last session delivered ${d.delivered_secs} kW·s`
+                        : d.state}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )
+        ) : (
+          <p className="text-muted-foreground">Sampling…</p>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 

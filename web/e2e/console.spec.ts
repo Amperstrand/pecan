@@ -56,6 +56,23 @@ for (const pair of PAIRS_WITH_PASSWORD) {
   })
 }
 
+// The charger fleet card rides the NOK pair's Mint tab (the demo pair —
+// fleet env is wired in its compose; pairs without the env hide the card).
+const NOK = PAIRS.find((pair) => pair.id === "nok")
+if (NOK?.password) {
+  test.describe("nok console (fleet) @smoke", () => {
+    test("Mint tab shows the charger fleet with its devices", async ({ page }) => {
+      await page.goto(`${NOK.consoleBase}/login`)
+      await page.getByRole("textbox", { name: "Username" }).fill("admin")
+      await page.getByRole("textbox", { name: "Password" }).fill(NOK.password)
+      await page.getByRole("button", { name: "Sign in" }).click()
+      await page.getByRole("tab", { name: "Mint" }).click()
+      await expect(page.getByText("Charger fleet", { exact: true })).toBeVisible()
+      await expect(page.getByText("atomD", { exact: true })).toBeVisible()
+    })
+  })
+}
+
 // The pairs share one origin, so session cookies carry the unit in their
 // name (branch_session_nok…) — with a shared name, the second sign-in
 // evicted the first (last cookie wins). Both pages share one context here.

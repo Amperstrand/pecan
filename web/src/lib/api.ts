@@ -223,6 +223,26 @@ export function fetchSnapshot() {
   return requestJson<AppSnapshot>("/api/app")
 }
 
+// ---- charger fleet ----
+
+export interface FleetDevice {
+  id: string
+  state: "idle" | "running" | "done"
+  session: string | null
+  delivered_secs: number
+  stopped: boolean
+}
+
+export interface FleetStatus {
+  gateway: "ok" | "unreachable"
+  devices: FleetDevice[]
+}
+
+/** Charger fleet health for the Mint tab (503 = fleet not configured). */
+export function fetchFleet() {
+  return requestJson<FleetStatus>("/api/fleet")
+}
+
 // ---- teller ----
 
 /**

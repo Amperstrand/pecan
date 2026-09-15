@@ -58,6 +58,10 @@ pub struct WebState {
     pub published_grpc_port: u16,
     pub self_test: Arc<RwLock<Option<SelfTestOutcome>>>,
     pub self_test_running: Arc<AtomicBool>,
+    /// Charger fleet surface (None when the EV gateway env is not set).
+    pub fleet: Option<crate::fleet::FleetConfig>,
+    /// Shared outbound client for console-side probes (fleet card).
+    pub http: reqwest::Client,
 }
 
 impl WebState {
@@ -89,6 +93,8 @@ impl WebState {
             published_grpc_port,
             self_test,
             self_test_running,
+            fleet: crate::fleet::FleetConfig::from_env(),
+            http: reqwest::Client::new(),
         }
     }
 }
@@ -114,6 +120,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/mint/self-test", post(api_self_test))
         .route("/api/onchain-status/{address}", get(api_onchain_status))
         .route("/api/onchain/chain-status", get(api_onchain_chain_status))
+        .route("/api/fleet", get(api_fleet))
         .route("/api/users", post(api_users_create))
         .route("/api/users/{username}", delete(api_users_delete))
         .route(
@@ -848,6 +855,20 @@ async fn api_onchain_chain_status(
         serde_json::to_string(&body).unwrap_or_default(),
     )
         .into_response()
+}
+
+/// Charger fleet status for the console's Mint tab: the processor proxies
+/// the atom-gateway's device contract so the bridge key never reaches the
+/// browser. Unconfigured pairs answer 503 (the card stays hidden); a down
+/// gateway degrades to a "unreachable" answer instead of an error.
+async fn api_fleet(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_api_auth(&state, &headers).await {
+        return r;
+    }
+    let Some(config) = state.fleet.as_ref() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "fleet not configured");
+    };
+    Json(crate::fleet::query(&state.http, config).await).into_response()
 }
 
 /// Onchain deposit status for the wallet's display, answered from the

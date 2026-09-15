@@ -24,6 +24,9 @@ services:
       CDK_BRANCH_PROCESSOR_BITCOIND_PASS: "${PECAN_BITCOIND_PASS:?set in .env}"
       CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim,sepa,sepa-instant,swish,mobilepay,ideal,bizum,ev"
       CDK_BRANCH_PROCESSOR_PAYOUT_AUTOSIM: "true"
+      CDK_BRANCH_PROCESSOR_EV_FLEET: "atomA,atomB,atomC,atomD"
+      CDK_BRANCH_PROCESSOR_EV_GATEWAY_URL: "http://127.0.0.1:8099"
+      CDK_BRANCH_PROCESSOR_EV_GATEWAY_KEY: "${PECAN_EV_GATEWAY_KEY:?set in .env}"
     volumes:
       - /opt/pecan-nok-data:/var/lib/cdk-branch-processor
       - /opt/pecan-nok-config:/var/lib/pecan/config
