@@ -20,6 +20,9 @@ import { readBalance } from "./helpers/wallet"
 // sessions (it mirrors the atom box's A+B chargers) and its portrait
 // shape covers the phone UI — see the charger-display issue.
 //
+// The card/timeline chrome here mirrors templates/film-chrome.ts in
+// the film knowledge base (~/src/test-films) — its canon. Project
+// views (companion strip, pole panel) are this repo's own.
 // Text cards are baked in; voiceover is a post-production layer.
 
 test.skip(!process.env.PECAN_VIDEO, "movie run only (run scripts/movie.sh)")
