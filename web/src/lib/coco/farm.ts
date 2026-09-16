@@ -283,11 +283,22 @@ export async function sendFuture(unit: string, quantity: number): Promise<SendFu
   }
 }
 
+async function farmKeysetIds(): Promise<string[]> {
+  const r = await fetch(`${farmMintUrl()}/v1/keysets`)
+  if (!r.ok) return []
+  const keysets = (await r.json()) as { keysets?: Array<{ id?: string }> }
+  return keysets.keysets?.map((k) => k.id).filter((id): id is string => !!id) ?? []
+}
+
 export async function receiveFutureToken(token: string): Promise<number> {
   const coco = await getCoco()
   // The generic receive pipeline crashes fresh contexts on this stack;
   // receive = swap the token's proofs into fresh tagged proofs of ours.
-  const decoded = getDecodedToken(token)
+  // Keyset ids let the decoder resolve proof keysets it has not seen.
+  const decoded = getDecodedToken(
+    token,
+    [...new Set([...token.matchAll(/"id":"([0-9a-f]{16})"/g)].map((m) => m[1]!))],
+  )
   if (!decoded.mint || !decoded.unit) {
     throw new Error("token is missing its mint or unit")
   }
