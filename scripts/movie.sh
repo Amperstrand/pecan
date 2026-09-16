@@ -64,7 +64,8 @@ if [ "$MODE" = "remote" ]; then
   echo "==> pull artifacts"
   mkdir -p web/e2e/.results-video/alice-remote
   rsync -az \
-    --include 'alice-video-*/***' --include 'alice-stills/***' --exclude '*' \
+    --include 'alice-video-*/***' --include 'alice-stills/***' \
+    --include 'movie-timeline.json' --exclude '*' \
     "$BUILDER:$REMOTE_DIR/web/e2e/.results-video/" web/e2e/.results-video/alice-remote/ || true
   find web/e2e/.results-video/alice-remote -name '*.webm' -exec \
     sh -c 'echo "movie: {} ($(ffprobe -v error -show_entries format=duration -of csv=p=0 {} 2>/dev/null || echo ?)s)"' \; 2>/dev/null || true

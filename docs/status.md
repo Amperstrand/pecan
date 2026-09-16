@@ -158,6 +158,18 @@ charger with no physical twin.
   drift turned 54:5x into 54:49 (#19 data point; single clock read
   now).
 
+## Narrated-movie round 2026-09-17 (evening)
+
+The full cut now ships as alice-final.mp4 WITH VOICEOVER: the spec
+emits a per-card timeline (movie-timeline.json — every card's window +
+spoken line), and scripts/movie-voice.sh synthesizes each line with
+macOS say (Samantha), rate-fits it to its card, adelay-aligns, and
+amixes over the silent webm (VP8→H.264 for the mp4; amix needs
+duration=longest — first truncates at the opening line). The recording
+gained a phone frame + status bar (it reads as a device film now) and
+a cold-open title; 20 narrated lines. The public pole page got the
+film's typography and a scan-to-charge deep link.
+
 ## Movie pacing + firmware-display round 2026-09-17
 
 Review feedback: transitions too fast to read; the charger's firmware
