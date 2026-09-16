@@ -841,19 +841,31 @@ impl FarmRail {
 
     /// Announce a linked, authorized quote as PAID to the mint (the signet
     /// payment settled before the quote existed — this closes the loop).
+    /// The event only lands if the mint has already COMMITTED its quote
+    /// row, which happens right after create returns — so the first send
+    /// is delayed briefly and retried; mint-side handling is idempotent.
     pub fn emit_payment_received(&self, quote_id: &str, purchase: &FarmPurchase) {
-        let _ = self.events.send(cdk_common::payment::Event::PaymentReceived(
-            cdk_common::payment::WaitPaymentResponse {
-                payment_identifier: cdk_common::payment::PaymentIdentifier::CustomId(
-                    quote_id.to_string(),
-                ),
-                payment_amount: cdk_common::Amount::new(
-                    purchase.quantity,
-                    cdk_common::CurrencyUnit::Custom(purchase.unit.as_str().into()),
-                ),
-                payment_id: purchase.id.clone(),
-            },
-        ));
+        let events = self.events.clone();
+        let quote_id = quote_id.to_string();
+        let payment_id = purchase.id.clone();
+        let amount = cdk_common::Amount::new(
+            purchase.quantity,
+            cdk_common::CurrencyUnit::Custom(purchase.unit.as_str().into()),
+        );
+        tokio::spawn(async move {
+            for delay_ms in [300_u64, 1_500, 4_000] {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                let _ = events.send(cdk_common::payment::Event::PaymentReceived(
+                    cdk_common::payment::WaitPaymentResponse {
+                        payment_identifier: cdk_common::payment::PaymentIdentifier::CustomId(
+                            quote_id.clone(),
+                        ),
+                        payment_amount: amount.clone(),
+                        payment_id: payment_id.clone(),
+                    },
+                ));
+            }
+        });
     }
 
     /// check_incoming_payment_status for linked future quotes.
