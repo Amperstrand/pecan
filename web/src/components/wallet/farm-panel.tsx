@@ -76,17 +76,26 @@ export function FarmPanel() {
   const [busy, setBusy] = useState(false)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const pollRef = useRef<number | null>(null)
+  const overviewRef = useRef<FarmOverview | null>(null)
 
   const refresh = useCallback(async () => {
+    // The overview must never wait on the wallet: a slow/throwing
+    // balances call (fresh boot, keyset sync) left the panel on
+    // "loading series…" with the error swallowed.
     try {
-      const [o, b] = await Promise.all([fetchFarmOverview(), futureBalances()])
+      const o = await fetchFarmOverview()
+      overviewRef.current = o
       setOverview(o)
-      setBalances(b)
-      return o
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e))
       return null
     }
+    try {
+      setBalances(await futureBalances())
+    } catch {
+      setBalances((b) => b)
+    }
+    return overviewRef.current
   }, [])
 
   useEffect(() => {
