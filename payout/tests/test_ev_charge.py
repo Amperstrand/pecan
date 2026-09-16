@@ -12,6 +12,7 @@ import importlib.util
 import json
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -134,6 +135,150 @@ class RefundValidationTests(unittest.TestCase):
         state = {}
         ev_charge.settle_refunds(a, console, state)
         self.assertEqual(console.posts, [])
+
+
+class ExpiredActionTests(unittest.TestCase):
+    """Issue #13: the pure predicate separating expired never-triggered
+    deposit melts (auto-refund via the mint's rollback) from waiting
+    tickets (close) and triggered sessions (never touched)."""
+
+    NOW = 1_000_000.0
+
+    def ticket(self, status="pending", expires=NOW - 10):
+        return {"id": "MELT-1", "status": status, "amount": 300,
+                "quote_id": "q-1", "expires_at": expires}
+
+    def test_not_expired_is_left_alone(self):
+        t = self.ticket(expires=self.NOW + 60)
+        self.assertIsNone(ev_charge.expired_action(t, {}, self.NOW))
+
+    def test_funded_never_triggered_refunds(self):
+        # The wallet locked funds (ticket left waiting), the daemon never
+        # triggered: full deposit back via the rollback.
+        self.assertEqual(
+            ev_charge.expired_action(self.ticket(), {}, self.NOW),
+            "refund")
+
+    def test_waiting_expired_closes_with_nothing_due(self):
+        # No fund lock: nothing was burned, nothing is owed.
+        self.assertEqual(
+            ev_charge.expired_action(self.ticket(status="waiting"), {},
+                                     self.NOW),
+            "close")
+
+    def test_refused_record_still_refunds(self):
+        # Gateway declined/unreachable at trigger time: no energy ever
+        # flowed. Before issue #13 these lingered funded-and-expired.
+        rec = {"status": "refused", "result": "refused"}
+        self.assertEqual(
+            ev_charge.expired_action(self.ticket(), rec, self.NOW),
+            "refund")
+
+    def test_triggered_session_never_auto_refunded(self):
+        # Energy may have flowed — partials settle through the normal
+        # paths; the ledger's trigger record is the hard stop.
+        for status in ("triggered", "settled", "open"):
+            rec = {"status": status}
+            self.assertIsNone(
+                ev_charge.expired_action(self.ticket(), rec, self.NOW),
+                msg=status)
+
+    def test_margin_boundary_not_yet_expired(self):
+        # Exactly margin seconds before expiry: not yet actionable.
+        t = self.ticket(expires=self.NOW + 5)
+        self.assertIsNone(ev_charge.expired_action(t, {}, self.NOW))
+
+    def test_no_expiry_known_is_left_alone(self):
+        t = self.ticket()
+        del t["expires_at"]
+        self.assertIsNone(ev_charge.expired_action(t, {}, self.NOW))
+
+
+class ResolveExpiredTicketTests(unittest.TestCase):
+    """The resolver must fail the ticket first, ledger second (retry on
+    API error), record a refund entry the stop-path validator can never
+    double-pay through, and warn operators OFF manual payback."""
+
+    def _daemon(self, tmpdir):
+        a = SimpleNamespace(secs_per_eur=1.0, settle_grace=0.0,
+                            state_file=tmpdir + "/state.json")
+        a._tariffs = {}
+        return a
+
+    def test_refund_writes_ledger_and_doublepay_warning(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a = self._daemon(d)
+            console = FakeConsole()
+            state = {}
+            ev_charge.resolve_expired_ticket(
+                a, console, state,
+                {"id": "MELT-1", "status": "pending", "amount": 300,
+                 "quote_id": "q-1", "expires_at": 1}, "refund")
+            mark_failed = [p for p in console.posts
+                           if "mark-failed" in p[0]]
+            self.assertEqual(len(mark_failed), 1)
+            self.assertIn("AUTO-REFUND", mark_failed[0][1]["notes"])
+            self.assertIn("double-pay", mark_failed[0][1]["notes"])
+            rec = state["MELT-1"]
+            self.assertEqual(rec["status"], "open")
+            self.assertEqual(rec["result"], "expired-before-trigger")
+            self.assertEqual(rec["refund_via"], "mint-rollback")
+            self.assertTrue(rec["refunded"])
+            self.assertEqual(rec["amount_cents"], 300)
+            self.assertEqual(rec["delivered_cents"], 0)
+            self.assertEqual(rec["quote_id"], "q-1")
+            # The refund ledger entry must never satisfy settle_refunds
+            # (it requires status "settled"; the proofs were rolled back
+            # and already back in the wallet).
+            tickets = [refund_ticket(300, quote_id="q-1")]
+            scan = FakeConsole(tickets)
+            ev_charge.settle_refunds(a, scan, state)
+            self.assertEqual(
+                [p for p in scan.posts if "mark-paid" in p[0]], [])
+
+    def test_close_writes_nothing_due(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a = self._daemon(d)
+            console = FakeConsole()
+            state = {}
+            ev_charge.resolve_expired_ticket(
+                a, console, state,
+                {"id": "MELT-2", "status": "waiting", "amount": 300,
+                 "expires_at": 1}, "close")
+            notes = console.posts[0][1]["notes"]
+            self.assertIn("nothing burned", notes)
+            self.assertEqual(state["MELT-2"]["refund_due_cents"], 0)
+            self.assertNotIn("refunded", state["MELT-2"])
+
+    def test_api_error_leaves_record_for_retry(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a = self._daemon(d)
+
+            class FailingConsole:
+                def post(self, path, payload):
+                    raise urllib.error.URLError("down")
+
+                def get(self, path):
+                    return []
+
+            state = {}
+            ev_charge.resolve_expired_ticket(
+                a, FailingConsole(), state,
+                {"id": "MELT-3", "status": "pending", "amount": 100,
+                 "quote_id": "q-3", "expires_at": 1}, "refund")
+            self.assertNotIn("MELT-3", state)
+            # The decision stays live: the next poll retries.
+            self.assertEqual(
+                ev_charge.expired_action(
+                    {"id": "MELT-3", "status": "pending", "amount": 100,
+                     "quote_id": "q-3", "expires_at": 1}, {},
+                    self.NOW + 1),
+                "refund")
+
+    NOW = 1_000_000.0
 
 
 class FakeGateway:

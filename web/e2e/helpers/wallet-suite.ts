@@ -39,6 +39,9 @@ import {
  *   currency-switcher isolation         (from USD side)   usd.spec  sat.spec (from SAT side)
  *   charger A rail (all ev-rail tests)  ev-rail           —         —
  *   charger B rail (window+stop+refund) ev-rail           —         —
+ *   charger C/D full sessions           ev-rail/charger-d —         —
+ *   charger D NOK session               —                 —         charger-d-nok
+ *   expired deposit auto-refund (#13)   charger-expired-refund (@expiry) — —
  *
  * Deliberately EUR-only: the saga and wallet-UX rows exercise
  * currency-agnostic machinery (same code, different mint URL) — reload

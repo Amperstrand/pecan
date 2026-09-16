@@ -203,10 +203,20 @@ daemon's state ledger); validation is server-side against the delivery
 ledger (never the wallet's claim); the claim flow is reload-safe (an
 interrupted refund surfaces as an ordinary pending deposit card); and
 `mark-paid` is at-least-once-safe (settling a Paid ticket is a no-op).
-Known exposure: a deposit melt that expires while the daemon is down
-burns (the DRIFT class) — the tollgate review's "unknown outcome"
-discipline applies; a future hardening would reconcile expired deposits
-against un-triggered windows and auto-issue refunds.
+
+Known exposure, corrected 2026-09-17 (#13): a deposit melt that expires
+while the daemon is down does NOT burn on mintd 0.18.0 — the daemon's
+expiry guard mark-fails the never-triggered ticket, the processor's
+PaymentFailed makes the mint's melt saga compensate (setup removed:
+proofs spendable again, quote back to UNPAID), and the wallet reclaims
+the proofs through coco's UNPAID→op-rollback. That rollback IS the
+expiry refund: a stop-path refund quote settled on top would double-pay
+(restored proofs + fresh ecash), which is also why the daemon's refund
+ledger marks expired melts `refunded` at mark-fail time — no later
+claim can be honored against them. E2E: `charger-expired-refund.spec.ts`
+(@expiry). The residual exposure is the pre-0.18.0 legacy: rc.0 mints
+did not compensate, so expired funded melts there genuinely burned
+(the 2026-09-03 drift round's original evidence).
 
 Commercial-charger mapping: OCPP `RemoteStartTransaction` = the trigger
 (session_ref = our transaction correlation), `MeterValues`/`StopTransaction`

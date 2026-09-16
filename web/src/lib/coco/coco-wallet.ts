@@ -559,6 +559,86 @@ export async function claimOrphanedEvRefunds(
   return refunded
 }
 
+const REFUND_SEEN_KEY = "pecan-refund-seen"
+
+function markRefundSeen(quoteId: string): void {
+  try {
+    const list = JSON.parse(
+      window.localStorage.getItem(REFUND_SEEN_KEY) ?? "[]",
+    ) as string[]
+    window.localStorage.setItem(
+      REFUND_SEEN_KEY,
+      JSON.stringify([quoteId, ...list.filter((id) => id !== quoteId)].slice(0, 50)),
+    )
+  } catch {
+    // best-effort dedupe only — worst case the card re-surfaces
+  }
+}
+
+function isRefundSeen(quoteId: string | undefined): boolean {
+  if (!quoteId) return false
+  try {
+    const list = JSON.parse(
+      window.localStorage.getItem(REFUND_SEEN_KEY) ?? "[]",
+    ) as string[]
+    return list.includes(quoteId)
+  } catch {
+    return false
+  }
+}
+
+export interface RefundedDeposit {
+  /** Charger device slug from the ev:destination envelope. */
+  device: string
+  /** Cents returned to the balance by the rollback. */
+  amountCents: number
+}
+
+/**
+ * Issue #13's reload path: a deposit melt that expired without ever
+ * triggering the charger was rolled back by the mint (the daemon's
+ * mark-failed → PaymentFailed), and coco's op rollback restored the
+ * proofs — but if the page was closed through the whole saga there is
+ * no card left to show it. Scan recent rolled-back ev melts and surface
+ * the most recent un-shown one so the refund is visible, not just a
+ * silently restored balance. One-shot per quote id (localStorage).
+ */
+export async function getRecentRefundedDeposit(
+  currency: Currency = activeCurrency(),
+): Promise<RefundedDeposit | null> {
+  const coco = await getCoco()
+  const entries = await coco.history.getPaginatedHistory(0, 30)
+  for (const entry of entries) {
+    if (entry.type !== "melt") continue
+    if (Date.now() - entry.createdAt > 45 * 60_000) continue
+    if (entry.mintUrl !== mintUrl(currency)) continue
+    let op: Awaited<ReturnType<typeof coco.ops.melt.getByQuote>> | null = null
+    try {
+      op = await coco.ops.melt.getByQuote({
+        mintUrl: mintUrl(currency),
+        quoteId: entry.quoteId,
+      })
+    } catch {
+      continue
+    }
+    if (!op || op.state !== "rolled_back") continue
+    const target = (op.methodData as { description?: string }).description
+      ?? sessionTargetFor(entry.quoteId) ?? ""
+    if (!target.startsWith("ev:")) continue
+    if (isRefundSeen(entry.quoteId)) continue
+    markRefundSeen(entry.quoteId)
+    walletLog("info", "expired deposit refund surfaced", {
+      quoteId: entry.quoteId,
+      target,
+    })
+    return {
+      device: target.split(":")[1] ?? "",
+      amountCents: Number(op.amount.toBigInt()),
+    }
+  }
+  return null
+}
+
 /**
  * SAT withdraw: melt straight to a bolt11 invoice at the external mint
  * (signut). No teller code — the mint pays the invoice itself (Nutshell
@@ -663,8 +743,9 @@ export async function pollWithdraw(
   if (operation.state === "finalized") {
     return readPreimage(operation)
   }
-  if (operation.state === "failed" || operation.state === "rolled_back") {
-    return "FAILED"
+  const terminal = meltTerminalSignal(operation.state)
+  if (terminal) {
+    return terminal
   }
 
   try {
@@ -686,6 +767,20 @@ function readPreimage(operation: unknown): string {
 
 export async function isWalletInitialized(): Promise<boolean> {
   return window.localStorage.getItem(SEED_STORAGE_KEY) !== null
+}
+
+/**
+ * Terminal melt-op states a poll can report verbatim. `rolled_back`
+ * (issue #13: the mint released the proofs — voided ticket, or an
+ * expired never-triggered deposit) must stay distinct from `failed`:
+ * one means "your money is back", the other "it broke".
+ */
+export function meltTerminalSignal(
+  state: string,
+): "REFUNDED" | "FAILED" | null {
+  if (state === "rolled_back") return "REFUNDED"
+  if (state === "failed") return "FAILED"
+  return null
 }
 
 const RESUME_POLL_MS = 3000

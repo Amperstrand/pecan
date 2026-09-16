@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest"
 import { Amount } from "@cashu/cashu-ts"
 import type { HistoryEntry } from "@cashu/coco-core"
-import { fromHex, mapHistoryEntry, scaleAmount, toHex } from "./coco-wallet"
+import {
+  fromHex,
+  mapHistoryEntry,
+  meltTerminalSignal,
+  scaleAmount,
+  toHex,
+} from "./coco-wallet"
 
 function historyFixture(fields: {
   type: string
@@ -43,6 +49,26 @@ describe("mapHistoryEntry", () => {
 
   it("returns null for unrelated entry types", () => {
     expect(mapHistoryEntry(historyFixture({ type: "send", state: "finalized", amount: 1 }))).toBeNull()
+  })
+})
+
+describe("meltTerminalSignal", () => {
+  // Issue #13: a rolled-back melt means the mint RELEASED the proofs
+  // (voided ticket, or a deposit that expired before the charger ever
+  // fired) — the money is back. Collapsing it into FAILED would tell
+  // the user their withdraw broke when it actually refunded.
+  it("reports rolled_back as REFUNDED, never FAILED", () => {
+    expect(meltTerminalSignal("rolled_back")).toBe("REFUNDED")
+  })
+
+  it("reports failed as FAILED", () => {
+    expect(meltTerminalSignal("failed")).toBe("FAILED")
+  })
+
+  it("stays silent for non-terminal states (the poll keeps waiting)", () => {
+    for (const state of ["pending", "executing", "prepared", "init"]) {
+      expect(meltTerminalSignal(state)).toBeNull()
+    }
   })
 })
 

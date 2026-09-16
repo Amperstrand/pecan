@@ -14,6 +14,8 @@
 #   scripts/e2e.sh -g "<regex>"   targeted subset (chain-aware: tests boot on
 #                                 the wallet page but funding comes from
 #                                 earlier tests in the same serial chain)
+#   scripts/e2e.sh -g @expiry     the expiry lane (~35 min: a deposit melt
+#                                 rides out its full 30-minute quote TTL)
 # Other args pass through to playwright. PECAN_E2E_ONCHAIN_CONF=<n> pins the
 # expected onchain confirmation policy (see the onchain deposit test).
 # Usage: scripts/e2e.sh [--smoke] [--no-preflight] [extra playwright args]
@@ -94,7 +96,10 @@ else
   if $has_grep; then
     set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"}
   else
-    set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"} --grep-invert @stress
+    # @stress: the ~6 min soak tool. @expiry: tests that spend a real
+    # 30-minute quote TTL (charger-expired-refund) — opt in with
+    # `-g @expiry`; an explicit grep overrides this inversion.
+    set -- ${PW_ARGS[@]+"${PW_ARGS[@]}"} --grep-invert "@stress|@expiry"
   fi
 fi
 

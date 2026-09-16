@@ -83,6 +83,10 @@ verified in one deploy:
   test-pinned) — removed from backlog/limitations. #13's true scope
   recorded: an expiry refund needs a wallet-side claim flow (the
   daemon cannot mint to a pubkey it never saw) — medium, not short.
+  [Superseded 2026-09-17: the refund turned out to need NO fresh
+  issuance — mintd 0.18.0's mark-failed rollback restores the proofs
+  and coco's UNPAID→op-rollback reclaims them; the wallet-side work
+  was surfacing, not claiming. See limitations #3.]
 
 ## Multi-pair console + live-demo round 2026-09-14
 
@@ -415,10 +419,29 @@ the physical box.
    under the same load (3-6× wall inflation, zero flakes). Contention
    costs latency, not correctness, in the deposit lane; the historical
    signature remains unreproduced — keep the trace campaign armed.
-3. **Deposit expiry burn.** A deposit melt that expires while the daemon
-   is down burns (reconcile DRIFT; manual write-off). Hardening: the
-   daemon can distinguish never-triggered windows from delivered
-   partials and auto-refund expired-but-untriggered deposits.
+ 3. **Deposit expiry burn** — RESOLVED 2026-09-17 (#13): the burn itself
+    was already gone on mintd 0.18.0 — mark-failed pushes PaymentFailed
+    and cdk's melt-saga compensation ROLLS the melt back (proofs
+    spendable again; live-verified against the 2026-09-03 drift quotes,
+    now UNPAID with zero burned proofs). What was missing is now built:
+    the daemon's expiry predicate (`expired_action`, unit-pinned)
+    distinguishes never-triggered funded melts (mark-fail = auto-refund
+    via the rollback; ledger records `refund_via: mint-rollback`,
+    `refunded: true` so no later refund quote can double-pay) from
+    waiting tickets (close, nothing due) and triggered sessions
+    (untouchable); refused-before-trigger records — previously skipped
+    past the expiry guard and left drifting forever — now resolve too;
+    the stale "operator payback" note (which instructed a double-pay)
+    is gone. Wallet side: `pollWithdraw` reports rolled_back as
+    REFUNDED (≠ FAILED, unit-pinned), the charge card surfaces an
+    explicit "Refunded" summary on resume and reload
+    (`getRecentRefundedDeposit`), and coco's own UNPAID→rollback
+    reclaims the proofs. E2E: charger-expired-refund.spec.ts (@expiry
+    lane, ~35 min — kill daemon → melt → full 30-min TTL → restart →
+    refund card + exact balance). A settled refund quote for an expired
+    melt would double-pay (restored proofs + fresh ecash) and the
+    processor refuses mark-paid on expired quotes anyway — the rollback
+    IS the refund.
 4. **ev rail is EUR-only** — RESOLVED 2026-09-15: env + second daemon
    (`ev-charge-usd.service`) + USD charger e2e green on the physical
    atomD.
@@ -457,9 +480,10 @@ lives here; the issues carry acceptance criteria and code pointers.
 Short (days):
 - Enable ev on USD — DONE 2026-09-15 (#10): ev-charge-usd daemon active,
   rail in the USD compose, USD charger lane in the suite (usd.spec).
-- Expiry auto-refund for never-triggered deposits — #13 (medium, not
-  short: also needs the wallet-side `refund:<quote>` claim flow, since
-  the daemon cannot mint to a pubkey it never saw).
+- Expiry auto-refund for never-triggered deposits — DONE 2026-09-17
+  (#13): mint-rollback refund (see known-limitations #3 for why the
+  refund is the rollback, not a fresh mint quote) + wallet refund
+  surfacing + @expiry e2e lane.
 - Refund rounding: batch/accumulate sub-unit remainders — #26.
 
 Medium:

@@ -111,6 +111,14 @@ export function WalletClassicPage() {
         const preimage = await pollWithdraw(result.quoteId)
         if (preimage) {
           clearInterval(interval)
+          if (preimage === "REFUNDED") {
+            setWithdrawState({
+              phase: "error",
+              message: "The payout was refused — your funds are back in your balance.",
+            })
+            refresh()
+            return
+          }
           setWithdrawState({ phase: "done", preimage })
           refresh()
           setTimeout(() => setWithdrawState({ phase: "idle" }), 5000)

@@ -19,7 +19,11 @@ Two modes:
     fires with nobody running anything. A state file records every
     triggered ticket so a restart never double-delivers energy: a ticket
     marked triggered-but-unsettled is left for an operator, never
-    re-triggered.
+    re-triggered. A deposit melt that expires without EVER triggering
+    the device is auto-refunded (issue #13): the ticket is mark-failed,
+    the mint's PaymentFailed rollback releases the burned proofs, and
+    the wallet reclaims them on its next poll/reload. Triggered
+    sessions are never auto-refunded.
 
 Device gateway contract (any backend may implement it; evmap's
 atom-gateway implements it over HiveMQ, ev-device-fake.py for tests):
@@ -356,6 +360,108 @@ def wait_fund_lock(console, tid, ticket, timeout):
     return ticket
 
 
+# Ledger states proving the trigger path RAN — energy may have flowed,
+# so these tickets are terminal for the daemon (at-most-once delivery)
+# and are NEVER auto-refunded, whatever their quote state.
+ENERGY_ATTEMPTED = ("triggered", "settled", "open")
+EXPIRY_MARGIN_S = 5.0
+
+
+def expired_action(t, rec, now, margin=EXPIRY_MARGIN_S):
+    """Pure predicate: (ticket state, trigger record) -> refund|close|None.
+
+    Issue #13: distinguish a deposit melt that EXPIRED WITHOUT EVER
+    TRIGGERING the device from one that delivered (partially or fully).
+
+    "refund" — the quote is at/past expiry (minus a margin), no energy
+      was ever attempted (no ledger record, or a record whose trigger
+      was REFUSED before any delivery — gateway declined/unreachable),
+      and the wallet's fund lock happened (ticket left `waiting`, so
+      the mint is holding burned proofs). The refund itself is the
+      mint's own compensation: mark-failed pushes PaymentFailed, cdk's
+      melt saga rolls the setup back, the proofs become spendable
+      again, and the wallet reclaims them (op rollback on its next
+      poll/reload). Deliberately NOT a fresh mint issuance: the
+      processor refuses mark-paid on expired quotes ("the mint may
+      already have refunded the customer's ecash"), so the stop-path
+      refund quote cannot be driven here — and on top of a rollback it
+      would double-pay (restored proofs AND new ecash).
+    "close" — expired before the fund lock: nothing was ever burned,
+      the quote just dies unpaid; the ticket is failed so it leaves the
+      open list and reconcile's stale-pending notes.
+    None — not expired yet, no expiry known, or the ledger proves the
+      trigger ran (triggered/settled/open: energy may have flowed).
+    """
+    expires = t.get("expires_at")
+    if not expires:
+        return None
+    if now <= float(expires) - margin:
+        return None
+    if rec.get("status") in ENERGY_ATTEMPTED:
+        return None
+    return "refund" if t.get("status") != "waiting" else "close"
+
+
+def resolve_expired_ticket(a, console, state, t, action):
+    """Apply an expired_action() decision (issue #13).
+
+    mark-failed FIRST, ledger second: a failed POST leaves the record
+    untouched so the next poll retries (re-marking a Failed ticket is a
+    processor no-op and cannot re-fire PaymentFailed — that event only
+    leaves an Outgoing+Pending ticket, i.e. the first call's job).
+    """
+    tid = t.get("id", "")
+    now = int(time.time())
+    amount = int(t.get("amount", 0))
+    if action == "refund":
+        notes = ("expired before the charger fired — nothing delivered. "
+                 "AUTO-REFUND (issue #13): the mint rolls the melt back "
+                 "and the deposit proofs are spendable in the customer's "
+                 "wallet again. Do NOT pay out manually — that would "
+                 "double-pay.")
+    else:
+        notes = ("expired waiting for the wallet's fund lock — nothing "
+                 "burned, nothing due")
+    try:
+        console.post(f"/api/tickets/{tid}/mark-failed", {"notes": notes})
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        log({"result": "api-error", "stage": "expire-mark-failed",
+             "id": tid, "error": str(e)})
+        return
+    if action == "refund":
+        rec = {"status": "open", "at": now,
+               "result": "expired-before-trigger",
+               "refund_via": "mint-rollback",
+               "refunded": True,
+               "delivered_cents": 0}
+        if t.get("quote_id"):
+            rec["quote_id"] = t.get("quote_id")
+            rec["amount_cents"] = amount
+        if state.get(tid):
+            rec["prior_result"] = state[tid].get("result")
+        state[tid] = rec
+        save_state(a.state_file, state)
+        _canonical(a).terminal(tid, "lease_expired", 0, 0, 0,
+                               receipt="",
+                               legacy="expired-before-trigger")
+        # The rollback IS the refund — journal it like settle_refunds
+        # does so canonical consumers see the money returning.
+        _canonical(a).refund(tid, amount * 10)
+        log({"result": "refund-issued", "id": tid,
+             "amount_cents": amount, "via": "mint-rollback",
+             "reason": "quote expired before the charger fired"})
+    else:
+        state[tid] = {"status": "open", "at": now,
+                      "result": "expired-waiting-fund-lock",
+                      "refund_due_cents": 0}
+        save_state(a.state_file, state)
+        _canonical(a).terminal(tid, "lease_expired", 0, 0, 0,
+                               receipt="",
+                               legacy="expired-waiting-fund-lock")
+        log({"result": "closed", "id": tid,
+             "reason": "quote expired before the fund lock"})
+
+
 def watch(a, console, gateway, device_map):
     state = load_state(a.state_file)
     while True:
@@ -369,67 +475,31 @@ def watch(a, console, gateway, device_map):
         for t in tickets:
             tid = t.get("id", "")
             rec = state.get(tid, {})
+            # Expiry first, and it must see every record that does not
+            # prove energy was attempted — including `refused` (trigger
+            # declined/unreachable: no delivery ever happened). Before
+            # issue #13 a refused ticket was skipped past the expiry
+            # guard and lingered funded-and-expired forever: exactly
+            # the deposit-burn drift class of 2026-09-03.
+            action = expired_action(t, rec, time.time())
+            if action:
+                resolve_expired_ticket(a, console, state, t, action)
+                continue
             # Every post-trigger state is terminal for the daemon: energy
             # may have flowed, so a ticket is triggered AT MOST once per
             # state file, whatever happened after.
             if rec.get("status") in ("triggered", "settled", "refused",
                                      "open"):
                 continue
-            # Never trigger energy for a quote that is about to expire —
-            # an unpayable ticket means the window cannot be settled and
-            # the customer's ecash burns (reconcile DRIFT). Nothing was
-            # delivered, so the ledger records the FULL deposit as due
-            # back to the customer; the mint quote expired, which means
-            # the refund cannot be a mint issuance — it is an operator
-            # payback (teller deposit the customer creates). The ticket
-            # is failed with a refund-due note so reconcile stops
-            # flagging and the audit trail names the owed amount.
-            expires = t.get("expires_at")
-            if expires and time.time() > float(expires) - 5:
-                state[tid] = {"status": "open", "at": int(time.time()),
-                              "result": "expired-before-trigger",
-                              "refund_due_cents": int(t.get("amount", 0))}
-                _canonical(a).terminal(tid, "lease_expired", 0, 0, 0,
-                                       receipt="",
-                                       legacy="expired-before-trigger")
-                save_state(a.state_file, state)
-                try:
-                    console.post(
-                        f"/api/tickets/{tid}/mark-failed",
-                        {"notes": "expired before the charger fired — "
-                                  "NOTHING delivered, full deposit due "
-                                  "back to the customer (operator payback "
-                                  "via a fresh teller deposit)"})
-                except (urllib.error.HTTPError, urllib.error.URLError) as e:
-                    log({"result": "api-error", "stage": "expire-mark-failed",
-                         "error": str(e)})
-                log({"result": "refund-due", "id": tid,
-                     "amount_cents": t.get("amount", 0),
-                     "reason": "quote expired before the charger fired"})
-                continue
             t = wait_fund_lock(console, tid, t, a.timeout)
             if t.get("status") == "waiting":
                 log({"result": "fund-lock-timeout", "id": tid})
                 continue
-            expires = t.get("expires_at")
-            if expires and time.time() > float(expires) - 5:
-                state[tid] = {"status": "open", "at": int(time.time()),
-                              "result": "expired-waiting-fund-lock",
-                              "refund_due_cents": 0}
-                _canonical(a).terminal(tid, "lease_expired", 0, 0, 0,
-                                       receipt="",
-                                       legacy="expired-waiting-fund-lock")
-                save_state(a.state_file, state)
-                try:
-                    console.post(
-                        f"/api/tickets/{tid}/mark-failed",
-                        {"notes": "expired waiting for the wallet's fund "
-                                  "lock — nothing burned, nothing due"})
-                except (urllib.error.HTTPError, urllib.error.URLError) as e:
-                    log({"result": "api-error", "stage": "expire-mark-failed",
-                         "error": str(e)})
-                log({"result": "closed", "id": tid,
-                     "reason": "quote expired before the fund lock"})
+            # Re-check after the (up to --timeout) fund-lock wait: the
+            # ticket may have funded just before its quote expired.
+            action = expired_action(t, rec, time.time())
+            if action:
+                resolve_expired_ticket(a, console, state, t, action)
                 continue
             # Claim BEFORE triggering: a crash between here and settle
             # must not lead to a second energy delivery. The tariff is

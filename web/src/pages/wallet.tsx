@@ -35,6 +35,7 @@ import {
   resumePendingOperations,
   claimOrphanedEvRefunds,
   getRecentChargedSessionWithRetry,
+  getRecentRefundedDeposit,
 } from "@/lib/coco/coco-wallet"
 import { parseChargeReceipt, refundEuros } from "@/lib/coco/charge-session"
 import { downloadWalletDump, exportWalletDump } from "@/lib/coco/wallet-backup"
@@ -77,6 +78,7 @@ type WithdrawState =
   | { phase: "charging"; label: string; device: string; budget: number; delivered: number; requested: number; ref: string }
   | { phase: "done"; preimage: string }
   | { phase: "charged"; label: string; seconds: number; spent: number; refunded: number; stopped: boolean; receipt: string | null }
+  | { phase: "refunded"; amount: number; reason: string }
   | { phase: "error"; message: string }
 
 /**
@@ -474,6 +476,18 @@ export function WalletPage() {
               stopped: recent.stopped,
               receipt: recent.receipt,
             })
+          } else {
+            // Issue #13: the page may have missed the whole saga — an
+            // expired never-triggered charge deposit rolled back with no
+            // card left to show it. Surface the refund explicitly.
+            const refunded = await getRecentRefundedDeposit().catch(() => null)
+            if (refunded) {
+              setWithdrawState({
+                phase: "refunded",
+                amount: refunded.amountCents,
+                reason: `The charge never started — the deposit quote expired before the charger fired. Your funds are back in your balance.`,
+              })
+            }
           }
         }
         if (pendingWithdraw) {
@@ -496,6 +510,20 @@ export function WalletPage() {
             if (preimage) {
               if (withdrawPollRef) clearInterval(withdrawPollRef)
               withdrawPollRef = null
+              // Issue #13: the daemon mark-failed the expired,
+              // never-triggered deposit and the mint rolled the melt
+              // back — the money is back; say so instead of "FAILED".
+              if (preimage === "REFUNDED") {
+                setWithdrawState({
+                  phase: "refunded",
+                  amount: 0,
+                  reason: resumedOption
+                    ? "The charge never started — the deposit quote expired before the charger fired. Your funds are back in your balance."
+                    : "The payout was refused — your funds are back in your balance.",
+                })
+                refresh()
+                return
+              }
               // A finalized ev melt resumes into the charged summary
               // (delivered seconds + refund), not the generic receipt
               // card — the session's meaning survives the reload.
@@ -712,6 +740,17 @@ export function WalletPage() {
     await Promise.race([slider, new Promise((r) => setTimeout(r, 2_000))])
     refresh()
 
+    if (receipt === "REFUNDED") {
+      // Issue #13: expired before the charger ever fired — the mint
+      // rolled the deposit back, the proofs are spendable again.
+      setWithdrawState({
+        phase: "refunded",
+        amount: Math.round(budget * 100),
+        reason: "The charge never started — the deposit quote expired before the charger fired. Your funds are back in your balance.",
+      })
+      return
+    }
+
     if (!receipt || receipt === "FAILED") {
       setWithdrawState({
         phase: "error",
@@ -825,6 +864,15 @@ export function WalletPage() {
         const preimage = await pollWithdraw(result.quoteId)
         if (preimage) {
           clearInterval(interval)
+          if (preimage === "REFUNDED") {
+            setWithdrawState({
+              phase: "refunded",
+              amount: 0,
+              reason: "The payout was refused — your funds are back in your balance.",
+            })
+            refresh()
+            return
+          }
           setWithdrawState({ phase: "done", preimage })
           refresh()
           // The receipt reference is the proof of payment — leave it up
@@ -881,6 +929,15 @@ export function WalletPage() {
         const preimage = await pollWithdraw(result.quoteId, currency)
         if (preimage) {
           clearInterval(interval)
+          if (preimage === "REFUNDED") {
+            setWithdrawState({
+              phase: "refunded",
+              amount: 0,
+              reason: "The payment was refused — your funds are back in your balance.",
+            })
+            refresh()
+            return
+          }
           setWithdrawState({ phase: "done", preimage })
           refresh()
           setTimeout(() => setWithdrawState({ phase: "idle" }), 60_000)
@@ -1350,6 +1407,25 @@ export function WalletPage() {
                   }}
                 >
                   Stop charging
+                </Button>
+              </div>
+          ) : withdrawState.phase === "refunded" ? (
+              <div className="grid gap-2 rounded-md border p-3 text-center">
+                <p className="font-medium">
+                  ↩{" "}Refunded
+                  {withdrawState.amount > 0
+                    ? ` — ${fmtAmount(withdrawState.amount)} ${symbol} is back in your balance`
+                    : " — your funds are back in your balance"}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {withdrawState.reason}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setWithdrawState({ phase: "idle" })}
+                >
+                  New withdraw
                 </Button>
               </div>
           ) : withdrawState.phase === "charged" ? (
