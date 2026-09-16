@@ -755,14 +755,14 @@ impl MintPayment for BranchBackend {
                     }
                 }
                 if let Some(farm) = &self.farm {
-                    if let Some((quantity, unit)) = farm.paid_quote(id).await {
+                    if let Some((quantity, unit, purchase_id)) = farm.paid_quote(id).await {
                         return Ok(vec![WaitPaymentResponse {
                             payment_identifier: PaymentIdentifier::CustomId(id.clone()),
                             payment_amount: Amount::new(
                                 quantity,
                                 CurrencyUnit::Custom(unit.as_str().into()),
                             ),
-                            payment_id: id.clone(),
+                            payment_id: purchase_id,
                         }]);
                     }
                 }

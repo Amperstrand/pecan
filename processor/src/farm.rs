@@ -868,19 +868,19 @@ impl FarmRail {
         });
     }
 
-    /// check_incoming_payment_status for linked future quotes.
-    pub async fn paid_quote(&self, quote_id: &str) -> Option<(u64, String)> {
+    /// check_incoming_payment_status for linked future quotes. The
+    /// payment id MUST equal the event path's (the purchase id) — the
+    /// mint dedupes credits by it, so a second id would double-count the
+    /// paid amount.
+    pub async fn paid_quote(&self, quote_id: &str) -> Option<(u64, String, String)> {
         let purchase = self
             .state
             .purchases()
             .await
             .into_iter()
             .find(|p| p.quote_id.as_deref() == Some(quote_id))?;
-        matches!(
-            purchase.state,
-            PurchaseState::Authorized | PurchaseState::Minted
-        )
-        .then_some((purchase.quantity, purchase.unit))
+        matches!(purchase.state, PurchaseState::Authorized | PurchaseState::Minted)
+            .then_some((purchase.quantity, purchase.unit, purchase.id))
     }
 }
 
