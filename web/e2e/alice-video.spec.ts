@@ -61,12 +61,10 @@ const CHROME_CSS = `
   #companion .who { display: flex; flex-direction: column; gap: 3px; min-width: 104px; }
   #companion .who .name { font-size: 13px; font-weight: 700; letter-spacing: .06em; }
   #companion .who .sub  { font-size: 10px; color: #7d8fa5; letter-spacing: .04em; }
-  #companion .meter { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; }
-  #companion .meter .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
-  #companion .meter .big small { font-size: 13px; color: #9fb0c3; font-weight: 500; }
-  #companion .bar { width: 100%; height: 5px; border-radius: 3px; background: #1a2436; overflow: hidden; }
-  #companion .bar i { display: block; height: 100%; width: 0%;
-    background: linear-gradient(90deg, #38bdf8, #34d399); transition: width .5s ease; }
+  #companion .meter { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  #companion .meter .big { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+  #companion .meter .big small { font-size: 12px; color: #9fb0c3; font-weight: 500; }
+  #companion .meter canvas { width: 100%; height: 46px; border-radius: 4px; background: rgba(26,36,54,.55); }
   #companion .money { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 104px; }
   #companion .money .eur { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
   #companion .money .sub { font-size: 10px; color: #7d8fa5; }
@@ -173,11 +171,26 @@ async function fadeOut(page: Page) {
   )
 }
 
-// The companion strip: one charger, landscape, bottom-pinned. It reads
-// the wallet's own live DOM every 400ms — the charging progressbar and
-// the post-session summary are the truth; the strip restyles them.
+// The companion strip: one charger, landscape, bottom-pinned. The €
+// column reads the wallet's own live DOM (the charging progressbar and
+// post-session summary); the kW graph + Wh counter stream the car's
+// OWN meter telemetry (charger/atomV/meter — the simulated draw walks
+// 3-10 kW, so no two seconds look alike). MQTT creds arrive via env;
+// without them the graph stays empty (local lanes without env).
 async function mountCompanion(page: Page) {
-  await page.evaluate(() => {
+  const meterCreds = {
+    url:
+      process.env.PECAN_EV_MQTT_URL?.replace("mqtts://", "wss://").replace(":8883", ":8884") +
+      "/mqtt",
+    user: process.env.PECAN_EV_MQTT_USER,
+    pass: process.env.PECAN_EV_MQTT_PASS,
+  }
+  if (meterCreds.url && meterCreds.user) {
+    await page
+      .addScriptTag({ url: "https://unpkg.com/mqtt@5/dist/mqtt.min.js" })
+      .catch(() => undefined)
+  }
+  await page.evaluate(creds => {
     document.getElementById("companion")?.remove()
     const el = document.createElement("div")
     el.id = "companion"
@@ -187,17 +200,66 @@ async function mountCompanion(page: Page) {
         <span class="sub" id="cp-sub">charge point · online</span>
       </div>
       <div class="meter">
-        <div class="big"><span id="cp-now">0</span><small> kW·s</small></div>
-        <div class="bar"><i id="cp-fill"></i></div>
+        <div class="big"><span id="cp-kw">—</span><small> kW · <span id="cp-wh">0</span> Wh drawn</small></div>
+        <canvas id="cp-graph" width="196" height="46"></canvas>
       </div>
       <div class="money">
         <span class="eur" id="cp-eur">€50.00</span>
         <span class="sub" id="cp-money-sub">authorized</span>
       </div>`
     document.body.appendChild(el)
+    const kwEl = el.querySelector("#cp-kw") as HTMLElement
+    const whEl = el.querySelector("#cp-wh") as HTMLElement
+    const canvas = el.querySelector("#cp-graph") as HTMLCanvasElement
+    const samples: number[] = []
+    const draw = (kw: number | null) => {
+      if (kw !== null) samples.push(kw)
+      if (samples.length > 48) samples.shift()
+      const ctx = canvas.getContext("2d")
+      if (!ctx) return
+      const W = canvas.width, H = canvas.height
+      ctx.clearRect(0, 0, W, H)
+      ctx.strokeStyle = "rgba(125,143,165,.35)"
+      ctx.setLineDash([3, 4])
+      for (const band of [3, 10]) {
+        const y = H - (band / 10) * (H - 6) - 3
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke()
+      }
+      ctx.setLineDash([])
+      if (samples.length < 2) return
+      ctx.beginPath()
+      samples.forEach((v, i) => {
+        const x = (i / (samples.length - 1)) * W
+        const y = H - (v / 10) * (H - 6) - 3
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+      })
+      ctx.strokeStyle = "#38bdf8"
+      ctx.lineWidth = 2
+      ctx.stroke()
+      ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath()
+      ctx.fillStyle = "rgba(56,189,248,.15)"
+      ctx.fill()
+    }
+    if (creds.url && creds.user && (window as unknown as { mqtt?: unknown }).mqtt) {
+      const c = (window as unknown as { mqtt: { connect: (u: string, o: object) => {
+        on: (ev: string, cb: (...a: unknown[]) => void) => void
+        subscribe: (t: string) => void
+      } } }).mqtt.connect(creds.url, {
+        username: creds.user,
+        password: creds.pass,
+        reconnectPeriod: 2000,
+      })
+      c.on("connect", () => c.subscribe("charger/atomV/meter"))
+      c.on("message", (_t: unknown, payload: Uint8Array) => {
+        try {
+          const m = JSON.parse(new TextDecoder().decode(payload))
+          kwEl.textContent = m.kw === null ? "—" : String(m.kw)
+          whEl.textContent = String(m.wh)
+          draw(m.kw)
+        } catch {}
+      })
+    }
     const strip = el
-    const now = el.querySelector("#cp-now") as HTMLElement
-    const fill = el.querySelector("#cp-fill") as HTMLElement
     const eur = el.querySelector("#cp-eur") as HTMLElement
     const moneySub = el.querySelector("#cp-money-sub") as HTMLElement
     const sub = el.querySelector("#cp-sub") as HTMLElement
@@ -225,21 +287,17 @@ async function mountCompanion(page: Page) {
         } else {
           strip.classList.remove("live")
           sub.textContent = "charge point · online"
-          now.textContent = "0"
-          fill.style.width = "0%"
           eur.textContent = `€${BUDGET.toFixed(2)}`
           moneySub.textContent = "ready"
           return
         }
       }
-      now.textContent = String(delivered)
-      fill.style.width = `${Math.min(100, (delivered / BUDGET) * 100)}%`
       eur.textContent = `€${(remaining ?? 0).toFixed(2)}`
       moneySub.textContent = remaining && remaining > 0 ? "still hers" : "settled"
     }
     tick()
     window.setInterval(tick, 400)
-  })
+  }, meterCreds)
 }
 
 async function hideCompanion(page: Page) {
@@ -399,16 +457,17 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await still(page, "06-charging-early")
   await card(page, {
     title: `€${DEPOSIT_EUR} of energy, authorized.`,
-    body: "Metered by the charge point, second by second — the strip below is its display.",
-    holdMs: 6_000,
+    body: "Her car draws between 3 and 10 kW — second by second, no two alike. The strip below is its meter.",
+    holdMs: 7_000,
   })
   await hideCard(page)
   const progress = page.getByRole("progressbar")
   await expect
     .poll(async () => Number(await progress.getAttribute("aria-valuenow")), { timeout: 120_000 })
     .toBeGreaterThanOrEqual(STOP_AT_KWS)
+  await page.waitForTimeout(8_000)
   await still(page, "06-charging-live")
-  await page.waitForTimeout(6_000)
+  await page.waitForTimeout(5_000)
   await page.getByRole("button", { name: "Stop charging" }).click()
   // Remote-stop summary reads "Charging stopped — N s delivered"; a
   // natural full-budget completion reads "Charged N s at …". Accept both.

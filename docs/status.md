@@ -176,6 +176,14 @@ Shipped cut v3 (2026-09-16 visual round): the charger's display
   Settle waits bridge with animated cards, the charge stays on screen
   past 30 kW·s, and the film ends on a fade. Stills:
   web/e2e/.results-video/alice-stills/.
+- The car is no longer a constant load: ev-virtual-charger walks the
+  draw 3-10 kW and publishes live meter telemetry
+  (charger/atomV/meter — asserted by virtual-charger.sh selftest);
+  the companion strip graphs the kW curve + cumulative Wh from the
+  broker while the € column tracks the wallet. Settlement still uses
+  the gateway's wall-clock tariff — metered-truth end to end is #30
+  (with €/kWh pricing); public charger view #31; slint energy graph
+  folded into #29; movie polish #32.
 
 Fixes the round surfaced and shipped: the sim-https helper died under
 web's `"type": "module"` (renamed .cjs — the whole video lane was

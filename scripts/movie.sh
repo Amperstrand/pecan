@@ -39,6 +39,12 @@ if [ "$online" != "active" ]; then
   echo "!! the SIM CHARGER is not running — start it: scripts/virtual-charger.sh start" >&2
   exit 1
 fi
+# MQTT creds feed the companion strip's live kW graph (car meter topic).
+EV_ENV=$(ssh "$SERVER" \
+  "grep -E '^(MQTT_URL|MQTT_USER|MQTT_PASS)=' /opt/atom-bridge/.env" 2>/dev/null || true)
+MQTT_URL="$(printf '%s\n' "$EV_ENV" | grep MQTT_URL | cut -d= -f2)"
+MQTT_USER="$(printf '%s\n' "$EV_ENV" | grep MQTT_USER | cut -d= -f2)"
+MQTT_PASS="$(printf '%s\n' "$EV_ENV" | grep MQTT_PASS | cut -d= -f2)" 
 
 if [ "$MODE" = "remote" ]; then
   echo "==> rsync source to ${BUILDER}:${REMOTE_DIR}"
@@ -49,7 +55,7 @@ if [ "$MODE" = "remote" ]; then
   ssh "$BUILDER" "cd $REMOTE_DIR/web && npm ci --no-audit --no-fund >/dev/null 2>&1 && npx playwright install chromium >/dev/null 2>&1; echo ready"
   echo "==> roll camera on $BUILDER (headless)"
   status=0
-  ssh "$BUILDER" "cd $REMOTE_DIR/web && PECAN_VIDEO=1 PECAN_HEADLESS=1 npx playwright test alice-video --config playwright.video.config.ts" || status=$?
+  ssh "$BUILDER" "cd $REMOTE_DIR/web && PECAN_VIDEO=1 PECAN_HEADLESS=1 PECAN_EV_MQTT_URL='$MQTT_URL' PECAN_EV_MQTT_USER='$MQTT_USER' PECAN_EV_MQTT_PASS='$MQTT_PASS' npx playwright test alice-video --config playwright.video.config.ts" || status=$?
   echo "==> pull artifacts"
   mkdir -p web/e2e/.results-video/alice-remote
   rsync -az \
@@ -63,5 +69,6 @@ fi
 echo "==> roll camera on this Mac ($MODE)"
 cd web
 exec env PECAN_VIDEO=1 \
+  PECAN_EV_MQTT_URL="$MQTT_URL" PECAN_EV_MQTT_USER="$MQTT_USER" PECAN_EV_MQTT_PASS="$MQTT_PASS" \
   PECAN_HEADLESS="$([ "$MODE" = "headless" ] && echo 1 || echo 0)" \
   npx playwright test alice-video --config playwright.video.config.ts
