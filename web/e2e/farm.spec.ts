@@ -127,9 +127,10 @@ test.describe("farm futures (NUT-32 spike)", () => {
     const preimage = payLightningInvoice(invoice.trim())
     expect(preimage).toMatch(/^[0-9a-f]{64}$/)
 
-    // Payment confirmed → minting → owned.
-    await expect(page.getByText(/minting 5 egg claims/i)).toBeVisible({ timeout: 60_000 })
-    await expect(page.getByText("5 egg claims")).toBeVisible({ timeout: 60_000 })
+    // Payment confirmed → the panel mints → owned. (The transient
+    // "minting…" phase can complete while the external pay call is still
+    // returning — assert the outcome, not the intermediate.)
+    await expect(page.getByText("5 egg claims").first()).toBeVisible({ timeout: 90_000 })
 
     // Proofs really exist, carry the unit, the exactly-one future tag,
     // and the series' exact terms URI.
