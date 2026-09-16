@@ -39,6 +39,7 @@ import {
  *   currency-switcher isolation         (from USD side)   usd.spec  sat.spec (from SAT side)
  *   charger A rail (all ev-rail tests)  ev-rail           —         —
  *   charger B rail (window+stop+refund) ev-rail           —         —
+ *   charger D session (physical box)    charger-d EUR     usd.spec  charger-d-nok
  *
  * Deliberately EUR-only: the saga and wallet-UX rows exercise
  * currency-agnostic machinery (same code, different mint URL) — reload
