@@ -1,4 +1,18 @@
-# ALICE AT THE CHARGE POINT — demo movie script (v2 = as shipped)
+# ALICE AT THE CHARGE POINT — demo movie script (v3 = as shipped)
+
+**v3 (visual round):** the charger's on-screen presence is the
+**companion strip** — a landscape, bottom-pinned, pointer-transparent
+status bar showing ONE charger (SIM CHARGER), live kW·s + remaining
+euros read from the wallet's own DOM. It replaces the wasm firmware
+mirror in the movie (that mirror shows the atom box's A+B chargers and
+cannot see atomV sessions at all — the previous cut's "charger" stayed
+idle the whole story; its portrait shape also covered half the UI: the
+"jumping" first cut). Settle waits are bridged by animated cards (no
+dead air on the invoice), the charging segment stays on screen ≥ 6 s
+past 30 kW·s, and the movie ends deliberately: end card → fade to
+black. Poster stills land in e2e/.results-video/alice-stills/. The
+real firmware-display path (landscape + single-charger profiles) is
+tracked as #29.
 
 **v1 decisions resolved in review:** the charge point is the **Sim
 Charger** (atomV — the name says it: simulated, no hardware) · **EUR
@@ -6,8 +20,7 @@ pair** on giftcard.cashu.exchange (reusing the proven deployment; no
 new endpoint) · **€50 Lightning deposit, ~30 kW·s used, the rest
 refunded** · recording is **headless** by default (stable frames) and
 **runs on ai-legion-small** via `scripts/movie.sh --remote` (faster
-box, artifacts pulled back). The shipped cut: 2m25s webm in
-`web/e2e/.results-video/alice-remote/…/video.webm`. Re-record any time:
+box, artifacts pulled back). Re-record any time:
 `scripts/movie.sh --remote`.
 
 A public always-on web view of the sim charger (live state without
