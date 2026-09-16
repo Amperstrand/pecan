@@ -26,11 +26,11 @@ still serves every pair.
    (`"32": {"supported": true, "versions": [1]}`), gated on
    `CDK_MINTD_NUT32=true`.
 2. **Unit grammar + secret-tag validation** (new `nut32` module in the
-   `cashu` crate): `future:<base>-<quote>:<YYYYMMDD>T<hhmmss>Z` parser
-   (rejects lowercase `t`/`z`, offsets, fractional seconds, impossible
-   dates) and the exactly-one `["future","1","<terms-uri>"]` tag check
-   with a canonical content-addressed URI shape (https, last path
-   segment a 64-char sha256).
+   `cashu` crate): `future:<base>-<quote>:<yyyymmdd>t<hhmmss>z` parser
+   (whole-unit lowercase, offsets/fractions/impossible dates rejected)
+   and the exactly-one `["future","1","<terms-uri>"]` tag check with a
+   canonical content-addressed URI shape (https, last path segment a
+   64-char sha256).
 3. **Spend-time proof validation** — when a proof's keyset unit is a
    registered future series, `verify_inputs` (the shared swap/melt
    entry) requires the proof secret to carry the series' exact terms
@@ -106,6 +106,16 @@ still serves every pair.
   import; redeem → teller code).
 
 ## Deviations / extensions relative to the NUT-32 draft
+
+0. **Unit casing (draft amended during the spike)**: the draft originally
+   required uppercase `T`/`Z` separators. That cannot round-trip cdk —
+   it lowercases every custom unit (`normalize_custom_unit` → lowercase
+   NFC), and the wider ecosystem (NUT-02 registry, nutshell, cashu-ts)
+   treats unit identifiers as lowercase. The spike first patched case
+   preservation into both forks, then took the better path: the draft's
+   Unit section now specifies an all-lowercase unit (lowercase `t`/`z`
+   are still valid ISO-8601), implementations reject the uppercase form,
+   and BOTH fork carve-outs were reverted. Recorded in NUT-32.md.
 
 1. **Physical settlement** (`settlement_method: "physical"`): the draft
    describes settlement as "spend the future proof and issue the stated

@@ -34,19 +34,25 @@ metadata and are not covered by a proof signature.
 The canonical unit grammar is:
 
 ```text
-future:<base>-<quote>:<YYYYMMDD>T<hhmmss>Z
+future:<base>-<quote>:<yyyymmdd>t<hhmmss>z
 ```
 
 `base` and `quote` are lowercase ASCII identifiers matching `[a-z0-9]+`.
 The direction is conventionally long `base` / short `quote`; reversing the
 two identifiers is the opposite direction. The timestamp is UTC in ISO-8601
-basic form, so `:` is not overloaded as a time separator. Implementations MUST
-reject lowercase `t`/`z`, offsets, fractional seconds, and impossible dates.
+basic form, so `:` is not overloaded as a time separator. The whole unit
+string is lowercase — separators included — because Cashu unit identifiers
+are lowercase by established practice: cdk normalizes every custom unit to
+lowercase NFC on construction, and the NUT-02 unit registry (`sat`,
+`msat`, `eur`, …) is lowercase throughout. A grammar with uppercase `T`/`Z`
+cannot round-trip through cdk-based mints and wallets. Implementations
+MUST reject uppercase `T`/`Z`, offsets, fractional seconds, and impossible
+dates.
 
 For example:
 
 ```text
-future:mb-btc:20021225T000000Z
+future:mb-btc:20021225t000000z
 ```
 
 The maturity in `unit` identifies the series. It is not a general Cashu token
@@ -83,7 +89,7 @@ The blob at `terms_uri` is a UTF-8 canonical JSON signed envelope:
     "settlement_method": "physical",
     "settlement_unit": "sat",
     "strike": "0.00010",
-    "unit": "future:mb-btc:20021225T000000Z"
+    "unit": "future:mb-btc:20021225t000000z"
   }
 }
 ```
@@ -148,10 +154,10 @@ not an immutable terms commitment.
 ## Minimal test vector
 
 ```text
-unit: future:mb-btc:20021225T000000Z
+unit: future:mb-btc:20021225t000000z
 amount: 3
 future tag: ["future", "1", "https://blossom.example/..."]
-terms.unit: future:mb-btc:20021225T000000Z
+terms.unit: future:mb-btc:20021225t000000z
 ```
 
 This represents three contracts of one future series. The quantity of MB (or
