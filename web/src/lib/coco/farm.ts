@@ -314,7 +314,8 @@ export async function receiveFutureToken(token: string): Promise<number> {
   if (!termsUri) {
     throw new Error(`no terms known for ${unit} — refresh the farm tab first`)
   }
-  await coco.receiveFutureUnits(farmMintUrl(), unit, [["future", "1", termsUri]], decoded.proofs)
+  // BISECT SHIM (coco 1.0.17 build): receive via generic wallet.receive.
+  await coco.wallet.receive(token)
   const balances = await futureBalances()
   return balances.reduce((sum, b) => sum + b.amount, 0)
 }
