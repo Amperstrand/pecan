@@ -134,3 +134,67 @@ redeemed, actual production. Ownership lives in bearer proofs —
 Sarah→Bob is a plain Cashu split+transfer the farm never sees. Pinned
 by an explicit architecture test (processor state contains no holder
 table) + e2e.
+
+## Charger ↔ farm: the shared resource-saga substrate
+
+Two examples of the same lifecycle now exist (charger, egg futures). What
+they genuinely share — and what the farm deliberately reuses instead of
+re-inventing:
+
+| Lifecycle stage | Charger | Egg futures | Shared substrate |
+|---|---|---|---|
+| Durable op id | melt quote id (session ref) | purchase id `FP-…` / mint quote id | mint quote ids are the correlation keys |
+| Reservation | budget melted up front (overpay refunded later) | capacity held by OPEN..AUTHORIZED purchases, released on expiry/mint | same sweeper pattern (`BranchState::sweep_expired` / `FarmState::sweep_expired`) |
+| Economic snapshot | `secs_per_eur` per ticket at trigger time | `price_per_egg_sats` + terms hash frozen per purchase/series | price changes never reprice in-flight ops |
+| External transition | charger triggered / metered | signet invoice paid / eggs handed over | idempotent state transitions under a single-writer lock; at-most-once triggers |
+| Receipt | `EV-<device>-<n>s-<ref>` | `FARM-yymmdd-<ref>` | `payout::receipt_for_rail` (the Lightning-preimage analogue) |
+| Reconciliation | daemon ledger vs mint | farm counters vs teller ticket store (burn record) | recount-from-authority on boot + after settle |
+| Crash ambiguity | delivery window vs burn | handover vs burn | validate-BEFORE-burn; the authoritative store (tickets) drives recovery |
+
+Adapter-local (deliberately NOT abstracted): Wh, charger ids, meter
+readings, device triggering stay in the EV adapter; eggs, production
+dates, daily capacity, physical pickup stay in the farm adapter. Adding
+a third resource means: a `FarmState`-shaped ledger, a `future`-style
+quote gate in `backend.rs`, a receipt format in `payout.rs`, and the
+teller settle hook — no framework.
+
+## Deployed layout (live)
+
+| Piece | Where |
+|---|---|
+| Farm mintd (NUT-32 fork image `cashubtc/mintd:nut32`) | inr2 `/opt/giftcard-mint-farm`, :8100 (pub `/farm/v1/*`), prometheus :9102 |
+| Farm pecan | inr2 `/opt/pecan-farm` (compose `deploy/docker-compose.farm.yml`), gRPC :50058, HTTP :9101 (pub `/farm-console/*`) |
+| Fork source | `~/src/cdk-nut32` branch `pecan-nut32` (v0.18.0 + spike commits), built by `scripts/build-mintd-nut32.sh` |
+| coco fork | `~/src/coco` branch `nut32-futures`, vendored 1.0.12 via `scripts/vendor-coco.sh` |
+| Admin token | `/opt/pecan-farm/.env` + `/opt/giftcard-mint-farm/.env` (`PECAN_FARM_MINTD_ADMIN_TOKEN`) |
+| Wallet | https://giftcard.cashu.exchange/wallet → **FARM** tab |
+
+## Runbook
+
+```sh
+# full redeploy of the farm pair (all pairs recreate; mints restart)
+scripts/build-mintd-nut32.sh        # only when the cdk fork changed
+scripts/deploy.sh                   # rebuilds pecan + web, recreates all pairs
+scripts/api-smoke.sh                # incl. the NUT-32 section
+cd web/e2e && npx playwright test farm.spec.ts -g sarah   # the Sarah story (~5000 sat)
+scripts/e2e.sh --smoke              # the rest of the suite still green
+```
+
+Manual redemption demo: FARM tab → Redeem → teller matches the 6-char
+code in the farm console → "Eggs handed over" → settle → FARM receipt.
+Shortfall demo (admin): `POST /farm-console/api/farm/series/<date>/production
+{"actual": 7}` — further redemptions beyond 7 fail with issuer-default.
+
+## Verification evidence
+
+- Processor: 100 tests green (`cargo test`), incl. 12 farm tests
+  (grammar, capacity, race ≤ 10, expiry release, payment-before-issuance,
+  one-quote-per-purchase, maturity + shortfall gating, privacy
+  aggregate-only).
+- cdk fork: NUT-32 unit tests (grammar edges incl. leap years, exactly-one
+  tag, canonical JSON, payload stability).
+- Wallet: 83 vitest tests incl. BIP-340 client-side verify pin.
+- e2e: `farm.spec.ts` — sarah_buys_five_friday_eggs_with_signet (real
+  5000-sat payment, proof/tag/terms-digest assertions, Sarah→Bob bearer
+  transfer, redemption + double-spend refusal), capacity, maturity
+  refusal.
