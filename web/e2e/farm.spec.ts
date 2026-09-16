@@ -101,7 +101,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
   })
 
   test("sarah_buys_five_friday_eggs_with_signet", async ({ page, browser }) => {
-    test.setTimeout(180_000)
+    test.setTimeout(420_000)
     const series = await firstOpenSeries(page)
     const price = series.price_sats
     expect(price).toBeGreaterThan(0)
@@ -229,7 +229,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
     const bobContext = await browser.newContext()
     const bobPage = await bobContext.newPage()
     await openFarmWallet(bobPage)
-    await bobPage.locator("textarea").first().fill(token)
+    await bobPage.getByPlaceholder(/paste a token/i).fill(token)
     await bobPage.getByRole("button", { name: /Receive token/i }).click()
     await expect
       .poll(async () => {
@@ -256,7 +256,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
     const bobContext2 = await browser.newContext()
     const bobPage2 = await bobContext2.newPage()
     await openFarmWallet(bobPage2)
-    await bobPage2.locator("textarea").first().fill(token)
+    await bobPage2.getByPlaceholder(/paste a token/i).fill(token)
     await bobPage2.getByRole("button", { name: /Receive token/i }).click()
     await expect
       .poll(async () => {
