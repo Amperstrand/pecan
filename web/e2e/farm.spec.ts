@@ -46,7 +46,7 @@ async function openFarmWallet(page: Page): Promise<void> {
   await page
     .getByRole("tab", { name: "FARM" })
     .click()
-  await expect(page.getByText("FARM")).toBeVisible()
+  await expect(page.getByText(/eggs produced/)).toBeVisible({ timeout: 30_000 })
 }
 
 /** Read the future-unit proof rows straight out of the wallet's IDB —

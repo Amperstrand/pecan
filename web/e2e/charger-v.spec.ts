@@ -7,7 +7,11 @@ import { readBalance } from "./helpers/wallet"
 // kW·s, receipt, refund of the unspent budget — with ZERO hardware:
 // this lane is what keeps demos (and the @smoke fleet check) green while
 // the physical boxes are down.
-const BUDGET = 3
+// Budget sized for METERED truth (#30): the car draws 3-10 kW, so a
+// 40 kW·s budget completes in roughly 4-13 wall seconds — comfortably
+// visible, and far faster than the 40 s a wall-clock contract would
+// need, which is exactly what the elapsed-time assertion below pins.
+const BUDGET = 40
 
 test("charger V: virtual device session end to end (no hardware) @smoke", async ({ page }) => {
   // Internal waits (charge receipt, refund) budget up to 180s; the
@@ -36,6 +40,7 @@ test("charger V: virtual device session end to end (no hardware) @smoke", async 
     "true",
   )
 
+  const startedAt = Date.now()
   await page.getByPlaceholder("1.00").fill(String(BUDGET))
   await page.getByRole("button", { name: "Start charging" }).click()
 
@@ -47,6 +52,11 @@ test("charger V: virtual device session end to end (no hardware) @smoke", async 
   expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}/)
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
   expect(delivered).toBe(BUDGET)
+  // Metered proof: at the car's 3-10 kW draw the budget burns well
+  // inside the wall-clock window — 30 s here rules out the legacy
+  // constant-rate contract (which cannot finish a 40 kW·s budget in
+  // under 40 s).
+  expect(Date.now() - startedAt, "metered delivery beats wall-clock").toBeLessThan(30_000)
 
   await expect
     .poll(async () => readBalance(page), { timeout: 200_000 })
