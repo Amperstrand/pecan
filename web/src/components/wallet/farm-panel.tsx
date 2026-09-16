@@ -74,6 +74,7 @@ export function FarmPanel() {
   const [redeemQty, setRedeemQty] = useState("2")
   const [receipt, setReceipt] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const pollRef = useRef<number | null>(null)
 
   const refresh = useCallback(async () => {
@@ -102,9 +103,12 @@ export function FarmPanel() {
 
   const nextSeries: FarmSeriesInfo | null = useMemo(() => {
     if (!overview) return null
+    if (selectedDate) {
+      return overview.series.find((s) => s.date === selectedDate) ?? null
+    }
     const open = overview.series.filter((s) => !s.matured && s.available > 0)
     return open[0] ?? overview.series[0] ?? null
-  }, [overview])
+  }, [overview, selectedDate])
 
   const buy = useCallback(
     async (series: FarmSeriesInfo) => {
@@ -346,8 +350,20 @@ export function FarmPanel() {
           <CardTitle className="text-sm">FARM</CardTitle>
           {nextSeries ? (
             <CardDescription>
-              {fmtDate(nextSeries.date)} · {nextSeries.capacity} eggs produced ·{" "}
-              {nextSeries.available} available · {nextSeries.price_sats} signet sats / egg
+              <select
+                className="rounded-md border bg-background px-2 py-1 text-sm"
+                value={nextSeries.date}
+                aria-label="production day"
+                onChange={(e) => setSelectedDate(e.target.value)}
+              >
+                {overview?.series.map((s) => (
+                  <option key={s.date} value={s.date}>
+                    {fmtDate(s.date)} · {s.available} of {s.capacity} free
+                    {s.matured ? " · matured" : ""}
+                  </option>
+                ))}
+              </select>
+              {" "}· {nextSeries.price_sats} signet sats / egg
             </CardDescription>
           ) : (
             <CardDescription>loading series…</CardDescription>

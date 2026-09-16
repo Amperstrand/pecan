@@ -145,6 +145,19 @@ async function cardUntil(
   await page.waitForTimeout(2_200)
 }
 
+// The payer ssh→CLN hop wedges transiently on busy machines; CLN
+// dedupes by payment hash, so re-paying the same bolt11 is idempotent.
+async function payWithRetry(invoice: string, attempts = 5, gapMs = 8_000) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return payLightningInvoice(invoice)
+    } catch (err) {
+      if (attempt >= attempts) throw err
+      await new Promise(resolve => setTimeout(resolve, gapMs))
+    }
+  }
+}
+
 async function hideCard(page: Page) {
   await page.evaluate(
     () =>
@@ -394,18 +407,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     .textContent({ timeout: 60_000 })
   expect(invoice).toBeTruthy()
   await page.waitForTimeout(2_500)
-  // The payer ssh can wedge transiently on a loaded workstation; CLN
-  // dedupes by payment hash, so retrying pay on the same bolt11 is safe.
-  const paying = (async () => {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return payLightningInvoice(invoice!.trim())
-      } catch (err) {
-        if (attempt >= 3) throw err
-        await new Promise(resolve => setTimeout(resolve, 5_000))
-      }
-    }
-  })()
+  const paying = payWithRetry(invoice!.trim())
   await card(page, {
     title: "Alice pays from her Lightning wallet ⚡",
     body: "A real invoice — €50 on Lightning.",
@@ -583,16 +585,7 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
     .textContent({ timeout: 60_000 })
   expect(invoice).toBeTruthy()
   await page.waitForTimeout(1_500)
-  const paying = (async () => {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return payLightningInvoice(invoice!.trim())
-      } catch (err) {
-        if (attempt >= 3) throw err
-        await new Promise(resolve => setTimeout(resolve, 5_000))
-      }
-    }
-  })()
+  const paying = payWithRetry(invoice!.trim())
   await cardUntil(
     page,
     {

@@ -452,7 +452,13 @@ impl FarmState {
         Ok(())
     }
 
-    /// Expire unpaid purchases past their invoice TTL — releasing their
+    /// Claim window: a PAID purchase the wallet never converted into a
+    /// mint quote releases its capacity after this long (the mint keeps
+    /// the sats; a real deployment would need a refund rail — non-goal).
+    const CLAIM_WINDOW_SECS: u64 = 86_400;
+
+    /// Expire unpaid purchases past their invoice TTL, and paid-but-never-
+    /// claimed purchases past the claim window — releasing their
     /// reservations. Returns the number expired.
     pub async fn sweep_expired(&self) -> usize {
         let now = unix_now();
@@ -460,12 +466,19 @@ impl FarmState {
         let expired: Vec<String> = guard
             .purchases
             .values()
-            .filter(|p| p.state == PurchaseState::Open && now > p.invoice_expires_at)
+            .filter(|p| match p.state {
+                PurchaseState::Open => now > p.invoice_expires_at,
+                PurchaseState::Paid => now > p.invoice_expires_at + Self::CLAIM_WINDOW_SECS,
+                _ => false,
+            })
             .map(|p| p.id.clone())
             .collect();
         for id in &expired {
             if let Some(p) = guard.purchases.get_mut(id) {
                 p.state = PurchaseState::Expired;
+                if p.quote_id.is_none() {
+                    p.error = Some("claim window closed".into());
+                }
             }
         }
         drop(guard);

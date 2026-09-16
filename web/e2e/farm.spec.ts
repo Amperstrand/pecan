@@ -106,6 +106,10 @@ test.describe("farm futures (NUT-32 spike)", () => {
     const price = series.price_sats
     expect(price).toBeGreaterThan(0)
 
+    // Drive the production-day picker to the verified series — the
+    // panel's default is merely the first open day.
+    await page.getByLabel("production day").selectOption(series.date)
+
     // Unpaid quote reserves capacity: the overview shows 5 fewer free
     // eggs the moment the purchase exists.
     await page.getByLabel("egg quantity").fill("5")
