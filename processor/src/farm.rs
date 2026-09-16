@@ -294,6 +294,7 @@ impl FarmState {
     /// leaves the invoice to expire on the node.
     pub async fn insert_purchase(
         &self,
+        purchase_id: &str,
         series_date: &str,
         quantity: u64,
         pubkey: &str,
@@ -323,7 +324,7 @@ impl FarmState {
             );
         }
         let purchase = FarmPurchase {
-            id: format!("FP-{}", hex_random(12)),
+            id: purchase_id.to_string(),
             series_date: series_date.to_string(),
             unit: series.unit.clone(),
             quantity,
@@ -1219,7 +1220,7 @@ mod tests {
         let farm = fresh_farm().await;
         let series = seeded_series(&farm, "2026-09-18").await;
         let p = farm
-            .insert_purchase("2026-09-18", 5, "02abc", "lnbc1".into(), "aa".into())
+            .insert_purchase("FP-test5", "2026-09-18", 5, "02abc", "lnbc1".into(), "aa".into())
             .await
             .unwrap();
         assert_eq!(p.total_sats, 5000);
@@ -1231,7 +1232,7 @@ mod tests {
     async fn unpaid_quote_reserves_capacity() {
         let farm = fresh_farm().await;
         seeded_series(&farm, "2026-09-18").await;
-        farm.insert_purchase("2026-09-18", 5, "02abc", "lnbc".into(), "aa".into())
+        farm.insert_purchase("FP-r1", "2026-09-18", 5, "02abc", "lnbc".into(), "aa".into())
             .await
             .unwrap();
         let snapshot = farm.series_for_date("2026-09-18").await.unwrap();
@@ -1246,7 +1247,7 @@ mod tests {
         assert_eq!(snapshot.available(reserved), 5);
         // a second 6-egg purchase cannot fit in the remaining 5
         assert!(farm
-            .insert_purchase("2026-09-18", 6, "02abc", "lnbc".into(), "bb".into())
+            .insert_purchase("FP-r2", "2026-09-18", 6, "02abc", "lnbc".into(), "bb".into())
             .await
             .is_err());
     }
@@ -1256,7 +1257,7 @@ mod tests {
         let farm = fresh_farm().await;
         seeded_series(&farm, "2026-09-18").await;
         let p = farm
-            .insert_purchase("2026-09-18", 10, "02abc", "lnbc".into(), "aa".into())
+            .insert_purchase("FP-e1", "2026-09-18", 10, "02abc", "lnbc".into(), "aa".into())
             .await
             .unwrap();
         // force-expire it
@@ -1277,7 +1278,7 @@ mod tests {
             .map(|p| p.quantity)
             .sum::<u64>();
         assert_eq!(reserved, 0, "expired purchase must release its reservation");
-        farm.insert_purchase("2026-09-18", 10, "02abc", "lnbc".into(), "cc".into())
+        farm.insert_purchase("FP-e2", "2026-09-18", 10, "02abc", "lnbc".into(), "cc".into())
             .await
             .expect("capacity is free again");
     }
@@ -1286,11 +1287,11 @@ mod tests {
     async fn eleventh_egg_claim_fails_tenth_succeeds() {
         let farm = fresh_farm().await;
         seeded_series(&farm, "2026-09-18").await;
-        farm.insert_purchase("2026-09-18", 10, "02abc", "lnbc".into(), "aa".into())
+        farm.insert_purchase("FP-t1", "2026-09-18", 10, "02abc", "lnbc".into(), "aa".into())
             .await
             .unwrap();
         assert!(farm
-            .insert_purchase("2026-09-18", 1, "02abc", "lnbc".into(), "bb".into())
+            .insert_purchase("FP-t2", "2026-09-18", 1, "02abc", "lnbc".into(), "bb".into())
             .await
             .is_err());
     }
@@ -1305,6 +1306,7 @@ mod tests {
             let f = farm.clone();
             handles.push(tokio::spawn(async move {
                 f.insert_purchase(
+                    &format!("FP-c{i:02}"),
                     "2026-09-18",
                     1,
                     "02abc",

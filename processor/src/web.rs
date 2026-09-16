@@ -1269,15 +1269,20 @@ async fn api_farm_purchase_quote(
     let total = series.price_sats * form.quantity;
     // Invoice first (outside the state lock), then reserve atomically — a
     // failed reservation leaves a harmless orphaned invoice on the node.
+    // The CLN invoice label IS the purchase id: the payment poller watches
+    // purchases by their id, so the two must never diverge.
     let description = format!(
         "Farm {}: {} egg(s) x {} sat",
         series.date, form.quantity, series.price_sats
     );
-    let probe_id = format!(
+    let purchase_id = format!(
         "FP-{}",
         &crate::farm::sha256_hex(format!("{}-{}", unix_now(), form.quantity).as_bytes())[..12]
     );
-    let (bolt11, payment_hash) = match farm.create_invoice(&probe_id, total, &description).await {
+    let (bolt11, payment_hash) = match farm
+        .create_invoice(&purchase_id, total, &description)
+        .await
+    {
         Ok(created) => created,
         Err(e) => {
             return api_error(
@@ -1288,7 +1293,7 @@ async fn api_farm_purchase_quote(
     };
     let purchase = match farm
         .state
-        .insert_purchase(&date, form.quantity, &pubkey, bolt11.clone(), payment_hash.clone())
+        .insert_purchase(&purchase_id, &date, form.quantity, &pubkey, bolt11.clone(), payment_hash.clone())
         .await
     {
         Ok(purchase) => purchase,
