@@ -303,8 +303,8 @@ impl BranchBackend {
                         .into(),
                 )
             })?;
-        // NUT-20 lock is mandatory — the payment quote itself must never
-        // become a bearer credential someone else can spend.
+        // The NUT-20 lock is mandatory — the payment quote itself must
+        // never become a bearer credential someone else can spend.
         if opts.pubkey.is_none() {
             return Err(Error::Custom(
                 "future mint quotes must be locked to a wallet key (NUT-20)".into(),
