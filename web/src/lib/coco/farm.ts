@@ -1,4 +1,4 @@
-import { Amount, getEncodedToken } from "@cashu/cashu-ts"
+import { Amount, getDecodedToken, getEncodedToken, normalizeMintUrl } from "@cashu/cashu-ts"
 import { CURRENCIES, consoleUrl, mintUrl } from "./currency"
 import { getCoco } from "./coco-wallet"
 import { raceTimeout } from "./timeout"
@@ -285,7 +285,22 @@ export async function sendFuture(unit: string, quantity: number): Promise<SendFu
 
 export async function receiveFutureToken(token: string): Promise<number> {
   const coco = await getCoco()
-  await coco.wallet.receive(token)
+  // The generic receive pipeline crashes fresh contexts on this stack;
+  // receive = swap the token's proofs into fresh tagged proofs of ours.
+  const decoded = getDecodedToken(token)
+  const mintUrlOfToken = normalizeMintUrl(decoded.mint)
+  if (mintUrlOfToken !== farmMintUrl()) {
+    throw new Error(`token is from ${decoded.mint}, not the farm mint`)
+  }
+  const unit = decoded.unit
+  if (!unit.startsWith("future:")) {
+    throw new Error(`token unit ${unit} is not a farm future`)
+  }
+  const termsUri = termsUriFor(unit)
+  if (!termsUri) {
+    throw new Error(`no terms known for ${unit} — refresh the farm tab first`)
+  }
+  await coco.receiveFutureUnits(farmMintUrl(), unit, [["future", "1", termsUri]], decoded.proofs)
   const balances = await futureBalances()
   return balances.reduce((sum, b) => sum + b.amount, 0)
 }
