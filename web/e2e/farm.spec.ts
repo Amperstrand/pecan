@@ -235,13 +235,15 @@ test.describe("farm futures (NUT-32 spike)", () => {
     await openFarmWallet(bobPage)
     await bobPage.getByPlaceholder(/paste a token/i).fill(token)
     await bobPage.getByRole("button", { name: /Receive token/i }).click()
+    // A fresh context boots five mints (incl. the external sat mint)
+    // before the receive can run — give it a real budget.
     await expect
       .poll(async () => {
         const bobProofs = await readFutureProofs(bobPage)
         return bobProofs
           .filter((p) => p.unit === series.unit && p.state !== "spent")
           .reduce((sum, p) => sum + p.amount, 0)
-      })
+      }, { timeout: 120_000 })
       .toBe(2)
     await bobContext.close()
 
@@ -268,7 +270,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
         return bobProofs
           .filter((p) => p.unit === series.unit && p.state !== "spent")
           .reduce((sum, p) => sum + p.amount, 0)
-      })
+      }, { timeout: 120_000 })
       .toBe(2)
 
     await bobPage2.getByLabel(`redeem quantity for ${series.unit}`).fill("2")

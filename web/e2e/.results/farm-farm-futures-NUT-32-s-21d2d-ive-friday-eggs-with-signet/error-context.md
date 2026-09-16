@@ -7,16 +7,18 @@
 # Test info
 
 - Name: farm.spec.ts >> farm futures (NUT-32 spike) >> sarah_buys_five_friday_eggs_with_signet
-- Location: e2e/farm.spec.ts:103:3
+- Location: e2e/farm.spec.ts:107:3
 
 # Error details
 
 ```
-Error: lightning pay failed on all nodes:
-cln-hub-signet: lightning pay via cln-hub-signet failed: 
-cln-clboss-signet: lightning pay via cln-clboss-signet failed: 
-cln-nostr-signet: lightning pay via cln-nostr-signet failed: 
-cln-vls-signet: lightning pay via cln-vls-signet failed: 
+Error: expect(received).toBe(expected) // Object.is equality
+
+Expected: 2
+Received: 0
+
+Call Log:
+- Timeout 10000ms exceeded while waiting on the predicate
 ```
 
 # Page snapshot
@@ -32,17 +34,33 @@ cln-vls-signet: lightning pay via cln-vls-signet failed:
         - tab "USD" [ref=e12]
         - tab "SATS" [ref=e13]
         - tab "FARM" [selected] [ref=e14]
-    - generic [ref=e16]:
-      - generic [ref=e17]: YOU OWN
-      - generic [ref=e18]: 0 egg claims
-    - generic [ref=e20]:
-      - textbox "paste a token to receive eggs" [ref=e21]
-      - button "Receive token" [ref=e22] [cursor=pointer]
-    - generic [ref=e23]:
-      - generic [ref=e24]:
-        - generic [ref=e25]: FARM
-        - generic [ref=e26]:
-          - combobox "production day" [ref=e27]:
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]: YOU OWN
+        - generic [ref=e18]: 3 egg claims
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - generic [ref=e21]:
+            - generic [ref=e22]: Farm — Monday, Sep 28 eggs
+            - generic [ref=e23]: ·
+            - generic [ref=e24]: "3"
+            - button "details" [ref=e25] [cursor=pointer]
+          - generic [ref=e26]:
+            - textbox "send quantity for future:farm-egg:20260928t160000z" [ref=e27]: "2"
+            - button "Send to Bob (token)" [ref=e28] [cursor=pointer]
+            - textbox "redeem quantity for future:farm-egg:20260928t160000z" [ref=e29]: "2"
+            - button "Redeem at farm" [ref=e30] [cursor=pointer]
+        - generic [ref=e31]:
+          - generic [ref=e32]: "Token to hand Bob (2 eggs) — normal Cashu bearer transfer:"
+          - textbox [ref=e33]: cashuBo2FteCRodHRwczovL2dpZnRjYXJkLmNhc2h1LmV4Y2hhbmdlL2Zhcm1hdXggZnV0dXJlOmZhcm0tZWdnOjIwMjYwOTI4dDE2MDAwMHphdIGiYWlIAL4hb9q4yKVhcIGkYWECYXN423sic2VjcmV0IjoiMzA4ZDUwNDQ4ZDFjNDM5MmMyMmJiZTRmZTY4YTAxM2YwMTdhM2JmNTBiMDZhYTU0ZGUxNmQ0YzU1YzQ3YTdlMiIsInRhZ3MiOltbImZ1dHVyZSIsIjEiLCJodHRwczovL2dpZnRjYXJkLmNhc2h1LmV4Y2hhbmdlL2Zhcm0tY29uc29sZS90ZXJtcy80NDAzNGQ3ZTNkN2ZlODRlN2YyM2NhMTRiNzY4ZDZjZTMxNzkyMmI5OTNmNDEyYThmZGJkOWI1ZTNhYWEwMDljIl1dfWFjWCECSTW4QexHI5sYvUzawwSQpr0yQ60LraSlNhcj_WQZuRNhZKNhZVggtmY976DUOg2ct3yX8rZ52L7pu-aWt2QaTgymtlIuOk9hc1ggNR13mhySXc-aynK19r02UN6I1s1u2xFChkJZtQ-LEVJhclggnHh9ntbuRtLuRIublbgmv3md1NQCG5CkwjTPC97v214
+    - generic [ref=e35]:
+      - textbox "paste a token to receive eggs" [ref=e36]
+      - button "Receive token" [ref=e37] [cursor=pointer]
+    - generic [ref=e38]:
+      - generic [ref=e39]:
+        - generic [ref=e40]: FARM
+        - generic [ref=e41]:
+          - combobox "production day" [ref=e42]:
             - option "Wednesday, Sep 16 · 10 of 10 free · matured"
             - option "Thursday, Sep 17 · 0 of 10 free"
             - option "Friday, Sep 18 · 0 of 10 free"
@@ -54,240 +72,237 @@ cln-vls-signet: lightning pay via cln-vls-signet failed:
             - option "Thursday, Sep 24 · 0 of 10 free"
             - option "Friday, Sep 25 · 0 of 10 free"
             - option "Saturday, Sep 26 · 0 of 10 free"
-            - option "Sunday, Sep 27 · 5 of 10 free" [selected]
-            - option "Monday, Sep 28 · 10 of 10 free"
+            - option "Sunday, Sep 27 · 0 of 10 free"
+            - option "Monday, Sep 28 · 0 of 10 free" [selected]
             - option "Tuesday, Sep 29 · 10 of 10 free"
           - text: · 1000 signet sats / egg
-      - generic [ref=e28]:
-        - generic [ref=e29]:
-          - generic [ref=e30]:
-            - generic [ref=e31]: Quantity
-            - textbox "egg quantity" [ref=e32]: "5"
-          - generic [ref=e33]:
-            - generic [ref=e34]: 5 eggs
-            - generic [ref=e35]: 5000 signet sats
-            - generic [ref=e36]: "Production: Sunday, Sep 27Available for pickup: Sun, 27 Sep 2026 16:00:00 UTC"
-        - generic [ref=e37]:
-          - generic [ref=e38]: Pay 5000 signet sats — waiting for payment
-          - textbox [ref=e42]: lntbs50u1p4247pgsp5lefmrym6y3cju0nfev802zltrs53u05407tpmg22vsyl0tz8zwkqpp5prxusrqk6wp7p3xpkj302r0c88e8efmskfr5x88yn66y58883wkqdp6geshymfqxgcryd3dxquj6v3h8gsr2gr9vanjsuefypuzqvfsxqczqumpwsxqrpcgcqp2rzjq24p9s7hz42lhzxsh396ax482t6qvy5j23g76j5m248ykuuu83gcxp82avqqqjcqqqqqqqqqqqx0g3cqqc9qxpqysgqsjwsdsrgdfl9d5qmwme65rw8lh9py4e98wyfhkmz66rvfm70ez3938uu4dgl62gy3dg39tag2j4vy0uelzyrsxhqw3qdl4vw9flzgxsqpg50q4
-          - button "Copy invoice" [ref=e43] [cursor=pointer]
-        - button "verify terms" [ref=e45] [cursor=pointer]
-        - group [ref=e46]:
-          - generic "all series (14)" [ref=e47] [cursor=pointer]
-    - generic [ref=e48]:
-      - generic [ref=e49]:
-        - generic [ref=e50]: Developer Tools
-        - generic [ref=e51]: Signet/test only. These actions are irreversible.
-      - generic [ref=e52]:
-        - button "Export wallet data (JSON)" [ref=e53] [cursor=pointer]
-        - button "Force clear wallet (downloads backup first)" [ref=e54] [cursor=pointer]
-    - paragraph [ref=e55]: Self-custodied — Coco 2 · keys stay in your browser.
+      - generic [ref=e43]:
+        - generic [ref=e44]:
+          - generic [ref=e45]:
+            - generic [ref=e46]: Quantity
+            - textbox "egg quantity" [ref=e47]: "5"
+          - generic [ref=e48]:
+            - generic [ref=e49]: 5 eggs
+            - generic [ref=e50]: 5000 signet sats
+            - generic [ref=e51]: "Production: Monday, Sep 28Available for pickup: Mon, 28 Sep 2026 16:00:00 UTC"
+        - generic [ref=e52]: YOU OWN — Farm eggs · 5 claims of future:farm-egg:20260928t160000z
+        - button "verify terms" [ref=e54] [cursor=pointer]
+        - group [ref=e55]:
+          - generic "all series (14)" [ref=e56] [cursor=pointer]
+    - generic [ref=e57]:
+      - generic [ref=e58]:
+        - generic [ref=e59]: Developer Tools
+        - generic [ref=e60]: Signet/test only. These actions are irreversible.
+      - generic [ref=e61]:
+        - button "Export wallet data (JSON)" [ref=e62] [cursor=pointer]
+        - button "Force clear wallet (downloads backup first)" [ref=e63] [cursor=pointer]
+    - paragraph [ref=e64]: Self-custodied — Coco 2 · keys stay in your browser.
   - region "Notifications alt+T"
 ```
 
 # Test source
 
 ```ts
-  39  | }> {
-  40  |   const matchResp = await page.request.post(`${base}/api/quotes/match`, {
-  41  |     headers: { "Content-Type": "application/json" },
-  42  |     data: { code: tellerCode },
-  43  |   })
-  44  |   const match = await matchResp.json()
-  45  |   if (!match.id) {
-  46  |     throw new Error(`match failed for ${tellerCode}: ${JSON.stringify(match).slice(0, 200)}`)
-  47  |   }
-  48  | 
-  49  |   // Outgoing tickets sit in `waiting` until the wallet locks funds at the
-  50  |   // mint — a swap-then-melt wallet needs two round trips, so poll until the
-  51  |   // operator would actually be allowed to pay out.
-  52  |   let ticket = match as { id: string; kind: string; status: string; amount: number }
-  53  |   const deadline = Date.now() + 30_000
-  54  |   while (ticket.status === "waiting" && Date.now() < deadline) {
-  55  |     await page.waitForTimeout(500)
-  56  |     const poll = await page.request.post(`${base}/api/quotes/match`, {
-  57  |       headers: { "Content-Type": "application/json" },
-  58  |       data: { code: tellerCode },
-  59  |     })
-  60  |     ticket = await poll.json()
-  61  |   }
-  62  |   if (ticket.status === "waiting") {
-  63  |     throw new Error(`ticket ${match.id} never left 'waiting' (wallet did not lock funds)`)
-  64  |   }
-  65  | 
-  66  |   const settleResp = await page.request.post(
-  67  |     `${base}/api/tickets/${match.id}/mark-paid`,
-  68  |     {
-  69  |     headers: { "Content-Type": "application/json" },
-  70  |     data: { notes },
-  71  |   })
-  72  |   if (settleResp.status() !== 200) {
-  73  |     throw new Error(`mark-paid failed for ${match.id}: ${settleResp.status()} ${await settleResp.text()}`)
-  74  |   }
-  75  |   return settleResp.json()
-  76  | }
-  77  | 
-  78  | // ---------------------------------------------------------------------------
-  79  | // External wallet helpers (pay from lab nodes via SSH)
-  80  | // ---------------------------------------------------------------------------
-  81  | 
-  82  | export function payLightningInvoiceFrom(node: string, invoice: string): string {
-  83  |   let out: string
-  84  |   try {
-  85  |     out = execSync(
-  86  |       `ssh root@46.224.104.12 "docker exec ${node} lightning-cli --network=signet pay ${invoice}"`,
-  87  |       { timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] },
-  88  |     ).toString()
-  89  |   } catch (err) {
-  90  |     const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
-  91  |     throw new Error(`lightning pay via ${node} failed: ${stderr.slice(0, 300)}`)
-  92  |   }
-  93  |   const match = out.match(/"payment_preimage":\s*"([0-9a-f]+)"/)
-  94  |   if (!match) throw new Error(`payment did not complete: ${out.slice(0, 300)}`)
-  95  |   return match[1]
-  96  | }
-  97  | 
-  98  | /**
-  99  |  * Decodes a bolt11 on a lab node to read back what the payer's wallet
-  100 |  * shows — the invoice description must carry the exchange rate.
-  101 |  */
-  102 | export function decodeInvoiceDescription(invoice: string): string {
-  103 |   let out: string
-  104 |   try {
-  105 |     out = execSync(
-  106 |       `ssh root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet decode ${invoice}"`,
-  107 |       { timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] },
-  108 |     ).toString()
-  109 |   } catch (err) {
-  110 |     const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
-  111 |     throw new Error(`bolt11 decode failed: ${stderr.slice(0, 300)}`)
-  112 |   }
-  113 |   const match = out.match(/"description":\s*"((?:[^"\\]|\\.)*)"/)
-  114 |   if (!match) throw new Error(`no description in decode output: ${out.slice(0, 300)}`)
-  115 |   return JSON.parse(`"${match[1]}"`) as string
-  116 | }
-  117 | 
-  118 | /**
-  119 |  * Pays from the lab nodes, failing over: the hub is usually the best
-  120 |  * connected, but its channel to a given mint node can be locally
-  121 |  * disabled (seen 2026-09-16: hub→farm mint channels dark, clboss fine).
-  122 |  */
-  123 | const LIGHTNING_PAYERS = [
-  124 |   "cln-hub-signet",
-  125 |   "cln-clboss-signet",
-  126 |   "cln-nostr-signet",
-  127 |   "cln-vls-signet",
-  128 | ] as const
-  129 | 
-  130 | export function payLightningInvoice(invoice: string): string {
-  131 |   const failures: string[] = []
-  132 |   for (const node of LIGHTNING_PAYERS) {
-  133 |     try {
-  134 |       return payLightningInvoiceFrom(node, invoice)
-  135 |     } catch (err) {
-  136 |       failures.push(`${node}: ${err instanceof Error ? err.message : String(err)}`)
-  137 |     }
-  138 |   }
-> 139 |   throw new Error(`lightning pay failed on all nodes:\n${failures.join("\n")}`)
-      |         ^ Error: lightning pay failed on all nodes:
-  140 | }
-  141 | 
-  142 | /**
-  143 |  * Creates a bolt11 invoice on the hub node — the melt destination for
-  144 |  * sat withdrawals (the wallet pays it, the lab node receives).
-  145 |  */
-  146 | export function createLightningInvoice(amountSat: number, label: string): string {
-  147 |   let out: string
-  148 |   try {
-  149 |     out = execSync(
-  150 |       `ssh root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet invoice ${amountSat * 1000}msat pecan-${label} e2e"`,
-  151 |       { timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
-  152 |     ).toString()
-  153 |   } catch (err) {
-  154 |     const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? ""
-  155 |     throw new Error(`invoice creation on cln-hub-signet failed: ${stderr.slice(0, 300)}`)
-  156 |   }
-  157 |   const match = out.match(/"bolt11":\s*"((?:[^"\\]|\\.)*)"/)
-  158 |   if (!match) throw new Error(`no bolt11 in invoice output: ${out.slice(0, 300)}`)
-  159 |   return match[1]
-  160 | }
-  161 | 
-  162 | /**
-  163 |  * Sends on-chain sats from a genuinely external lab wallet. The CLN nodes run
-  164 |  * esplora chain mode; a withdraw can stall on slow esplora fetches, and
-  165 |  * killing the RPC mid-flight strands the node's inputs as reserved for a long
-  166 |  * block window — so we fail over across every lab wallet and keep the
-  167 |  * timeout generous. €50 is the mint's onchain minimum, so each run burns
-  168 |  * ~7.4k sat of payer liquidity; top the payers up from a signet faucet when
-  169 |  * they run dry.
-  170 |  */
-  171 | const ONCHAIN_PAYERS = ["cln-hub-signet", "cln-vls-signet", "cln-nostr-signet"] as const
-  172 | 
-  173 | export function sendOnchainFromExternal(address: string, sat: number): string {
-  174 |   const failures: string[] = []
-  175 |   for (const node of ONCHAIN_PAYERS) {
-  176 |     // Health probe first: a wedged RPC (the vls signer outage of
-  177 |     // 2026-09-03) accepts the connection and then hangs, which would
-  178 |     // burn the whole 300s withdraw budget on a dead node before the
-  179 |     // failover ever reaches a healthy payer. getinfo must answer fast.
-  180 |     try {
-  181 |       execSync(
-  182 |         `ssh -o ConnectTimeout=10 root@46.224.104.12 "timeout 15 docker exec ${node} lightning-cli --network=signet getinfo"`,
-  183 |         { timeout: 40_000, stdio: ["ignore", "pipe", "pipe"] },
-  184 |       )
-  185 |     } catch (err) {
-  186 |       const e = err as { stderr?: Buffer; stdout?: Buffer }
-  187 |       failures.push(
-  188 |         `${node}: RPC unhealthy, skipped (${`${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 160)})`,
-  189 |       )
-  190 |       continue
-  191 |     }
-  192 |     let out: string
-  193 |     try {
-  194 |       // Feerate is PINNED, not estimated: signet fee estimates
-  195 |       // occasionally explode (observed 4.28M sat/kB on 2026-09-04 —
-  196 |       // every payer answered "0 available UTXOs, 184k sats short" while
-  197 |       // holding healthy balances). A 1.5k/kw floor-rate tx always
-  198 |       // propagates; the deposit is esplora-watched, not fee-raced.
-  199 |       out = execSync(
-  200 |         `ssh root@46.224.104.12 "docker exec ${node} lightning-cli --network=signet withdraw ${address} ${sat}sat 1500perkw"`,
-  201 |         { timeout: 300_000, stdio: ["ignore", "pipe", "pipe"] },
-  202 |       ).toString()
-  203 |     } catch (err) {
-  204 |       const e = err as { stderr?: Buffer; stdout?: Buffer }
-  205 |       // lightning-cli reports RPC errors on stdout; keep both for diagnosis
-  206 |       failures.push(
-  207 |         `${node}: ${`${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 300)}`,
-  208 |       )
-  209 |       continue
-  210 |     }
-  211 |     const match = out.match(/"txid":\s*"([0-9a-f]+)"/)
-  212 |     if (!match) {
-  213 |       failures.push(`${node}: no txid in output: ${out.slice(0, 300)}`)
-  214 |       continue
-  215 |     }
-  216 |     return match[1]
-  217 |   }
-  218 |   throw new Error(`onchain withdraw failed on all payers:\n${failures.join("\n")}`)
-  219 | }
-  220 | 
-  221 | // ---------------------------------------------------------------------------
-  222 | // Wallet UI helpers (coco wallet at /console/wallet)
-  223 | // ---------------------------------------------------------------------------
-  224 | 
-  225 | export async function readBalance(page: Page): Promise<number> {
-  226 |   // Balance renders as a sibling of the "Balance" label inside a card header;
-  227 |   // it shows "… €" until the wallet initializes, so retry until a number
-  228 |   // appears — a NaN here would poison every later `before ± amount` check.
-  229 |   const el = page.locator('.text-4xl.tabular-nums')
-  230 |   await el.waitFor({ state: "visible", timeout: 20_000 })
-  231 |   // A currency switch re-renders the figure asynchronously; guard against
-  232 |   // reading the previous currency's number under the new tab (a stale read
-  233 |   // once poisoned a `before + amount` baseline and cost a full suite run).
-  234 |   const activeTab = await page
-  235 |     .locator('[role="tablist"][aria-label="Currency"] [aria-selected="true"]')
-  236 |     .textContent()
-  237 |     .catch(() => null)
-  238 |   const expectedSymbol = activeTab ? CURRENCY_SYMBOLS[activeTab.trim()] : undefined
-  239 |   const deadline = Date.now() + 20_000
+  145 |         "FUTURE ROWS:",
+  146 |         JSON.stringify(
+  147 |           proofs.map((p) => ({ unit: p.unit, amount: p.amount, state: p.state, secretHead: p.secret.slice(0, 40) })),
+  148 |         ),
+  149 |       )
+  150 |     }
+  151 |     expect(mine.reduce((sum, p) => sum + p.amount, 0)).toBe(5)
+  152 |     for (const proof of mine) {
+  153 |       const tag = futureTag(proof.secret)
+  154 |       expect(tag, `proof secret must carry exactly one future tag: ${proof.secret.slice(0, 80)}`).not.toBeNull()
+  155 |       expect(tag?.version).toBe("1")
+  156 |       expect(tag?.uri).toBe(series.terms_uri)
+  157 |     }
+  158 | 
+  159 |     // Series accounting moved (the farm's minted-marker polls the mint
+  160 |     // quote state, so `issued` converges within a few seconds); capacity
+  161 |     // ledger is aggregate-only.
+  162 |     await expect
+  163 |       .poll(
+  164 |         async () =>
+  165 |           (await farmOverview(page)).series.find((s) => s.date === series.date)?.issued ?? -1,
+  166 |         { timeout: 30_000 },
+  167 |       )
+  168 |       .toBe(series.issued + 5)
+  169 |     const after = (await farmOverview(page)).series.find((s) => s.date === series.date)
+  170 |     expect(after?.available).toBe(series.available - 5)
+  171 | 
+  172 |     // Terms blob is content-addressed: the digest in the URI addresses
+  173 |     // the exact bytes served.
+  174 |     const termsResp = await page.request.get(`${FARM_BASE}/terms/${series.terms_sha256}`)
+  175 |     expect(termsResp.status()).toBe(200)
+  176 |     const blob = await termsResp.text()
+  177 |     const digest = await page.evaluate(async (text) => {
+  178 |       const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))
+  179 |       return Array.from(d).map((b) => b.toString(16).padStart(2, "0")).join("")
+  180 |     }, blob)
+  181 |     expect(digest).toBe(series.terms_sha256)
+  182 |     const envelope = JSON.parse(blob) as { mint: string; signature: string; terms: { unit: string } }
+  183 |     expect(envelope.terms.unit).toBe(series.unit)
+  184 |     expect(envelope.signature).toMatch(/^[0-9a-f]{128}$/)
+  185 |     expect(envelope.mint).toContain("/farm")
+  186 | 
+  187 |     // The mint advertises NUT-32.
+  188 |     const info = await page.request.get("/farm/v1/info").then((r) => r.json())
+  189 |     expect(info.nuts?.["32"]).toMatchObject({ supported: true, versions: [1] })
+  190 | 
+  191 |     // Issuance is wallet-bound: a locked future quote referencing an
+  192 |     // unknown purchase is refused by the mint/processor (wrong-key-
+  193 |     // for-known-purchase is pinned in processor tests).
+  194 |     const foreignQuote = await page.request.post("/farm/v1/mint/quote/future", {
+  195 |       data: {
+  196 |         amount: 5,
+  197 |         unit: series.unit,
+  198 |         pubkey: "02" + "ab".repeat(32),
+  199 |         description: "foreign key attempt",
+  200 |         purchase: "does-not-exist",
+  201 |       },
+  202 |     })
+  203 |     expect(foreignQuote.status()).toBeGreaterThanOrEqual(400)
+  204 | 
+  205 |     // ---------------------------------------------------------------
+  206 |     // Sarah → Bob: 2 of 5 via bearer transfer, farm blind to it.
+  207 |     // ---------------------------------------------------------------
+  208 |     await page.getByLabel(`send quantity for ${series.unit}`).fill("2")
+  209 |     await page.getByRole("button", { name: /Send to Bob/i }).click()
+  210 |     const tokenBox = page.getByTestId("farm-token")
+  211 |     await tokenBox.waitFor({ state: "visible", timeout: 60_000 })
+  212 |     const token = await tokenBox.inputValue()
+  213 |     expect(token.length).toBeGreaterThan(50)
+  214 | 
+  215 |     await expect
+  216 |       .poll(async () => {
+  217 |         const balances = await readFutureProofs(page)
+  218 |         return balances
+  219 |           .filter((p) => p.unit === series.unit && p.state !== "spent")
+  220 |           .reduce((sum, p) => sum + p.amount, 0)
+  221 |       })
+  222 |       .toBe(3)
+  223 | 
+  224 |     // The swap preserved unit and terms URI on every replacement proof.
+  225 |     const sarahProofs = (await readFutureProofs(page)).filter(
+  226 |       (p) => p.unit === series.unit && p.state !== "spent",
+  227 |     )
+  228 |     for (const proof of sarahProofs) {
+  229 |       expect(futureTag(proof.secret)?.uri).toBe(series.terms_uri)
+  230 |     }
+  231 | 
+  232 |     // Bob: a fresh browser profile receives the token and owns 2.
+  233 |     const bobContext = await browser.newContext()
+  234 |     const bobPage = await bobContext.newPage()
+  235 |     await openFarmWallet(bobPage)
+  236 |     await bobPage.getByPlaceholder(/paste a token/i).fill(token)
+  237 |     await bobPage.getByRole("button", { name: /Receive token/i }).click()
+  238 |     await expect
+  239 |       .poll(async () => {
+  240 |         const bobProofs = await readFutureProofs(bobPage)
+  241 |         return bobProofs
+  242 |           .filter((p) => p.unit === series.unit && p.state !== "spent")
+  243 |           .reduce((sum, p) => sum + p.amount, 0)
+  244 |       })
+> 245 |       .toBe(2)
+      |        ^ Error: expect(received).toBe(expected) // Object.is equality
+  246 |     await bobContext.close()
+  247 | 
+  248 |     // Total supply unchanged by the transfer: issued unchanged.
+  249 |     const transferred = (await farmOverview(page)).series.find((s) => s.date === series.date)
+  250 |     expect(transferred?.issued).toBe(after?.issued ?? series.issued + 5)
+  251 | 
+  252 |     // ---------------------------------------------------------------
+  253 |     // Redemption: mature the series (admin demo override), Bob's 2
+  254 |     // claims burn at the counter against physical handover.
+  255 |     // ---------------------------------------------------------------
+  256 |     await apiLogin(page, FARM_BASE, FARM_ADMIN_PASSWORD || process.env.PECAN_ADMIN_PASSWORD || "")
+  257 |     const mature = await page.request.post(`${FARM_BASE}/api/farm/series/${series.date}/mature-now`)
+  258 |     expect(mature.status()).toBe(200)
+  259 | 
+  260 |     const bobContext2 = await browser.newContext()
+  261 |     const bobPage2 = await bobContext2.newPage()
+  262 |     await openFarmWallet(bobPage2)
+  263 |     await bobPage2.getByPlaceholder(/paste a token/i).fill(token)
+  264 |     await bobPage2.getByRole("button", { name: /Receive token/i }).click()
+  265 |     await expect
+  266 |       .poll(async () => {
+  267 |         const bobProofs = await readFutureProofs(bobPage2)
+  268 |         return bobProofs
+  269 |           .filter((p) => p.unit === series.unit && p.state !== "spent")
+  270 |           .reduce((sum, p) => sum + p.amount, 0)
+  271 |       })
+  272 |       .toBe(2)
+  273 | 
+  274 |     await bobPage2.getByLabel(`redeem quantity for ${series.unit}`).fill("2")
+  275 |     await bobPage2.getByRole("button", { name: /Redeem at farm/i }).click()
+  276 |     await expect(
+  277 |       bobPage2.getByText(/teller code [0-9A-F]{6}/i),
+  278 |     ).toBeVisible({ timeout: 60_000 })
+  279 |     const code = await bobPage2.getByText(/teller code ([0-9A-F]{6})/i).textContent()
+  280 |     const tail = code?.match(/([0-9A-F]{6})/)?.[1] ?? ""
+  281 |     expect(tail).toHaveLength(6)
+  282 | 
+  283 |     // The admin session lives on Sarah's context — settle from there.
+  284 |     const settled = await matchAndSettle(page, tail, "eggs handed over", FARM_BASE)
+  285 |     expect(settled.unit).toBe(series.unit)
+  286 |     expect(settled.amount).toBe(2)
+  287 | 
+  288 |     await expect
+  289 |       .poll(async () => (await bobPage2.getByText(/FARM-/i).first().textContent()) ?? "")
+  290 |       .toMatch(/FARM-/)
+  291 |     await expect
+  292 |       .poll(async () => (await farmOverview(page)).series.find((s) => s.date === series.date)?.redeemed ?? -1)
+  293 |       .toBe(series.redeemed + 2)
+  294 | 
+  295 |     // Double redemption dies on spent proofs: Bob's own wallet no longer
+  296 |     // shows the claims, so the melt cannot even lock inputs.
+  297 |     const bobLeft = (await readFutureProofs(bobPage2)).filter(
+  298 |       (p) => p.unit === series.unit && p.state !== "spent",
+  299 |     )
+  300 |     expect(bobLeft.reduce((sum, p) => sum + p.amount, 0)).toBe(0)
+  301 |     await bobContext2.close()
+  302 |   })
+  303 | 
+  304 |   test("capacity invariant: unpaid purchases reserve and expire", async ({ page }) => {
+  305 |     test.setTimeout(120_000)
+  306 |     const series = await firstOpenSeries(page)
+  307 | 
+  308 |     // An 11-egg claim cannot exist: the API refuses beyond capacity.
+  309 |     const tooMany = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
+  310 |       data: {
+  311 |         production_date: series.date,
+  312 |         quantity: series.capacity + 1,
+  313 |         pubkey: "02" + "cd".repeat(32),
+  314 |       },
+  315 |     })
+  316 |     expect(tooMany.status()).toBeGreaterThanOrEqual(400)
+  317 | 
+  318 |     // Purchase everything that is left — the next one must fail.
+  319 |     if (series.available > 0) {
+  320 |       const grab = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
+  321 |         data: {
+  322 |           production_date: series.date,
+  323 |           quantity: series.available,
+  324 |           pubkey: "02" + "ef".repeat(32),
+  325 |         },
+  326 |       })
+  327 |       expect(grab.status()).toBe(200)
+  328 |       const none = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
+  329 |         data: {
+  330 |           production_date: series.date,
+  331 |           quantity: 1,
+  332 |           pubkey: "02" + "ef".repeat(32),
+  333 |         },
+  334 |       })
+  335 |       expect(none.status()).toBeGreaterThanOrEqual(400)
+  336 |       expect((await none.json()).error).toContain("capacity")
+  337 |     }
+  338 |   })
+  339 | 
+  340 |   test("redemption before maturity is refused", async ({ page }) => {
+  341 |     const series = (await farmOverview(page)).series.find((s) => !s.matured)
+  342 |     if (!series) {
+  343 |       test.skip(true, "no immature series left")
+  344 |       return
+  345 |     }
 ```
