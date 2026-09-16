@@ -3,6 +3,7 @@ import {
   apiLogin,
   matchAndSettle,
   payLightningInvoice,
+  rebalanceSwapChannels,
 } from "./helpers/wallet"
 
 // Sarah's story (NUT-32 egg-futures spike): buy five next-Friday egg
@@ -97,6 +98,9 @@ test.describe("farm futures (NUT-32 spike)", () => {
     if (!FARM_ADMIN_PASSWORD && !process.env.PECAN_ADMIN_PASSWORD) {
       test.skip(true, "no farm admin password (fetch via scripts/e2e.sh)")
     }
+    // Every Sarah run pays 5000 sat toward cln-swap; keep the payers'
+    // side of the channels funded (best-effort rig maintenance).
+    rebalanceSwapChannels(30_000)
     await openFarmWallet(page)
   })
 

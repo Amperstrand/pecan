@@ -127,6 +127,30 @@ const LIGHTNING_PAYERS = [
   "cln-vls-signet",
 ] as const
 
+/**
+ * The farm/LN e2es pay INVOICES HELD BY cln-swap (the mint's node), so
+ * every run drains the payers' side of the hub↔swap channels. This
+ * pushes liquidity back by paying a hub-held invoice from cln-swap —
+ * best-effort; a failure just means routes are already fine (or the
+ * rebalance can wait).
+ */
+export function rebalanceSwapChannels(sat = 20_000): void {
+  try {
+    const inv = execSync(
+      `ssh -o BatchMode=yes root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet invoice ${sat * 1000}msat farm-e2e-rebalance rebalance"`,
+      { timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString()
+    const bolt11 = inv.match(/"bolt11":\s*"((?:[^"\\]|\\.)*)"/)?.[1]
+    if (!bolt11) return
+    execSync(
+      `ssh -o BatchMode=yes root@46.224.104.12 "docker exec cln-swap-signet lightning-cli --network=signet pay ${bolt11}"`,
+      { timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
+    )
+  } catch {
+    // best-effort rig maintenance
+  }
+}
+
 export function payLightningInvoice(invoice: string): string {
   const failures: string[] = []
   for (const node of LIGHTNING_PAYERS) {
