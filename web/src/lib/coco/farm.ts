@@ -288,11 +288,14 @@ export async function receiveFutureToken(token: string): Promise<number> {
   // The generic receive pipeline crashes fresh contexts on this stack;
   // receive = swap the token's proofs into fresh tagged proofs of ours.
   const decoded = getDecodedToken(token)
+  if (!decoded.mint || !decoded.unit) {
+    throw new Error("token is missing its mint or unit")
+  }
   const mintUrlOfToken = normalizeMintUrl(decoded.mint)
   if (mintUrlOfToken !== farmMintUrl()) {
     throw new Error(`token is from ${decoded.mint}, not the farm mint`)
   }
-  const unit = decoded.unit
+  const unit: string = decoded.unit
   if (!unit.startsWith("future:")) {
     throw new Error(`token unit ${unit} is not a farm future`)
   }
