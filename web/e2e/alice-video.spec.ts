@@ -26,7 +26,7 @@ test.skip(!process.env.PECAN_VIDEO, "movie run only (run scripts/movie.sh)")
 const WALLET = "https://giftcard.cashu.exchange/eur-console/wallet"
 const DEEP_LINK = `${WALLET}?charger=atomV`
 const DEPOSIT_EUR = 50
-const STOP_AT_KWS = 30
+const STOP_AT_KWS = 15
 
 // ---------------------------------------------------------------------------
 // movie chrome: overlay cards + the companion strip
@@ -448,26 +448,30 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await hideCard(page)
   await page.waitForTimeout(1_000)
 
-  // SCENE 6 — charge: keep the session on screen long enough to READ
-  // it (≥ STOP_AT_KWS delivered, then a deliberate hold before Stop).
-  await page.getByPlaceholder("1.00").fill(String(DEPOSIT_EUR))
-  await page.getByRole("button", { name: "Start charging" }).click()
-  await expect(page.getByText("Charging at Sim Charger")).toBeVisible({ timeout: 60_000 })
-  await page.waitForTimeout(1_500)
-  await still(page, "06-charging-early")
+  // SCENE 6 — charge, at the car's pace: metered truth (#30) means a
+  // €50 budget burns in ~5-16 WALL seconds at a 3-10 kW draw — so the
+  // card plays BEFORE Start, the burn itself stays uncovered (slider +
+  // strip live), and Alice stops early to keep most of her deposit.
   await card(page, {
     title: `€${DEPOSIT_EUR} of energy, authorized.`,
-    body: "Her car draws between 3 and 10 kW — second by second, no two alike. The strip below is its meter.",
+    body: "Her car draws between 3 and 10 kW — no two seconds alike — and the bill follows the meter, not the clock.",
     holdMs: 7_000,
   })
   await hideCard(page)
+  await page.getByPlaceholder("1.00").fill(String(DEPOSIT_EUR))
+  await page.getByRole("button", { name: "Start charging" }).click()
+  await expect(page.getByText("Charging at Sim Charger")).toBeVisible({ timeout: 60_000 })
+  await still(page, "06-charging-early")
   const progress = page.getByRole("progressbar")
+  // Tight poll: the meter climbs ~6 units/second, the cap is 50 — stop
+  // the moment ~18 kW·s shows to leave most of the deposit unspent.
   await expect
-    .poll(async () => Number(await progress.getAttribute("aria-valuenow")), { timeout: 120_000 })
+    .poll(async () => Number(await progress.getAttribute("aria-valuenow")), {
+      timeout: 60_000,
+      interval: 250,
+    })
     .toBeGreaterThanOrEqual(STOP_AT_KWS)
-  await page.waitForTimeout(8_000)
   await still(page, "06-charging-live")
-  await page.waitForTimeout(5_000)
   await page.getByRole("button", { name: "Stop charging" }).click()
   // Remote-stop summary reads "Charging stopped — N s delivered"; a
   // natural full-budget completion reads "Charged N s at …". Accept both.

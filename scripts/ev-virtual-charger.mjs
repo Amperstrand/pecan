@@ -10,9 +10,12 @@
 //   publishes   charger/atomV/ack      "start-acked"
 //   publishes   charger/atomV/done     "countdown-finished" at window end
 //   subscribes  charger/atomV/stop     "OFF" → countdown killed
-//   publishes   charger/atomV/meter    {"kw": 3.0..10 | null, "wh": N}
-//               every 2s, always (idle kw=null) — live telemetry for the
-//               display companion / public view; the gateway ignores it.
+//   publishes   charger/atomV/meter    {"kw": 3.0..10 | null, "wh": N,
+//               "kws": cumulative kW·s} every 2s, always (idle kw=null)
+//               — live telemetry for the display companion / public view
+//               and (since #30) the gateway's metered session truth:
+//               while the meter is fresh the session's delivered kW·s
+//               comes from HERE, not wall-clock.
 //
 // THE CAR IS NOT CONSTANT: while a session runs, the simulated car's
 // draw walks smoothly between 3 and 10 kW (an EV's onboard charger
@@ -46,6 +49,7 @@ let sessions = 0
 let sessionActive = false
 let loadKw = 6.5
 let whDelivered = 0
+let kwsDelivered = 0
 
 function nextLoad() {
   const drift = (Math.random() - 0.5) * 2.2
@@ -64,6 +68,7 @@ function publishMeter() {
     JSON.stringify({
       kw: sessionActive ? Math.round(loadKw * 10) / 10 : null,
       wh: Math.round(whDelivered),
+      kws: Math.round(kwsDelivered),
       state: sessionActive ? "drawing" : "idle",
     }),
     { qos: 0 },
@@ -104,6 +109,7 @@ client.on("message", (topic, payload) => {
   if (timer) clearTimeout(timer)
   sessionActive = true
   whDelivered = 0
+  kwsDelivered = 0
   loadKw = 6.5
   client.publish(`charger/${DEVICE}/ack`, "start-acked", { qos: 1 })
   const msLeft = end * 1000 - Date.now()
@@ -126,6 +132,7 @@ setInterval(() => {
   if (sessionActive) {
     const kw = nextLoad()
     whDelivered += kw / 3.6
+    kwsDelivered += kw
   }
 }, 1000)
 setInterval(publishMeter, 2000)
