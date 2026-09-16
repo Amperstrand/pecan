@@ -250,7 +250,6 @@ test.describe("farm futures (NUT-32 spike)", () => {
           .reduce((sum, p) => sum + p.amount, 0)
       }, { timeout: 120_000 })
       .toBe(2)
-    await bobContext.close()
 
     // Total supply unchanged by the transfer: issued unchanged.
     const transferred = (await farmOverview(page)).series.find((s) => s.date === series.date)
@@ -264,20 +263,10 @@ test.describe("farm futures (NUT-32 spike)", () => {
     const mature = await page.request.post(`${FARM_BASE}/api/farm/series/${series.date}/mature-now`)
     expect(mature.status()).toBe(200)
 
-    const bobContext2 = await browser.newContext()
-    const bobPage2 = await bobContext2.newPage()
-    await openFarmWallet(bobPage2)
-    await bobPage2.getByPlaceholder(/paste a token/i).fill(token)
-    await bobPage2.getByRole("button", { name: /Receive token/i }).click()
-    await expect
-      .poll(async () => {
-        const bobProofs = await readFutureProofs(bobPage2)
-        return bobProofs
-          .filter((p) => p.unit === series.unit && p.state !== "spent")
-          .reduce((sum, p) => sum + p.amount, 0)
-      }, { timeout: 120_000 })
-      .toBe(2)
-
+    // Bearer tokens are single-handover: the same token cannot be
+    // received twice (its proofs are spent), so Bob redeems from the
+    // wallet that already holds them.
+    const bobPage2 = bobPage
     await bobPage2.getByLabel(`redeem quantity for ${series.unit}`).fill("2")
     await bobPage2.getByRole("button", { name: /Redeem at farm/i }).click()
     await expect(
@@ -305,7 +294,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
       (p) => p.unit === series.unit && p.state !== "spent",
     )
     expect(bobLeft.reduce((sum, p) => sum + p.amount, 0)).toBe(0)
-    await bobContext2.close()
+    await bobContext.close()
   })
 
   test("capacity invariant: unpaid purchases reserve and expire", async ({ page }) => {
