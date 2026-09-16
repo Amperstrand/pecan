@@ -10,11 +10,14 @@
 //   publishes   charger/atomV/ack      "start-acked"
 //   publishes   charger/atomV/done     "countdown-finished" at window end
 //   subscribes  charger/atomV/stop     "OFF" → countdown killed
+//   publishes   charger/atomV/meter    {"kw": 3.0..10 | null, "wh": N}
+//               every 2s, always (idle kw=null) — live telemetry for the
+//               display companion / public view; the gateway ignores it.
 //
-// Differences from ev-device-sim: no TTL (always-on), no start-refusal
-// (atomV has no physical twin to collide with), delivery cadence is
-// wall-clock 1 s per requested kW·s — identical to the real fleet, so
-// the wallet slider moves at demo-realistic speed.
+// THE CAR IS NOT CONSTANT: while a session runs, the simulated car's
+// draw walks smoothly between 3 and 10 kW (an EV's onboard charger
+// tapers and pauses; billing here stays on the gateway's per-second
+// demo tariff — the meter topic is the car's own truth).
 //
 // Runs on inr2 as ev-virtual-charger.service (EnvironmentFile=/opt/
 // atom-bridge/.env for MQTT creds); lifecycle is owned by
@@ -23,6 +26,9 @@ import mqtt from "mqtt"
 
 const DEVICE = "atomV"
 const STATUS = `charger/${DEVICE}/status`
+const METER = `charger/${DEVICE}/meter`
+const MIN_KW = 3
+const MAX_KW = 10
 
 const client = mqtt.connect(process.env.MQTT_URL, {
   clientId: `ev-virtual-${DEVICE}`,
@@ -35,8 +41,33 @@ const client = mqtt.connect(process.env.MQTT_URL, {
 let timer = null
 let sessions = 0
 
+// The simulated car's draw: a bounded random walk with occasional
+// deep dips (battery tapers / balancing pauses).
+let sessionActive = false
+let loadKw = 6.5
+let whDelivered = 0
+
+function nextLoad() {
+  const drift = (Math.random() - 0.5) * 2.2
+  loadKw = Math.min(MAX_KW, Math.max(MIN_KW, loadKw + drift))
+  if (Math.random() < 0.08) loadKw = MIN_KW + Math.random() * 1.5
+  return Math.round(loadKw * 10) / 10
+}
+
 function log(msg, extra = "") {
   console.log(`${new Date().toISOString()} ${msg} ${extra}`.trimEnd())
+}
+
+function publishMeter() {
+  client.publish(
+    METER,
+    JSON.stringify({
+      kw: sessionActive ? Math.round(loadKw * 10) / 10 : null,
+      wh: Math.round(whDelivered),
+      state: sessionActive ? "drawing" : "idle",
+    }),
+    { qos: 0 },
+  )
 }
 
 function shutdown(reason) {
@@ -58,7 +89,8 @@ client.on("message", (topic, payload) => {
     // the device only stops delivering.
     if (timer) clearTimeout(timer)
     timer = null
-    log("stop — countdown killed")
+    sessionActive = false
+    log(`stop — countdown killed at ${Math.round(whDelivered)} Wh drawn`)
     return
   }
   let end
@@ -70,19 +102,33 @@ client.on("message", (topic, payload) => {
   if (!Number.isFinite(end)) return
   sessions += 1
   if (timer) clearTimeout(timer)
+  sessionActive = true
+  whDelivered = 0
+  loadKw = 6.5
   client.publish(`charger/${DEVICE}/ack`, "start-acked", { qos: 1 })
   const msLeft = end * 1000 - Date.now()
   log(`start end=${end} (${Math.max(0, Math.round(msLeft / 1000))}s) — acked`)
   if (msLeft <= 0) {
+    sessionActive = false
     client.publish(`charger/${DEVICE}/done`, "countdown-finished", { qos: 1 })
     return
   }
   timer = setTimeout(() => {
     timer = null
+    sessionActive = false
     client.publish(`charger/${DEVICE}/done`, "countdown-finished", { qos: 1 })
-    log("done")
+    log(`done — drew ${Math.round(whDelivered)} Wh`)
   }, msLeft)
 })
+
+// The car's draw ticks every second; the telemetry publishes every 2s.
+setInterval(() => {
+  if (sessionActive) {
+    const kw = nextLoad()
+    whDelivered += kw / 3.6
+  }
+}, 1000)
+setInterval(publishMeter, 2000)
 
 process.on("SIGTERM", () => shutdown("SIGTERM"))
 process.on("SIGINT", () => shutdown("SIGINT"))
