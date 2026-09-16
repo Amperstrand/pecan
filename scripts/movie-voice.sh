@@ -5,6 +5,10 @@
 # take outgrows the card), and mixes everything onto the silent recording
 # → alice-final.mp4 next to the webm.
 #
+# Canonical generic version: the film knowledge base
+# (~/src/test-films) vendors tools/narrate-film.sh — keep this copy
+# aligned with it when the post pass changes.
+#
 # Usage: scripts/movie-voice.sh            (run AFTER a recording)
 #        VOICE=Daniel scripts/movie-voice.sh
 set -eu
