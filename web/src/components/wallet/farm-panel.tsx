@@ -81,7 +81,6 @@ export function FarmPanel() {
       const [o, b] = await Promise.all([fetchFarmOverview(), futureBalances()])
       setOverview(o)
       setBalances(b)
-      setError(null)
       return o
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e))
@@ -132,8 +131,10 @@ export function FarmPanel() {
               await refresh()
               setPhase({ kind: "owned", unit: current.unit, quantity: qty })
             } catch (e) {
-              setError(`minting failed: ${e instanceof Error ? e.message : String(e)}`)
+              const message = `minting failed: ${e instanceof Error ? e.message : String(e)}`
+              setError(message)
               setPhase({ kind: "idle" })
+              console.error("[farm]", message)
             }
           } else if (current.state === "expired" || current.state === "failed") {
             if (pollRef.current) window.clearInterval(pollRef.current)
