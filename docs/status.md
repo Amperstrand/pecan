@@ -158,6 +158,22 @@ charger with no physical twin.
   drift turned 54:5x into 54:49 (#19 data point; single clock read
   now).
 
+## Demo-rail hardening round 2026-09-16 (night)
+
+The movie's Lightning leg no longer depends on channel health: Alice's
+invoice settles by SELF-PAY on the mint's own node (the rail's issuer,
+which we control) — no routing, no balance choreography. This after the
+evening's outage: repeated demo payments drained the hub→swap channel
+to ~5k sat and CLN's pay failed 205 while NAMING A DEAD CHANNEL
+instead of the real blocker (spendable balance) — filed as
+lightning-playground#243 with full repro. New tooling:
+scripts/ln-rebalance.sh (amountless-invoice push over the direct
+channel — BOLT12 blinded paths route AROUND the channel and are useless
+for rebalancing, measured; keysend is deprecated in v26). Movie lanes:
+the 30-second short cut (scripts/movie.sh --remote --short) and the
+full cut both ride the self-pay rail; companion strip resets its graph
+per session; the public pole page appears live in the film.
+
 ## Metered-truth round 2026-09-16 (evening)
 
 #30 layer A + #31 shipped: the gateway is repo-tracked
