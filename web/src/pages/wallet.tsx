@@ -173,10 +173,10 @@ const WITHDRAW_OPTIONS = [
   },
   {
     id: "atomV",
-    label: "Charger V",
+    label: "Sim Charger",
     placeholder: null,
     fixed: "ev:atomV",
-    hint: "Virtual charger — an API, no hardware. Always available, even with the fleet unplugged. 1 unit = 1 kW·s.",
+    hint: "Simulated charge point — an API, no hardware. Always on, even with the fleet unplugged. 1 unit = 1 kW·s.",
   },
 ] as const
 
@@ -379,7 +379,15 @@ export function WalletPage() {
   const [withdrawAmount, setWithdrawAmount] = useState("")
   const [withdrawRecipient, setWithdrawRecipient] = useState("")
   const [withdrawInvoice, setWithdrawInvoice] = useState("")
-  const [withdrawRail, setWithdrawRail] = useState<WithdrawRail>("teller")
+  // A charge point's QR code opens the wallet as
+  // /wallet?charger=<id> — scanning is then the whole interaction: the
+  // rail arrives preselected, Alice only sets her budget.
+  const [withdrawRail, setWithdrawRail] = useState<WithdrawRail>(() => {
+    const fromQr = new URLSearchParams(window.location.search).get("charger")
+    return WITHDRAW_OPTIONS.some((o) => o.id === fromQr)
+      ? (fromQr as WithdrawRail)
+      : "teller"
+  })
   const [depositState, setDepositState] = useState<DepositState>({ phase: "idle" })
   const [pendingDeposits, setPendingDeposits] = useState<DepositQuote[]>([])
   const pendingRef = useRef<DepositQuote[]>([])

@@ -27,7 +27,7 @@ test.beforeAll(() => {
     `openssl req -x509 -newkey rsa:2048 -keyout ${certdir}/key.pem -out ${certdir}/cert.pem ` +
       `-days 2 -nodes -subj "/CN=localhost" 2>/dev/null`,
   )
-  server = spawn("node", ["e2e/helpers/sim-https-server.js", process.cwd()], {
+  server = spawn("node", ["e2e/helpers/sim-https-server.cjs", process.cwd()], {
     stdio: "ignore",
   })
 })

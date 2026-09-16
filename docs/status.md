@@ -158,6 +158,25 @@ charger with no physical twin.
   drift turned 54:5x into 54:49 (#19 data point; single clock read
   now).
 
+## Alice movie round 2026-09-16
+
+`scripts/movie.sh [--headed|--remote]` records the "Alice at the
+charge point" story (web/e2e/alice-video.spec.ts): €50 Lightning
+deposit → ecash minted → the charge point's QR deep link
+(`?charger=atomV`, a 20-line wallet feature) → Sim Charger session
+with the charger's own display as a live wasm PiP → remote stop at
+~30 kW·s → receipt + refund. Headless by default; `--remote` records
+on ai-legion (npm ci + chromium there once, artifacts rsynced back).
+Shipped cut: 2m25s webm under web/e2e/.results-video/alice-remote/.
+
+Fixes the round surfaced and shipped: the sim-https helper died under
+web's `"type": "module"` (renamed .cjs — the whole video lane was
+broken); the PiP iframe ate pointer events over half the phone
+viewport (now pointer-events:none — the "jumping" recording); and the
+mint's LN rail was silently dead — the hub↔cln-swap channels had
+closed ONCHAIN, leaving lightning deposits unroutable (opened a fresh
+100k sat hub→swap channel; probe-paid 1400 sat clean).
+
 ## SAT currency round 2026-09-04
 
 Third native currency: **sat** on the external signut mint (user's
