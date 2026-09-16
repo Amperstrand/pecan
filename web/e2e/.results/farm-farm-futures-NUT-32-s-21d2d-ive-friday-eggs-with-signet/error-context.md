@@ -12,10 +12,13 @@
 # Error details
 
 ```
-TimeoutError: locator.waitFor: Timeout 60000ms exceeded.
-Call log:
-  - waiting for locator('textarea[readonly]') to be visible
+Error: expect(received).toBe(expected) // Object.is equality
 
+Expected: 3
+Received: 5
+
+Call Log:
+- Timeout 10000ms exceeded while waiting on the predicate
 ```
 
 # Page snapshot
@@ -31,61 +34,75 @@ Call log:
         - tab "USD" [ref=e12]
         - tab "SATS" [ref=e13]
         - tab "FARM" [selected] [ref=e14]
-    - generic [ref=e16]:
-      - generic [ref=e17]: YOU OWN
-      - generic [ref=e18]: 0 egg claims
-    - generic [ref=e19]:
-      - generic [ref=e20]:
-        - generic [ref=e21]: FARM
-        - generic [ref=e22]:
-          - combobox "production day" [ref=e23]:
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]: YOU OWN
+        - generic [ref=e18]: 5 egg claims
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - generic [ref=e21]:
+            - generic [ref=e22]: Farm — Wednesday, Sep 23 eggs
+            - generic [ref=e23]: ·
+            - generic [ref=e24]: "5"
+            - button "details" [ref=e25] [cursor=pointer]
+          - generic [ref=e26]:
+            - textbox "send quantity for future:farm-egg:20260923t160000z" [ref=e27]: "2"
+            - button "Send to Bob (token)" [ref=e28] [cursor=pointer]
+            - textbox "redeem quantity for future:farm-egg:20260923t160000z" [ref=e29]: "2"
+            - button "Redeem at farm" [ref=e30] [cursor=pointer]
+        - generic [ref=e31]:
+          - textbox "paste a token to receive Bob's eggs" [ref=e32]
+          - button "Receive token" [ref=e33] [cursor=pointer]
+        - generic [ref=e34]:
+          - generic [ref=e35]: "Token to hand Bob (2 eggs) — normal Cashu bearer transfer:"
+          - textbox [ref=e36]: cashuBo2FteCRodHRwczovL2dpZnRjYXJkLmNhc2h1LmV4Y2hhbmdlL2Zhcm1hdXggZnV0dXJlOmZhcm0tZWdnOjIwMjYwOTIzdDE2MDAwMHphdIGiYWlIAN5LiKFx3k5hcIGkYWECYXN423sic2VjcmV0IjoiYzhiMTEyMDY1YjlhYjI5ZDM2MWRiNmEyZWI4YjEzNjJiNzA4Yjg1ZWQ0NjQ2MDBhNGY5MjNlYzk0ZjE2NjYzMyIsInRhZ3MiOltbImZ1dHVyZSIsIjEiLCJodHRwczovL2dpZnRjYXJkLmNhc2h1LmV4Y2hhbmdlL2Zhcm0tY29uc29sZS90ZXJtcy9jNzRmYWFlYzEyMjgzMWNkNmZiNTE0YWQwOTliYTA0ZjdjMmYxZDkzYjBmNzc0OGYxYWY1OGE4NDJlNGEyNzc1Il1dfWFjWCEDGqiRcKpLx4gGv0vfALs4FhO7EOnL2pKwxqBmb03ftu5hZKNhZVggYiKq5sdPd15kn2eVQ5usPRDHmoj2t00kGekHCIMkX5hhc1ggh-rUKleThJtTXRtclIbF3MtsUulDsxCheFfcJebmi05hclggzuYh2rzF2ZpLgzgefSEQKq2S4xS0L8aDR_8VUucH8N8
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - generic [ref=e39]: FARM
+        - generic [ref=e40]:
+          - combobox "production day" [ref=e41]:
             - option "Wednesday, Sep 16 · 10 of 10 free · matured"
             - option "Thursday, Sep 17 · 0 of 10 free"
             - option "Friday, Sep 18 · 0 of 10 free"
             - option "Saturday, Sep 19 · 4 of 10 free"
             - option "Sunday, Sep 20 · 0 of 10 free"
             - option "Monday, Sep 21 · 0 of 10 free"
-            - option "Tuesday, Sep 22 · 1 of 10 free" [selected]
+            - option "Tuesday, Sep 22 · 1 of 10 free"
+            - option "Wednesday, Sep 23 · 3 of 10 free" [selected]
+            - option "Thursday, Sep 24 · 10 of 10 free"
+            - option "Friday, Sep 25 · 10 of 10 free"
+            - option "Saturday, Sep 26 · 10 of 10 free"
+            - option "Sunday, Sep 27 · 10 of 10 free"
+            - option "Monday, Sep 28 · 10 of 10 free"
+            - option "Tuesday, Sep 29 · 10 of 10 free"
           - text: · 1000 signet sats / egg
-      - generic [ref=e24]:
-        - generic [ref=e25]:
-          - generic [ref=e26]:
-            - generic [ref=e27]: Quantity
-            - textbox "egg quantity" [ref=e28]: "5"
-          - generic [ref=e29]:
-            - generic [ref=e30]: 5 eggs
-            - generic [ref=e31]: 5000 signet sats
-            - generic [ref=e32]: "Production: Tuesday, Sep 22Available for pickup: Tue, 22 Sep 2026 16:00:00 UTC"
-        - generic [ref=e33]: YOU OWN — Farm eggs · 5 claims of future:farm-egg:20260922t160000z
-        - button "verify terms" [ref=e35] [cursor=pointer]
-        - group [ref=e36]:
-          - generic "all series (7)" [ref=e37] [cursor=pointer]
-        - generic [ref=e38]: Custom output data total (3) does not match amount (2)
-    - generic [ref=e39]:
-      - generic [ref=e40]:
-        - generic [ref=e41]: Developer Tools
-        - generic [ref=e42]: Signet/test only. These actions are irreversible.
-      - generic [ref=e43]:
-        - button "Export wallet data (JSON)" [ref=e44] [cursor=pointer]
-        - button "Force clear wallet (downloads backup first)" [ref=e45] [cursor=pointer]
-    - paragraph [ref=e46]: Self-custodied — Coco 2 · keys stay in your browser.
+      - generic [ref=e42]:
+        - generic [ref=e43]:
+          - generic [ref=e44]:
+            - generic [ref=e45]: Quantity
+            - textbox "egg quantity" [ref=e46]: "5"
+          - generic [ref=e47]:
+            - generic [ref=e48]: 5 eggs
+            - generic [ref=e49]: 5000 signet sats
+            - generic [ref=e50]: "Production: Wednesday, Sep 23Available for pickup: Wed, 23 Sep 2026 16:00:00 UTC"
+        - generic [ref=e51]: YOU OWN — Farm eggs · 5 claims of future:farm-egg:20260923t160000z
+        - button "verify terms" [ref=e53] [cursor=pointer]
+        - group [ref=e54]:
+          - generic "all series (14)" [ref=e55] [cursor=pointer]
+    - generic [ref=e56]:
+      - generic [ref=e57]:
+        - generic [ref=e58]: Developer Tools
+        - generic [ref=e59]: Signet/test only. These actions are irreversible.
+      - generic [ref=e60]:
+        - button "Export wallet data (JSON)" [ref=e61] [cursor=pointer]
+        - button "Force clear wallet (downloads backup first)" [ref=e62] [cursor=pointer]
+    - paragraph [ref=e63]: Self-custodied — Coco 2 · keys stay in your browser.
   - region "Notifications alt+T"
 ```
 
 # Test source
 
 ```ts
-  107 |     expect(price).toBeGreaterThan(0)
-  108 | 
-  109 |     // Drive the production-day picker to the verified series — the
-  110 |     // panel's default is merely the first open day.
-  111 |     await page.getByLabel("production day").selectOption(series.date)
-  112 | 
-  113 |     // Unpaid quote reserves capacity: the overview shows 5 fewer free
-  114 |     // eggs the moment the purchase exists.
-  115 |     await page.getByLabel("egg quantity").fill("5")
-  116 |     await page.getByRole("button", { name: /Buy for \d+ signet sats/ }).click()
-  117 |     const invoiceBox = page.locator("textarea.font-mono")
   118 |     await invoiceBox.waitFor({ state: "visible", timeout: 30_000 })
   119 |     const invoice = (await invoiceBox.inputValue()) || (await invoiceBox.textContent()) || ""
   120 |     expect(invoice.startsWith("lntb")).toBeTruthy()
@@ -175,8 +192,7 @@ Call log:
   204 |     await page.getByLabel(`send quantity for ${series.unit}`).fill("2")
   205 |     await page.getByRole("button", { name: /Send to Bob/i }).click()
   206 |     const tokenBox = page.locator("textarea[readonly]")
-> 207 |     await tokenBox.waitFor({ state: "visible", timeout: 60_000 })
-      |                    ^ TimeoutError: locator.waitFor: Timeout 60000ms exceeded.
+  207 |     await tokenBox.waitFor({ state: "visible", timeout: 60_000 })
   208 |     const token = await tokenBox.inputValue()
   209 |     expect(token.length).toBeGreaterThan(50)
   210 | 
@@ -187,7 +203,8 @@ Call log:
   215 |           .filter((p) => p.unit === series.unit && p.state !== "spent")
   216 |           .reduce((sum, p) => sum + p.amount, 0)
   217 |       })
-  218 |       .toBe(3)
+> 218 |       .toBe(3)
+      |        ^ Error: expect(received).toBe(expected) // Object.is equality
   219 | 
   220 |     // The swap preserved unit and terms URI on every replacement proof.
   221 |     const sarahProofs = (await readFutureProofs(page)).filter(
@@ -277,4 +294,15 @@ Call log:
   305 |     const tooMany = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
   306 |       data: {
   307 |         production_date: series.date,
+  308 |         quantity: series.capacity + 1,
+  309 |         pubkey: "02" + "cd".repeat(32),
+  310 |       },
+  311 |     })
+  312 |     expect(tooMany.status()).toBeGreaterThanOrEqual(400)
+  313 | 
+  314 |     // Purchase everything that is left — the next one must fail.
+  315 |     if (series.available > 0) {
+  316 |       const grab = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
+  317 |         data: {
+  318 |           production_date: series.date,
 ```
