@@ -43,9 +43,9 @@ Call log:
             - option "Thursday, Sep 17 · 0 of 10 free"
             - option "Friday, Sep 18 · 0 of 10 free"
             - option "Saturday, Sep 19 · 4 of 10 free"
-            - option "Sunday, Sep 20 · 0 of 10 free" [selected]
-            - option "Monday, Sep 21 · 10 of 10 free"
-            - option "Tuesday, Sep 22 · 10 of 10 free"
+            - option "Sunday, Sep 20 · 0 of 10 free"
+            - option "Monday, Sep 21 · 0 of 10 free"
+            - option "Tuesday, Sep 22 · 1 of 10 free" [selected]
           - text: · 1000 signet sats / egg
       - generic [ref=e24]:
         - generic [ref=e25]:
@@ -55,12 +55,12 @@ Call log:
           - generic [ref=e29]:
             - generic [ref=e30]: 5 eggs
             - generic [ref=e31]: 5000 signet sats
-            - generic [ref=e32]: "Production: Sunday, Sep 20Available for pickup: Sun, 20 Sep 2026 16:00:00 UTC"
-        - generic [ref=e33]: YOU OWN — Farm eggs · 5 claims of future:farm-egg:20260920t160000z
+            - generic [ref=e32]: "Production: Tuesday, Sep 22Available for pickup: Tue, 22 Sep 2026 16:00:00 UTC"
+        - generic [ref=e33]: YOU OWN — Farm eggs · 5 claims of future:farm-egg:20260922t160000z
         - button "verify terms" [ref=e35] [cursor=pointer]
         - group [ref=e36]:
           - generic "all series (7)" [ref=e37] [cursor=pointer]
-        - generic [ref=e38]: Custom output data total (2) does not match amount (5)
+        - generic [ref=e38]: Custom output data total (3) does not match amount (2)
     - generic [ref=e39]:
       - generic [ref=e40]:
         - generic [ref=e41]: Developer Tools
