@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process"
 import { test, expect, type Page } from "@playwright/test"
 import { readBalance } from "./helpers/wallet"
 
@@ -152,7 +153,6 @@ async function cardUntil(
 // misleading CLN path errors — lightning-playground#243). CLN dedupes
 // by payment hash, so re-paying the same bolt11 is idempotent.
 function selfPayInvoice(invoice: string): string {
-  const { execSync } = require("node:child_process") as typeof import("node:child_process")
   const out = execSync(
     `ssh root@46.224.104.12 "docker exec cln-swap-signet lightning-cli --network=signet pay ${invoice}"`,
     { timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] },

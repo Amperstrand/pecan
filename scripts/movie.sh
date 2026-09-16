@@ -11,6 +11,7 @@
 #   scripts/movie.sh --headed     # record locally, visible browser
 #   scripts/movie.sh --remote     # record on ai-legion-small (faster
 #                                 # box; artifacts pulled back here)
+#   scripts/movie.sh --remote --short   # the 30-second social cut
 set -eu
 
 SERVER=root@46.224.104.12
@@ -20,13 +21,17 @@ REMOTE_DIR=/tmp/pecan-movie
 cd "$(dirname "$0")/.."
 
 MODE=headless
+SHORT=0
 for arg in "$@"; do
   case "$arg" in
     --headed) MODE=headed ;;
     --remote) MODE=remote ;;
-    *) echo "unknown flag: $arg (use --headed | --remote)" >&2; exit 2 ;;
+    --short) SHORT=1 ;;
+    *) echo "unknown flag: $arg (use --headed | --remote | --short)" >&2; exit 2 ;;
   esac
 done
+GREP="$([ "$SHORT" = "1" ] && echo "30 second cut" || echo "full lifecycle")"
+
 
 echo "==> preflight: EUR pair"
 curl -fsS -m 10 "$URL/eur/v1/keys" >/dev/null && echo "    mint keys ok"
@@ -55,7 +60,7 @@ if [ "$MODE" = "remote" ]; then
   ssh "$BUILDER" "cd $REMOTE_DIR/web && npm ci --no-audit --no-fund >/dev/null 2>&1 && npx playwright install chromium >/dev/null 2>&1; echo ready"
   echo "==> roll camera on $BUILDER (headless)"
   status=0
-  ssh "$BUILDER" "cd $REMOTE_DIR/web && PECAN_VIDEO=1 PECAN_HEADLESS=1 PECAN_EV_MQTT_URL='$MQTT_URL' PECAN_EV_MQTT_USER='$MQTT_USER' PECAN_EV_MQTT_PASS='$MQTT_PASS' npx playwright test alice-video --config playwright.video.config.ts" || status=$?
+  ssh "$BUILDER" "cd $REMOTE_DIR/web && PECAN_VIDEO=1 PECAN_HEADLESS=1 $([ "$SHORT" = "1" ] && echo PECAN_MOVIE_SHORT=1) PECAN_EV_MQTT_URL='$MQTT_URL' PECAN_EV_MQTT_USER='$MQTT_USER' PECAN_EV_MQTT_PASS='$MQTT_PASS' npx playwright test alice-video -g '$GREP' --config playwright.video.config.ts" || status=$?
   echo "==> pull artifacts"
   mkdir -p web/e2e/.results-video/alice-remote
   rsync -az \
@@ -70,5 +75,6 @@ echo "==> roll camera on this Mac ($MODE)"
 cd web
 exec env PECAN_VIDEO=1 \
   PECAN_EV_MQTT_URL="$MQTT_URL" PECAN_EV_MQTT_USER="$MQTT_USER" PECAN_EV_MQTT_PASS="$MQTT_PASS" \
+  $([ "$SHORT" = "1" ] && echo PECAN_MOVIE_SHORT=1) \
   PECAN_HEADLESS="$([ "$MODE" = "headless" ] && echo 1 || echo 0)" \
-  npx playwright test alice-video --config playwright.video.config.ts
+  npx playwright test alice-video -g "$GREP" --config playwright.video.config.ts
