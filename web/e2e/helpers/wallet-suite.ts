@@ -40,6 +40,7 @@ import {
  *   charger A rail (all ev-rail tests)  ev-rail           —         —
  *   charger B rail (window+stop+refund) ev-rail           —         —
  *   charger C/D full sessions           ev-rail/charger-d —         —
+ *   charger D USD session (self-funded) —                 usd.spec   —
  *   charger D NOK session               —                 —         charger-d-nok
  *   expired deposit auto-refund (#13)   charger-expired-refund (@expiry) — —
  *

@@ -1,7 +1,10 @@
 import { test, expect } from "@playwright/test"
 import {
+  apiLogin,
   expectNoWalletErrors,
+  matchAndSettle,
   readBalance,
+  readTellerCode,
   sendOnchainFromExternal,
 } from "./helpers/wallet"
 import { defineWalletSuite, type SuiteContext } from "./helpers/wallet-suite"
@@ -49,6 +52,52 @@ function registerUsdExtras(ctx: SuiteContext): void {
       .poll(async () => readBalance(page), { timeout: 120_000 })
       .toBeCloseTo(before + 50, 2)
     await expect(page.locator('[data-testid="deposit-card"]')).toHaveCount(0)
+    expectNoWalletErrors(ctx.walletErrors())
+  })
+
+
+  // The USD twin of the charger lane (#10): ev-charge-usd watches this
+  // console, so an ev:atomD melt must settle with a receipt — proving
+  // the enabled rail, the second daemon instance, and the shared
+  // gateway fleet end to end. Self-funds via the teller when short:
+  // standalone greps start a fresh wallet and the onchain leg can be
+  // payer-dry.
+  test("charger session: melt to ev:atomD settles with a receipt (USD)", async () => {
+    test.setTimeout(240_000)
+    const page = ctx.page()
+    const password =
+      process.env.PECAN_USD_ADMIN_PASSWORD ?? process.env.PECAN_ADMIN_PASSWORD ?? ""
+    const budget = 4
+
+    let before = await readBalance(page)
+    if (before < budget) {
+      await apiLogin(page, ctx.consoleBase, password)
+      const newDeposit = page.getByRole("button", { name: "New deposit" })
+      if (await newDeposit.isVisible().catch(() => false)) {
+        await newDeposit.click()
+      }
+      await page.getByRole("button", { name: "Teller", exact: true }).click()
+      await page.getByPlaceholder("5.00").fill(String(budget + 1))
+      await page.getByRole("button", { name: "Create deposit quote" }).click()
+      const code = await readTellerCode(page)
+      await matchAndSettle(page, code, `E2E ${ctx.currency} charger funding`, ctx.consoleBase)
+      await expect
+        .poll(async () => readBalance(page), { timeout: 45_000 })
+        .toBeGreaterThan(before)
+      before = await readBalance(page)
+    }
+
+    await page.getByRole("tab", { name: "Charger D", exact: true }).click()
+    await page.getByPlaceholder("1.00").fill(String(budget))
+    await page.getByRole("button", { name: "Start charging" }).click()
+    await expect(page.getByText("⚡ Charging at Charger D")).toBeVisible({ timeout: 60000 })
+    await expect(page.getByText(/Charged \d+ s at Charger D/)).toBeVisible({ timeout: 180000 })
+    const receipt = await page.locator("p.break-all.font-mono").textContent()
+    expect(receipt).toMatch(/^EV-atomD-\d+s-[0-9A-F]{8}(-[A-Z]+)?$/)
+    const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
+    await expect
+      .poll(async () => readBalance(page), { timeout: 200000 })
+      .toBeCloseTo(before - delivered, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
 

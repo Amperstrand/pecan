@@ -476,9 +476,17 @@ export function trackWalletErrors(page: Page): string[] {
   const ownHost = new URL(page.url()).hostname
   page.on("console", (msg) => {
     if (msg.type() !== "error") return
+    const text = msg.text()
     const loc = msg.location()?.url ?? ""
     if (loc && !loc.includes(ownHost)) return
-    errors.push(`console: ${msg.text()}${loc ? ` (${loc.slice(0, 90)})` : ""}`)
+    // Benign by design: the charge slider polls the gateway's session
+    // endpoint from melt submission, but the daemon triggers the gateway
+    // asynchronously — until then the ref legitimately 404s and the
+    // wallet treats !ok as null. Chromium logs every 4xx fetch as a
+    // console error, so exactly this shape is filtered or every gated
+    // charger test fails on warmup polls.
+    if (text.includes("404") && loc.includes("/atom-gateway/session/")) return
+    errors.push(`console: ${text}${loc ? ` (${loc.slice(0, 90)})` : ""}`)
   })
   page.on("pageerror", (err) => errors.push(`pageerror: ${String(err)}`))
   return errors
