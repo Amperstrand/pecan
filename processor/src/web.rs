@@ -1202,25 +1202,30 @@ async fn api_farm_overview(State(state): State<WebState>) -> Response {
         return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
     };
     let purchases = farm.state.purchases().await;
-    let reserved: u64 = purchases
-        .iter()
-        .filter(|p| {
-            matches!(
-                p.state,
-                crate::farm::PurchaseState::Open
-                    | crate::farm::PurchaseState::Paid
-                    | crate::farm::PurchaseState::Authorized
-            )
-        })
-        .map(|p| p.quantity)
-        .sum();
     let now = unix_now();
     let series: Vec<ApiFarmSeries> = farm
         .state
         .series_snapshot()
         .await
         .iter()
-        .map(|s| farm_series_api(s, reserved, s.matured_override || now >= s.maturity))
+        .map(|s| {
+            // Reservations are per-series: a purchase only holds ITS day's
+            // eggs, never the horizon's.
+            let reserved: u64 = purchases
+                .iter()
+                .filter(|p| {
+                    p.series_date == s.date
+                        && matches!(
+                            p.state,
+                            crate::farm::PurchaseState::Open
+                                | crate::farm::PurchaseState::Paid
+                                | crate::farm::PurchaseState::Authorized
+                        )
+                })
+                .map(|p| p.quantity)
+                .sum();
+            farm_series_api(s, reserved, s.matured_override || now >= s.maturity)
+        })
         .collect();
     Json(serde_json::json!({
         "name": "Farm",
