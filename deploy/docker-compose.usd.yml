@@ -1,9 +1,9 @@
 # USD twin of /opt/pecan/docker-compose.prod.yml — same image, own ports,
-# dirs, and mint. Caddy path-routes: /usd/v1/* -> mintd (8090),
-# /usd-console/* -> this processor (9092). EUR stays at the root paths.
+# dirs, and mint. Caddy path-routes: /usd/v1/* -> mintd (8097),
+# /usd-console/* -> this processor (9093).
 services:
   pecan:
-    image: pecan:nok
+    image: pecan:deployment
     command: ["cdk-branch-processor"]
     network_mode: host
     environment:
@@ -15,8 +15,15 @@ services:
       CDK_BRANCH_PROCESSOR_HTTP_ADDR: "127.0.0.1"
       CDK_BRANCH_PROCESSOR_HTTP_PORT: "9093"
       CDK_BRANCH_PROCESSOR_INITIAL_UNIT: "usd"
-      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim,sepa,sepa-instant,swish,mobilepay,ideal,bizum"
+      # EV charging rail (issue #10): same gateway + fleet as EUR/NOK —
+      # ev-charge-usd.service watches this console for ev:atomX melts.
+      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: "sim,sepa,sepa-instant,swish,mobilepay,ideal,bizum,ev"
       CDK_BRANCH_PROCESSOR_PAYOUT_AUTOSIM: "true"
+      # Charger fleet card: the console's Mint tab proxies the atom-gateway
+      # (key stays server-side; set PECAN_EV_GATEWAY_KEY in .env).
+      CDK_BRANCH_PROCESSOR_EV_FLEET: "atomA,atomB,atomC,atomD"
+      CDK_BRANCH_PROCESSOR_EV_GATEWAY_URL: "http://127.0.0.1:8099"
+      CDK_BRANCH_PROCESSOR_EV_GATEWAY_KEY: "${PECAN_EV_GATEWAY_KEY:?set in /opt/pecan-usd/.env}"
       CDK_BRANCH_PROCESSOR_INITIAL_MINT_URL: "http://127.0.0.1:8097"
       CDK_BRANCH_PROCESSOR_INITIAL_ADVERTISED_GRPC: "127.0.0.1:50055"
       CDK_BRANCH_PROCESSOR_LN: "true"
