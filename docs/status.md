@@ -167,7 +167,15 @@ deposit → ecash minted → the charge point's QR deep link
 with the charger's own display as a live wasm PiP → remote stop at
 ~30 kW·s → receipt + refund. Headless by default; `--remote` records
 on ai-legion (npm ci + chromium there once, artifacts rsynced back).
-Shipped cut: 2m25s webm under web/e2e/.results-video/alice-remote/.
+Shipped cut v3 (2026-09-16 visual round): the charger's display
+  is a landscape companion strip pinned to the bottom (single SIM
+  CHARGER, live kW·s + remaining €, read from the wallet's own DOM) —
+  the wasm mirror showed the atom box's A+B and could never see atomV,
+  which is why the first cut's "charger" never came alive; the
+  firmware's landscape/single-charger profiles are tracked as #29.
+  Settle waits bridge with animated cards, the charge stays on screen
+  past 30 kW·s, and the film ends on a fade. Stills:
+  web/e2e/.results-video/alice-stills/.
 
 Fixes the round surfaced and shipped: the sim-https helper died under
 web's `"type": "module"` (renamed .cjs — the whole video lane was
