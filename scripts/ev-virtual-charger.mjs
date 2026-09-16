@@ -52,9 +52,14 @@ let whDelivered = 0
 let kwsDelivered = 0
 
 function nextLoad() {
-  const drift = (Math.random() - 0.5) * 2.2
+  // Gentle-biased walk (better demo pacing): the base meanders 3-5.5 kW
+  // with occasional spikes toward the 10 kW ceiling — real EVs taper
+  // and pause; the billing contract stays the same [3, 10] kW.
+  const drift = (Math.random() - 0.5) * 1.6
   loadKw = Math.min(MAX_KW, Math.max(MIN_KW, loadKw + drift))
-  if (Math.random() < 0.08) loadKw = MIN_KW + Math.random() * 1.5
+  loadKw += (4.2 - loadKw) * 0.08
+  if (Math.random() < 0.1) loadKw = 7 + Math.random() * 3
+  if (Math.random() < 0.06) loadKw = MIN_KW + Math.random() * 0.8
   return Math.round(loadKw * 10) / 10
 }
 

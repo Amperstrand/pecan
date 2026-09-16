@@ -158,6 +158,23 @@ charger with no physical twin.
   drift turned 54:5x into 54:49 (#19 data point; single clock read
   now).
 
+## Movie pacing + firmware-display round 2026-09-17
+
+Review feedback: transitions too fast to read; the charger's firmware
+display should be visible above the wallet UX without occluding it.
+Research pass (PiP best practice + screenshot study): corner overlays
+need >=20% frame width, live where the point-of-interest is NOT,
+ARRIVE at the narrated moment, and persist as a compact record. Shipped:
+card holds computed from reading speed (~3 words/s, floor 3.2s — 14
+cards); the POLE PANEL — a firmware-styled corner bubble (25% width,
+black glass, segment kW + RELAY LED, scanlines) on the real meter feed
+that boots when the session starts and fades when it ends, while the
+strip persists; and a gentle-biased load walk (3-5.5 kW base, spikes
+to 10) for longer cinematic burns — selftest bounds unchanged [3,10].
+Two parse/TDZ bugs in the panel mount burned two takes before the
+green 152s cut (verdict lines now checked explicitly, not artifact
+timestamps).
+
 ## Demo-rail hardening round 2026-09-16 (night)
 
 The movie's Lightning leg no longer depends on channel health: Alice's
