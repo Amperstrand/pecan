@@ -257,10 +257,10 @@ impl FarmState {
         Ok(())
     }
 
-    fn reserved_of(file: &FarmFile) -> u64 {
+    fn reserved_of(file: &FarmFile, series_date: &str) -> u64 {
         file.purchases
             .values()
-            .filter(|p| p.state.reserves_capacity())
+            .filter(|p| p.series_date == series_date && p.state.reserves_capacity())
             .map(|p| p.quantity)
             .sum()
     }
@@ -314,7 +314,7 @@ impl FarmState {
         if series.matured(now) {
             bail!("series {series_date} has matured; issuance is closed");
         }
-        let reserved = Self::reserved_of(&guard);
+        let reserved = Self::reserved_of(&guard, series_date);
         if series.issued + reserved + quantity > series.capacity {
             bail!(
                 "capacity: {} of {} eggs remain for {}",
@@ -1236,12 +1236,12 @@ mod tests {
             .await
             .unwrap();
         let snapshot = farm.series_for_date("2026-09-18").await.unwrap();
-        // reserved derived live from purchases: 10 - 5 open
+        // reserved derived live from the series' purchases: 10 - 5 open
         let reserved = farm
             .purchases()
             .await
             .iter()
-            .filter(|p| p.state.reserves_capacity())
+            .filter(|p| p.series_date == "2026-09-18" && p.state.reserves_capacity())
             .map(|p| p.quantity)
             .sum::<u64>();
         assert_eq!(snapshot.available(reserved), 5);
@@ -1274,13 +1274,27 @@ mod tests {
             .purchases()
             .await
             .iter()
-            .filter(|p| p.state.reserves_capacity())
+            .filter(|p| p.series_date == "2026-09-18" && p.state.reserves_capacity())
             .map(|p| p.quantity)
             .sum::<u64>();
         assert_eq!(reserved, 0, "expired purchase must release its reservation");
         farm.insert_purchase("FP-e2", "2026-09-18", 10, "02abc", "lnbc".into(), "cc".into())
             .await
             .expect("capacity is free again");
+    }
+
+    #[tokio::test]
+    async fn reservations_are_per_series() {
+        let farm = fresh_farm().await;
+        seeded_series(&farm, "2026-09-18").await;
+        seeded_series(&farm, "2026-09-19").await;
+        farm.insert_purchase("FP-x1", "2026-09-18", 10, "02abc", "lnbc".into(), "aa".into())
+            .await
+            .unwrap();
+        // Friday being sold out must not touch Saturday's capacity.
+        farm.insert_purchase("FP-x2", "2026-09-19", 10, "02abc", "lnbc".into(), "bb".into())
+            .await
+            .expect("a different day's eggs are a different series");
     }
 
     #[tokio::test]
