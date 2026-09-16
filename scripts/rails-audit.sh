@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Deposit-rails audit: chains (signet + mutinynet), pairs (EUR + USD),
-# rails (onchain + lightning + teller), straight from the OWNED
+# Deposit-rails audit: chains (signet + mutinynet), every pair from the
+# manifest, rails (onchain + lightning + teller), straight from the OWNED
 # infrastructure. Read-only against prod: creates no quotes, sends no
 # funds. Repeatable — run after any deploy or chain change.
 #
@@ -9,19 +9,24 @@
 # Chain probes ship the JSON payload as a file — nested shell quoting
 # has corrupted inline JSON here too many times to ever inline it again.
 set -uo pipefail
+. "$(dirname "$0")/pairs.sh"
 INR2=root@46.224.104.12
 CREDS=/tmp/pecan-bitcoind-creds.txt
 PASS=$(grep '^pass:' $CREDS 2>/dev/null | awk '{print $2}')
-MPASS=$(grep 'mutinynet-pass:' $CREDS 2>/dev/null | awk '{print $2}')
+# The mutinynet node (net4sats) has no static rpc password — it runs
+# rpcauth + the bitcoind cookie, bind-mounted to a stable host path.
+# Reading the cookie per run is restart-safe: no secret to record and
+# a node restart merely mints a fresh one at the same path.
+MCREDS=$(ssh net4sats "cat /opt/bitcoind-remote/mutinynet-data/signet/.cookie" </dev/null 2>/dev/null || true)
 fail=0
 check() { if [ "$2" = ok ]; then echo "  ok    $1 ($3)"; else echo "  FAIL  $1 ($3)"; fail=1; fi }
 
 PAYLOAD=/tmp/rails-audit-rpc.json
 printf '%s' '{"jsonrpc":"1.0","id":"a","method":"getblockchaininfo","params":[]}' > $PAYLOAD
 
-probe_chain() { # host port pass — prints "chain blocks headers pruned"
+probe_chain() { # host port creds("user:pass") — prints "chain blocks headers pruned"
   scp -q $PAYLOAD "$1:/tmp/rails-audit-rpc.json"
-  ssh "$1" "curl -s --max-time 8 -u 'pecan-watch:$3' -d @/tmp/rails-audit-rpc.json http://127.0.0.1:$2" </dev/null |
+  ssh "$1" "curl -s --max-time 8 -u '$3' -d @/tmp/rails-audit-rpc.json http://127.0.0.1:$2" </dev/null |
     python3 -c 'import json,sys
 try:
   d = json.load(sys.stdin)["result"]
@@ -34,10 +39,10 @@ echo "== chain backends (owned bitcoinds) =="
 # signet: via the inr2 forwarder — the exact path the processor uses.
 # mutinynet: direct on net4sats (inr2 forwards zmq only, not rpc).
 SIGNET_TIP=0
-for chain in "signet|$INR2|38332|$PASS" "mutinynet|net4sats|38333|$MPASS"; do
-  IFS='|' read -r name host port pass <<< "$chain"
-  out=$(probe_chain "$host" "$port" "$pass")
-  [ "$name" = signet ] && SIGNET_TIP=$(python3 -c "o='$out'.split(); print(o[1] if o[1].isdigit() else 0)")
+for chain in "signet|$INR2|38332|pecan-watch:$PASS" "mutinynet|net4sats|38333|$MCREDS"; do
+  IFS='|' read -r name host port creds <<< "$chain"
+  out=$(probe_chain "$host" "$port" "$creds")
+  [ "$name" = signet ] && SIGNET_TIP=$(python3 -c "o='$out'.split(); print(o[1] if len(o) > 1 and o[1].isdigit() else 0)")
   ok=$(python3 -c "
 o = '$out'.split()
 print('ok' if len(o) == 4 and o[0] != 'rpc-fail' and o[1].isdigit() and int(o[1]) >= int(o[2]) - 3 else 'bad')")
@@ -57,7 +62,7 @@ ok=$(python3 -c "o='''$out'''.split(); print('ok' if o[0]=='pecan-watch' and o[1
 check "watch wallet loaded + watch-only" "$ok" "$out"
 
 echo "== mint pairs =="
-for pair in eur usd; do
+for pair in $PAIRS; do
   methods=$(curl -s --max-time 8 "https://giftcard.cashu.exchange/$pair/v1/info" | python3 -c 'import json,sys
 try:
   ms = json.load(sys.stdin)["nuts"]["4"]["methods"]

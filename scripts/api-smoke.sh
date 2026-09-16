@@ -6,6 +6,7 @@
 # Every check prints one ok/FAIL line; exit is non-zero on any failure.
 # Usage: scripts/api-smoke.sh
 set -u
+. "$(dirname "$0")/pairs.sh"
 URL=${PECAN_URL:-https://giftcard.cashu.exchange}
 fail=0
 
@@ -20,7 +21,9 @@ check() { # name expected actual
   fi
 }
 
-for pair in eur usd; do
+# Every pair from the manifest — a pair missing here is a pair the
+# post-deploy health gate silently ignores (NOK was, 2026-09-14→15).
+for pair in $PAIRS; do
   echo "== $pair pair =="
 
   k=$(code "$URL/$pair/v1/keys")
