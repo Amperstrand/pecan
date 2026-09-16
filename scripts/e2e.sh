@@ -21,6 +21,7 @@
 # Usage: scripts/e2e.sh [--smoke] [--no-preflight] [extra playwright args]
 set -eu
 cd "$(dirname "$0")/../web"
+. ../scripts/pairs.sh
 
 SMOKE=0
 PREFLIGHT=1
@@ -43,24 +44,19 @@ if [ "$PREFLIGHT" -eq 1 ]; then
   echo "preflight: api-smoke ok"
 fi
 
-PW=$(ssh root@46.224.104.12 \
-  "cat /opt/pecan-config/initial-admin-password.txt 2>/dev/null \
-   || docker logs pecan-pecan-1 2>&1 | grep -o 'generated random admin password: [A-Za-z0-9]*' | head -1 | awk '{print \$NF}'")
-if [ -z "$PW" ]; then
-  echo "no generated admin password found (file or logs) on the server" >&2
-  exit 1
-fi
-export PECAN_ADMIN_PASSWORD="$PW"
-USD_PW=$(ssh root@46.224.104.12 \
-  "cat /opt/pecan-usd-config/initial-admin-password.txt 2>/dev/null" || true)
-if [ -n "$USD_PW" ]; then
-  export PECAN_USD_ADMIN_PASSWORD="$USD_PW"
-fi
-NOK_PW=$(ssh root@46.224.104.12 \
-  "cat /opt/pecan-nok-config/initial-admin-password.txt 2>/dev/null" || true)
-if [ -n "$NOK_PW" ]; then
-  export PECAN_NOK_ADMIN_PASSWORD="$NOK_PW"
-fi
+for u in $PAIRS; do
+  pw=$(ssh root@46.224.104.12 \
+    "cat $(pair_field "$u" pw_file) 2>/dev/null \
+     || docker logs $(pair_field "$u" pecan_container) 2>&1 | grep -o 'generated random admin password: [A-Za-z0-9]*' | head -1 | awk '{print \$NF}'") || pw=""
+  if [ -n "$pw" ]; then
+    export "$(pair_field "$u" pw_env)=$pw"
+  elif [ "$u" = eur ]; then
+    echo "no generated admin password found (file or logs) on the server" >&2
+    exit 1
+  else
+    echo "note: no $u admin password on the server — its specs will skip" >&2
+  fi
+done
 
 # EV-rail test fixtures (the ev-rail spec's simulated charger-button
 # press): the gateway shared secret and the fleet MQTT account, both from
