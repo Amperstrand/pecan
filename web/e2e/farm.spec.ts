@@ -114,7 +114,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
     // eggs the moment the purchase exists.
     await page.getByLabel("egg quantity").fill("5")
     await page.getByRole("button", { name: /Buy for \d+ signet sats/ }).click()
-    const invoiceBox = page.locator("textarea.font-mono")
+    const invoiceBox = page.getByTestId("farm-invoice")
     await invoiceBox.waitFor({ state: "visible", timeout: 30_000 })
     const invoice = (await invoiceBox.inputValue()) || (await invoiceBox.textContent()) || ""
     expect(invoice.startsWith("lntb")).toBeTruthy()
@@ -203,7 +203,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
     // ---------------------------------------------------------------
     await page.getByLabel(`send quantity for ${series.unit}`).fill("2")
     await page.getByRole("button", { name: /Send to Bob/i }).click()
-    const tokenBox = page.locator("textarea[readonly]")
+    const tokenBox = page.getByTestId("farm-token")
     await tokenBox.waitFor({ state: "visible", timeout: 60_000 })
     const token = await tokenBox.inputValue()
     expect(token.length).toBeGreaterThan(50)

@@ -330,6 +330,7 @@ export function FarmPanel() {
                 </span>
                 <textarea
                   readOnly
+                  data-testid="farm-token"
                   className="rounded bg-muted p-2 text-xs font-mono break-all h-24"
                   value={tokenOut}
                 />
@@ -410,6 +411,7 @@ export function FarmPanel() {
                   </div>
                   <textarea
                     readOnly
+                    data-testid="farm-invoice"
                     className="rounded bg-muted p-2 text-xs font-mono break-all h-20"
                     value={phase.purchase.payment.bolt11}
                   />
