@@ -44,7 +44,7 @@ describe("futureTagOfSecret", () => {
 
 describe("isFutureUnit", () => {
   it("recognizes the NUT-32 grammar prefixes only", () => {
-    expect(isFutureUnit("future:farm-egg:20260918T160000Z")).toBe(true)
+    expect(isFutureUnit("future:farm-egg:20260918t160000z")).toBe(true)
     expect(isFutureUnit("eur")).toBe(false)
     expect(isFutureUnit("sat")).toBe(false)
     expect(isFutureUnit("future:farm")).toBe(true) // prefix check; server validates fully
@@ -60,7 +60,7 @@ describe("terms signature verification (client-side pin)", () => {
       production_capacity: "10",
       reference_price_sats: "1000",
       settlement_method: "physical",
-      unit: "future:farm-egg:20260918T160000Z",
+      unit: "future:farm-egg:20260918t160000z",
     }
     // Canonical: sorted keys, no whitespace — mirrors the cdk fork's
     // canonical_json and the processor's canonical_envelope.

@@ -250,9 +250,14 @@ async function mountCompanion(page: Page) {
         reconnectPeriod: 2000,
       })
       c.on("connect", () => c.subscribe("charger/atomV/meter"))
+      let lastWh = -1
       c.on("message", (_t: unknown, payload: Uint8Array) => {
         try {
           const m = JSON.parse(new TextDecoder().decode(payload))
+          // The device resets its meter per session — a falling Wh count
+          // means a NEW session: clear the graph so curves never splice.
+          if (lastWh !== -1 && m.wh < lastWh) samples.length = 0
+          lastWh = m.wh
           kwEl.textContent = m.kw === null ? "—" : String(m.kw)
           whEl.textContent = String(m.wh)
           draw(m.kw)
@@ -483,6 +488,24 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
   await still(page, "07-stopped-summary")
 
+  // SCENE 6.5 — the pole is public: its live web view just showed the
+  // session (state, draw curve, energy) to anyone with the URL (#31).
+  await page.evaluate(() => {
+    document.getElementById("movie-card")?.remove()
+    const el = document.createElement("div")
+    el.id = "movie-card"
+    el.classList.add("show")
+    el.style.background = "rgba(4,7,13,.82)"
+    el.innerHTML = `
+      <div class="title">This pole is public.</div>
+      <iframe src="/chargepoint.html" data-movie-pole
+        style="width:346px;height:430px;border:1px solid rgba(56,189,248,.4);border-radius:14px;background:#050810"></iframe>
+      <div class="body">giftcard.cashu.exchange/chargepoint.html — live state, draw, energy. No app, no account, no key.</div>`
+    document.body.appendChild(el)
+  })
+  await page.waitForTimeout(7_000)
+  await still(page, "075-public-pole")
+
   // SCENE 7 — receipt & close: the unspent euros come back
   await expect
     .poll(() => readBalance(page), { timeout: 200_000 })
@@ -510,4 +533,116 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   })
   await fadeOut(page)
   await page.waitForTimeout(2_000)
+})
+
+
+// ---------------------------------------------------------------------------
+// the 30-second cut — the social version (#32). Same real stack, same
+// truths, compressed: persona → pay → charge (metered) → refund. Enable
+// with PECAN_MOVIE_SHORT=1 (scripts/movie.sh --short).
+// ---------------------------------------------------------------------------
+
+test("Alice at the charge point — the 30 second cut", async ({ page }) => {
+  // In-body skip: a file-level test.skip here would skip the WHOLE
+  // file — it once took the main movie down with it.
+  test.skip(
+    !(process.env.PECAN_VIDEO && process.env.PECAN_MOVIE_SHORT),
+    "short cut only (run scripts/movie.sh --short)",
+  )
+  test.setTimeout(180_000)
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("pecan-debug", "1")
+    window.localStorage.setItem("pecan-currency", "eur")
+  })
+  await page.goto(WALLET)
+  await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({ timeout: 30_000 })
+  await installChrome(page)
+
+  await card(page, { title: "Meet Alice.", holdMs: 2_200 })
+  await card(page, {
+    title: "Six charger apps. One leaked her history.",
+    body: "Alice just wants to plug in and pay — over Lightning.",
+    holdMs: 3_800,
+  })
+
+  const qr = await import("qrcode").then(m =>
+    m.default.toDataURL(DEEP_LINK, { margin: 1, width: 420 }),
+  )
+  await card(page, { title: "One QR at the pole.", qrDataUrl: qr, holdMs: 3_200, brand: false })
+  await hideCard(page)
+  await mountCompanion(page)
+
+  // Top up over Lightning — the settle bridged by one live card.
+  await page.getByRole("button", { name: "Lightning", exact: true }).click()
+  await page.getByPlaceholder("5.00").fill(String(DEPOSIT_EUR))
+  await page.getByRole("button", { name: "Create lightning invoice" }).click()
+  const invoice = await page
+    .locator('p.font-mono:has-text("lntbs")')
+    .first()
+    .textContent({ timeout: 60_000 })
+  expect(invoice).toBeTruthy()
+  await page.waitForTimeout(1_500)
+  const paying = (async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return payLightningInvoice(invoice!.trim())
+      } catch (err) {
+        if (attempt >= 3) throw err
+        await new Promise(resolve => setTimeout(resolve, 5_000))
+      }
+    }
+  })()
+  await cardUntil(
+    page,
+    {
+      title: "€50, paid over Lightning ⚡",
+      body: "Settling — the mint issues Alice's ecash.",
+      done: "Paid ⚡ — €50 in ecash, no account attached.",
+    },
+    async () => (await readBalance(page).catch(() => 0)) >= DEPOSIT_EUR - 0.5,
+    120_000,
+  )
+  await paying
+  await hideCard(page)
+
+  // Charge at the car's pace, stop early, keep most of the deposit.
+  await page.goto(DEEP_LINK)
+  await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({ timeout: 30_000 })
+  await installChrome(page)
+  await mountCompanion(page)
+  await page.getByPlaceholder("1.00").fill(String(DEPOSIT_EUR))
+  await page.getByRole("button", { name: "Start charging" }).click()
+  await expect(page.getByText("Charging at Sim Charger")).toBeVisible({ timeout: 60_000 })
+  const progress = page.getByRole("progressbar")
+  await expect
+    .poll(async () => Number(await progress.getAttribute("aria-valuenow")), {
+      timeout: 60_000,
+      interval: 250,
+    })
+    .toBeGreaterThanOrEqual(STOP_AT_KWS)
+  await page.getByRole("button", { name: "Stop charging" }).click()
+  await expect(
+    page.getByText(/(Charging stopped — \d+ s delivered|Charged \d+ s at Sim Charger)/),
+  ).toBeVisible({ timeout: 180_000 })
+  const receipt = await page.locator("p.break-all.font-mono").first().textContent()
+  expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}/)
+  const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
+
+  await expect
+    .poll(() => readBalance(page), { timeout: 200_000 })
+    .toBeCloseTo(DEPOSIT_EUR - delivered, 1)
+  await card(page, {
+    title: `\${delivered} kW·s used. €${DEPOSIT_EUR - delivered} came back.`,
+    body: "No app. No card. No history. Ecash is cash.",
+    holdMs: 5_000,
+  })
+  await hideCompanion(page)
+  await card(page, {
+    title: "pecan · Cashu · Lightning",
+    body: "giftcard.cashu.exchange",
+    holdMs: 4_500,
+  })
+  await fadeOut(page)
+  await page.waitForTimeout(1_500)
 })

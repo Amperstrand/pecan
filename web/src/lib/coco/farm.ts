@@ -207,7 +207,7 @@ export async function futureBalances(): Promise<FutureBalance[]> {
       unit,
       amount: Number(entry.spendable.toBigInt()),
       termsUri: null,
-      date: unit.match(/:(\d{8})T/)?.[1]?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3") ?? null,
+      date: unit.match(/:(\d{8})t/i)?.[1]?.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3") ?? null,
       maturity: null,
     })
   }

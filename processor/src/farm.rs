@@ -282,8 +282,11 @@ impl FarmState {
     }
 
     fn unit_for_date(config: &FarmConfig, date: &str) -> String {
+        // Lowercase whole: Cashu unit identifiers lowercase by established
+        // practice (cdk normalizes custom units) — the NUT-32 draft is
+        // aligned with it.
         format!(
-            "future:{}-{}:{}T{:02}0000Z",
+            "future:{}-{}:{}t{:02}0000z",
             config.base, config.quote, date.replace('-', ""),
             config.maturity_hour_utc
         )
@@ -1088,8 +1091,8 @@ pub fn valid_future_unit(unit: &str) -> bool {
     }
     let bytes = stamp.as_bytes();
     bytes.len() == 16
-        && bytes[8] == b'T'
-        && bytes[15] == b'Z'
+        && bytes[8] == b't'
+        && bytes[15] == b'z'
         && bytes[..8]
             .iter()
             .chain(&bytes[9..15])
@@ -1207,11 +1210,11 @@ mod tests {
 
     #[test]
     fn unit_grammar_mirrors_the_draft() {
-        assert!(valid_future_unit("future:farm-egg:20260918T160000Z"));
-        assert!(!valid_future_unit("future:farm-egg:20260918t160000z"));
-        assert!(!valid_future_unit("future:Farm-egg:20260918T160000Z"));
-        assert!(!valid_future_unit("future:farm-egg:20260230T160000Z"));
-        assert!(!valid_future_unit("future:farm-egg:20260918T160000+01:00"));
+        assert!(valid_future_unit("future:farm-egg:20260918t160000z"));
+        assert!(!valid_future_unit("future:farm-egg:20260918T160000Z"));
+        assert!(!valid_future_unit("future:Farm-egg:20260918t160000z"));
+        assert!(!valid_future_unit("future:farm-egg:20260230t160000z"));
+        assert!(!valid_future_unit("future:farm-egg:20260918t160000+01:00"));
         assert!(!valid_future_unit("eur"));
     }
 
@@ -1378,7 +1381,7 @@ mod tests {
             .await
             .is_err());
         assert!(farm
-            .authorize_issuance("FP-1", "q1", "future:farm-egg:20260919T160000Z", 5, "02abc")
+            .authorize_issuance("FP-1", "q1", "future:farm-egg:20260919t160000z", 5, "02abc")
             .await
             .is_err());
 
@@ -1431,7 +1434,7 @@ mod tests {
         // immature series refuses redemption
         let mut s2 = series.clone();
         s2.date = "2026-09-19".into();
-        s2.unit = "future:farm-egg:20260919T160000Z".into();
+        s2.unit = "future:farm-egg:20260919t160000z".into();
         s2.matured_override = false;
         s2.maturity = unix_now() + 86_400;
         farm.inner
