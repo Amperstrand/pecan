@@ -69,7 +69,7 @@ pair_field() { # pair_field <unit> <field> — echoes the value
       case "$2" in
         compose)         echo deploy/docker-compose.farm.yml ;;
         compose_remote)  echo /opt/pecan-farm/docker-compose.yml ;;
-        compose_flags)   echo "-f docker-compose.farm.yml" ;;
+        compose_flags)   echo "" ;;
         server_dir)      echo /opt/pecan-farm ;;
         pw_file)         echo /opt/pecan-farm-config/initial-admin-password.txt ;;
         pw_env)          echo PECAN_FARM_ADMIN_PASSWORD ;;
