@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process"
+import fs from "node:fs"
 import { test, expect, type Page } from "@playwright/test"
 import { readBalance } from "./helpers/wallet"
 
@@ -96,6 +97,18 @@ const CHROME_CSS = `
   #pole-panel .kws { font-size: 13px; color: #9fb0c3; margin-top: 4px; font-variant-numeric: tabular-nums; }
   #pole-panel .relay { margin-top: 7px; font-size: 9px; letter-spacing: .18em; color: #34d399; }
   @keyframes pole-bolt { 50% { opacity: .3; } }
+  #movie-frame {
+    position: fixed; inset: 0; z-index: 2147483643; pointer-events: none;
+    border: 7px solid #0a0d14; border-radius: 26px;
+    box-shadow: inset 0 0 0 1.5px rgba(120,140,170,.35), 0 0 0 1px rgba(0,0,0,.8);
+  }
+  #movie-statusbar {
+    position: fixed; top: 0; left: 0; right: 0; height: 22px; z-index: 2147483643;
+    pointer-events: none; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; box-sizing: border-box;
+    color: #e6edf3; font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 600;
+    text-shadow: 0 1px 2px rgba(0,0,0,.6);
+  }
   #movie-fade { position: fixed; inset: 0; z-index: 2147483647; background: #000;
     opacity: 0; transition: opacity 1.4s ease; pointer-events: none; }
 `
@@ -108,7 +121,38 @@ async function installChrome(page: Page) {
       fade.id = "movie-fade"
       document.body.appendChild(fade)
     }
+    if (!document.getElementById("movie-frame")) {
+      const frame = document.createElement("div")
+      frame.id = "movie-frame"
+      const bar = document.createElement("div")
+      bar.id = "movie-statusbar"
+      bar.innerHTML = "<span>9:41</span><span>▮▮▮ ⌁ 84%</span>"
+      document.body.appendChild(frame)
+      document.body.appendChild(bar)
+    }
   })
+}
+
+// Narration timeline: every card records its window + spoken line; the
+// VO post pass (scripts/movie-voice.sh) turns this into a synced
+// voiceover with macOS say + ffmpeg. T0 anchors to the first load.
+const TIMELINE: { start: number; end?: number; say?: string }[] = []
+let T0 = 0
+function markStart(say?: string) {
+  if (!T0) T0 = Date.now()
+  TIMELINE.push({ start: Date.now() - T0, say })
+}
+function markEnd() {
+  const last = TIMELINE[TIMELINE.length - 1]
+  if (last && last.end === undefined) last.end = Date.now() - T0
+}
+function writeTimeline() {
+  markEnd()
+  fs.mkdirSync("e2e/.results-video", { recursive: true })
+  fs.writeFileSync(
+    "e2e/.results-video/movie-timeline.json",
+    JSON.stringify({ t0_offset_hint_ms: 1500, entries: TIMELINE }, null, 2),
+  )
 }
 
 // Human-paced holds (2026-09-17 review: transitions were too fast to
@@ -121,7 +165,7 @@ function holdFor(...texts: (string | undefined)[]): number {
 
 async function card(
   page: Page,
-  opts: { title?: string; body?: string; qrDataUrl?: string; holdMs?: number; brand?: boolean },
+  opts: { title?: string; body?: string; qrDataUrl?: string; holdMs?: number; brand?: boolean; say?: string },
 ) {
   await page.evaluate(
     ({ title, body, qrDataUrl, brand }) => {
@@ -141,14 +185,16 @@ async function card(
     },
     { title: opts.title, body: opts.body, qrDataUrl: opts.qrDataUrl, brand: opts.brand },
   )
+  markStart(opts.say ?? opts.title)
   await page.waitForTimeout(opts.holdMs ?? holdFor(opts.title, opts.body))
+  markEnd()
 }
 
 // A card that stays up until the predicate passes — no dead air while
 // Lightning settles or a refund claims.
 async function cardUntil(
   page: Page,
-  opts: { title: string; body: string; done: string },
+  opts: { title: string; body: string; done: string; say?: string },
   predicate: () => Promise<boolean>,
   timeoutMs: number,
 ) {
@@ -163,6 +209,7 @@ async function cardUntil(
     },
     opts,
   )
+  markStart(opts.say)
   const deadline = Date.now() + timeoutMs
   while (!(await predicate())) {
     if (Date.now() > deadline) throw new Error(`cardUntil timeout: ${opts.title}`)
@@ -176,6 +223,7 @@ async function cardUntil(
     }
   }, opts.done)
   await page.waitForTimeout(2_200)
+  markEnd()
 }
 
 // Alice's payment settles ON THE MINT'S OWN NODE (self-pay): the rail's
@@ -454,13 +502,27 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({ timeout: 30_000 })
   await installChrome(page)
 
+  // COLD OPEN — title
+  await card(page, {
+    title: "ALICE AT THE CHARGE POINT",
+    body: "a Cashu demo",
+    holdMs: 4_200,
+    brand: false,
+    say: "Alice, at the charge point. A Cashu demo.",
+  })
+
   // SCENE 1 — Meet Alice
-  await card(page, { title: "Meet Alice.", holdMs: undefined })
+  await card(page, {
+    title: "Meet Alice.",
+    holdMs: undefined,
+    say: "Meet Alice.",
+  })
   await card(page, { title: "Alice drives an electric car.", holdMs: undefined })
   await card(page, {
     title: "Her phone has an app for every charging network.",
     body: "eChargeGo · Voltly · PowerPort · kWh! · Chargr · eFlow",
     holdMs: undefined,
+    say: "Her phone has an app for every charging network. Six of them.",
   })
   await card(page, {
     title: "Every few months: re-enter the credit card.",
@@ -471,6 +533,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     title: "Last spring, one network leaked its users' charging history.",
     body: "Home addresses, habits, overnight stops — onto the darknet.",
     holdMs: undefined,
+    say: "Last spring, one network leaked its users' charging history. Home addresses, habits, overnight stops, onto the darknet.",
   })
   await card(page, {
     title: "Alice just wants to plug in, pay, and drive.",
@@ -493,6 +556,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     body: "Just a QR that opens the wallet.",
     qrDataUrl: qr,
     holdMs: 5_500,
+    say: "Just a QR that opens the wallet.",
     brand: false,
   })
   await hideCard(page)
@@ -524,6 +588,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await card(page, {
     title: "Alice pays from her Lightning wallet ⚡",
     body: "A real invoice — €50 on Lightning.",
+    say: "Alice pays a real fifty euro invoice, from her Lightning wallet.",
     holdMs: 4_000,
   })
   await cardUntil(
@@ -532,6 +597,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
       title: "Settling on Lightning…",
       body: "The mint issues Alice's ecash.",
       done: "Paid ⚡ — €50 in ecash.",
+      say: "Settling on Lightning. The mint issues Alice's ecash.",
     },
     async () => (await readBalance(page).catch(() => 0)) >= DEPOSIT_EUR - 0.5,
     120_000,
@@ -546,6 +612,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     title: `€${DEPOSIT_EUR}, minted as ecash.`,
     body: "No name. No card. No account attached.",
     holdMs: undefined,
+    say: "Fifty euro, minted as ecash. No name, no card, no account attached.",
   })
   await hideCard(page)
   await page.waitForTimeout(1_000)
@@ -564,6 +631,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     title: "The QR is just a link.",
     body: "It hands the wallet the charge point. Nothing else leaves Alice's phone.",
     holdMs: undefined,
+    say: "The QR is just a link. It hands the wallet the charge point, and nothing else leaves her phone.",
   })
   await hideCard(page)
   await page.waitForTimeout(1_000)
@@ -575,6 +643,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await card(page, {
     title: `€${DEPOSIT_EUR} of energy, authorized.`,
     body: "Her car draws between 3 and 10 kW — no two seconds alike — and the bill follows the meter, not the clock.",
+    say: "Fifty euro of energy, authorized. Her car draws between three and ten kilowatts. No two seconds alike. And the bill follows the meter, not the clock.",
     holdMs: 7_000,
   })
   await hideCard(page)
@@ -631,16 +700,19 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     title: `Alice paid for ${delivered} kilowatt-seconds.`,
     body: `The other €${DEPOSIT_EUR - delivered} came back — automatically.`,
     holdMs: undefined,
+    say: `Alice paid for ${delivered} kilowatt seconds. The other ${DEPOSIT_EUR - delivered} euro came back, automatically.`,
   })
   await card(page, {
     title: "No app. No card on file. No charging history.",
     body: "Ecash is cash.",
     holdMs: undefined,
+    say: "No app. No card on file. No charging history. Ecash is cash.",
   })
   await card(page, {
     title: "Pay for energy the way you pay for anything else.",
     body: "Lightning in. Kilowatt-seconds out.",
     holdMs: undefined,
+    say: "Pay for energy the way you pay for anything else. Lightning in. Kilowatt seconds out.",
   })
   await hideCompanion(page)
   await card(page, {
@@ -650,6 +722,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   })
   await fadeOut(page)
   await page.waitForTimeout(2_000)
+  writeTimeline()
 })
 
 
@@ -751,6 +824,7 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
     title: "pecan · Cashu · Lightning",
     body: "giftcard.cashu.exchange",
     holdMs: undefined,
+    say: "Pecan. Cashu. Lightning.",
   })
   await fadeOut(page)
   await page.waitForTimeout(1_500)

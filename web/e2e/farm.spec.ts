@@ -136,6 +136,14 @@ test.describe("farm futures (NUT-32 spike)", () => {
     // and the series' exact terms URI.
     const proofs = await readFutureProofs(page)
     const mine = proofs.filter((p) => p.unit === series.unit && p.state !== "spent")
+    if (mine.reduce((sum, p) => sum + p.amount, 0) !== 5) {
+      console.log(
+        "FUTURE ROWS:",
+        JSON.stringify(
+          proofs.map((p) => ({ unit: p.unit, amount: p.amount, state: p.state, secretHead: p.secret.slice(0, 40) })),
+        ),
+      )
+    }
     expect(mine.reduce((sum, p) => sum + p.amount, 0)).toBe(5)
     for (const proof of mine) {
       const tag = futureTag(proof.secret)
@@ -144,9 +152,17 @@ test.describe("farm futures (NUT-32 spike)", () => {
       expect(tag?.uri).toBe(series.terms_uri)
     }
 
-    // Series accounting moved; capacity ledger is aggregate-only.
+    // Series accounting moved (the farm's minted-marker polls the mint
+    // quote state, so `issued` converges within a few seconds); capacity
+    // ledger is aggregate-only.
+    await expect
+      .poll(
+        async () =>
+          (await farmOverview(page)).series.find((s) => s.date === series.date)?.issued ?? -1,
+        { timeout: 30_000 },
+      )
+      .toBe(series.issued + 5)
     const after = (await farmOverview(page)).series.find((s) => s.date === series.date)
-    expect(after?.issued).toBe(series.issued + 5)
     expect(after?.available).toBe(series.available - 5)
 
     // Terms blob is content-addressed: the digest in the URI addresses
@@ -225,9 +241,9 @@ test.describe("farm futures (NUT-32 spike)", () => {
       .toBe(2)
     await bobContext.close()
 
-    // Total supply unchanged by the transfer: issued still 5.
+    // Total supply unchanged by the transfer: issued unchanged.
     const transferred = (await farmOverview(page)).series.find((s) => s.date === series.date)
-    expect(transferred?.issued).toBe(series.issued + 5)
+    expect(transferred?.issued).toBe(after?.issued ?? series.issued + 5)
 
     // ---------------------------------------------------------------
     // Redemption: mature the series (admin demo override), Bob's 2
