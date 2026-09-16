@@ -158,6 +158,23 @@ charger with no physical twin.
   drift turned 54:5x into 54:49 (#19 data point; single clock read
   now).
 
+## Metered-truth round 2026-09-16 (evening)
+
+#30 layer A + #31 shipped: the gateway is repo-tracked
+(gateway/atom-gateway.mjs via scripts/atom-gateway.sh) and the device
+meter is the session authority — delivered, remaining, auto-cap at
+budget, and remote-stop billing all follow charger/{id}/meter while
+fresh (<6s); meterless devices keep wall-clock (no firmware changes).
+Proven live: 30 kW·s capped in 10 wall seconds; selftest asserts a
+remote stop bills metered kW·s (12 for ~3.5s wall — the wall-clock
+path it replaced once billed 3 for a metered 18: caught in movie
+frame review). charger-v @smoke pins elapsed-vs-budget (a constant-
+rate contract cannot pass it). Public live pole:
+https://giftcard.cashu.exchange/chargepoint.html (CORS-open
+/atom-gateway/public/{id}). Remaining for #30: €/kWh pricing (layer
+B — wallet copy, e2e budgets, daemon tariff). Wallet copy now reads
+"1 € = 1 kW·s, billed by the car's meter".
+
 ## Alice movie round 2026-09-16
 
 `scripts/movie.sh [--headed|--remote]` records the "Alice at the

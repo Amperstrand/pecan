@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Charge point — live</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: radial-gradient(120% 120% at 50% 0%, #0b1220 0%, #050810 70%);
+    color: #e6edf3; font-family: Inter, system-ui, sans-serif; }
+  .pole { width: min(680px, 92vw); border: 1px solid rgba(56,189,248,.35);
+    border-radius: 16px; padding: 28px 30px; background: rgba(7,12,22,.85);
+    display: grid; gap: 18px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: .04em; }
+  .sub { color: #7d8fa5; font-size: 12px; letter-spacing: .06em; }
+  .kw { font-size: 64px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; }
+  .kw small { font-size: 22px; color: #9fb0c3; font-weight: 500; }
+  canvas { width: 100%; height: 120px; border-radius: 8px; background: rgba(26,36,54,.55); }
+  .stats { display: flex; gap: 26px; color: #9fb0c3; font-size: 14px; }
+  .stats b { color: #e6edf3; font-variant-numeric: tabular-nums; }
+  .state { font-size: 13px; letter-spacing: .08em; padding: 4px 10px; border-radius: 999px;
+    border: 1px solid rgba(56,189,248,.4); color: #38bdf8; }
+  .state.live { border-color: #34d399; color: #34d399; animation: pulse 1.1s infinite; }
+  @keyframes pulse { 50% { opacity: .55; } }
+  footer { color: #5b6b7f; font-size: 11px; letter-spacing: .1em; }
+</style>
+</head>
+<body>
+  <div class="pole">
+    <div class="row">
+      <div><h1>⚡ SIM CHARGER</h1><div class="sub">CASHU CHARGE CO · CHARGE POINT LIVE VIEW</div></div>
+      <span class="state" id="state">…</span>
+    </div>
+    <div class="row">
+      <div class="kw"><span id="kw">—</span><small> kW</small></div>
+      <div class="sub" style="text-align:right">draw walks 3–10 kW<br>no two seconds alike</div>
+    </div>
+    <canvas id="graph" width="640" height="120"></canvas>
+    <div class="stats">
+      <span>energy <b id="wh">0</b> Wh</span>
+      <span>car meter <b id="kws">0</b> kW·s</span>
+      <span>updated <b id="age">—</b></span>
+    </div>
+    <footer>THIS CHARGER IS AN API — NO HARDWARE · PAY OVER LIGHTNING AT THE POLE · giftcard.cashu.exchange</footer>
+  </div>
+<script>
+const samples = []
+async function tick() {
+  try {
+    const r = await fetch("/atom-gateway/public/atomV", { cache: "no-store" })
+    const d = await r.json()
+    const state = document.getElementById("state")
+    state.textContent = d.state === "drawing" ? "DELIVERING" : d.state.toUpperCase()
+    state.classList.toggle("live", d.state === "drawing")
+    document.getElementById("kw").textContent = d.kw === null ? "—" : d.kw
+    document.getElementById("wh").textContent = d.wh ?? 0
+    document.getElementById("kws").textContent = d.kws ?? 0
+    document.getElementById("age").textContent =
+      d.updated_ms === null ? "—" : (d.updated_ms / 1000).toFixed(1) + "s ago"
+    if (d.kw !== null) {
+      samples.push(d.kw)
+      if (samples.length > 60) samples.shift()
+      draw()
+    }
+  } catch {}
+}
+function draw() {
+  const c = document.getElementById("graph")
+  const ctx = c.getContext("2d")
+  const W = c.width, H = c.height
+  ctx.clearRect(0, 0, W, H)
+  ctx.strokeStyle = "rgba(125,143,165,.35)"
+  ctx.setLineDash([4, 5])
+  for (const band of [3, 10]) {
+    const y = H - (band / 10) * (H - 10) - 5
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke()
+  }
+  ctx.setLineDash([])
+  if (samples.length < 2) return
+  ctx.beginPath()
+  samples.forEach((v, i) => {
+    const x = (i / (samples.length - 1)) * W
+    const y = H - (v / 10) * (H - 10) - 5
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+  })
+  ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 2.5; ctx.stroke()
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath()
+  ctx.fillStyle = "rgba(56,189,248,.15)"; ctx.fill()
+}
+tick()
+setInterval(tick, 2000)
+</script>
+</body>
+</html>

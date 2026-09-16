@@ -1314,7 +1314,7 @@ export function WalletPage() {
                   {withdrawState.delivered}
                   <span className="text-base font-normal text-muted-foreground">
                     {" "}
-                    / {withdrawState.requested || withdrawState.budget} s
+                    / {withdrawState.requested || withdrawState.budget} kW·s
                   </span>
                 </p>
                 <div
@@ -1344,9 +1344,9 @@ export function WalletPage() {
                 </p>
                 <p className="text-xs text-muted-foreground">
                   Deposit {withdrawState.budget.toFixed(2)}{" "}
-                  {CURRENCIES[currency].symbol} · 1 {CURRENCIES[currency].label}{" "}
-                  per second — the unspent part refunds automatically when
-                  the session ends.
+                  {CURRENCIES[currency].symbol} · 1 {CURRENCIES[currency].label} = 1
+                  kW·s, billed by the car's meter — the unspent part
+                  refunds automatically when the session ends.
                 </p>
                 <Button
                   variant="outline"

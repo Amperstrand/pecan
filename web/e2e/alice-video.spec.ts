@@ -26,7 +26,7 @@ test.skip(!process.env.PECAN_VIDEO, "movie run only (run scripts/movie.sh)")
 const WALLET = "https://giftcard.cashu.exchange/eur-console/wallet"
 const DEEP_LINK = `${WALLET}?charger=atomV`
 const DEPOSIT_EUR = 50
-const STOP_AT_KWS = 18
+const STOP_AT_KWS = 15
 
 // ---------------------------------------------------------------------------
 // movie chrome: overlay cards + the companion strip
