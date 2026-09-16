@@ -97,6 +97,10 @@ seconds with zero side effects:
    make demo` — the virtual charger (ev-virtual-charger.service on inr2,
    `scripts/virtual-charger.sh status`) is an API-only device with no
    physical twin; it must be online or the @smoke charger-V spec fails.
+   Film work (recording, narration, frame review) uses the TestFilms
+   skill and the cross-project toolchain in ~/src/test-films
+   (tools/ + prompts/ are the canon; scripts/movie.sh and
+   movie-voice.sh here are thin project copies).
 
 E2E knobs and rules: `PECAN_E2E_ONCHAIN_CONF=<n>` pins the expected
 onchain confirmation policy (unset = trust the deployment; mismatch
