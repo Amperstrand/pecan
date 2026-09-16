@@ -58,15 +58,22 @@ export class MintFutureHandler implements MintMethodHandler<"future"> {
   async createQuote(ctx: CreateMintQuoteContext<"future">): Promise<MintQuote<"future">> {
     // NUT #20: > **Privacy:** To prevent the mint from being able to link multiple mint quotes, wallets **SHOULD** generate a unique public key for each mint quote request.
     const keypair = await this.keyRing.generateMintQuoteKeyPair()
-    const { amount, purchaseId } = ctx.createQuoteData
+    const { amount } = ctx.createQuoteData
+    // The purchase id arrives on the generic create call's `description`
+    // slot (the typed input has no custom-field passthrough) and moves
+    // into the flattened `purchase` extra here — the payment-processor
+    // gRPC proto cannot carry the method name yet (upstream PR #2275),
+    // so flattened extra fields are the documented pass-through: the
+    // rail tag routes, the purchase id binds issuance to Sarah's settled
+    // signet payment.
+    const purchaseId = ctx.createQuoteData.description?.trim() ?? ""
+    if (!purchaseId.startsWith("FP-")) {
+      throw new Error("future mint quotes must reference a farm purchase (FP-…)")
+    }
     const remote = await ctx.wallet.createMintQuote<FutureMintQuoteResponse>("future", {
       amount: amount.amount,
       unit: amount.unit,
       pubkey: keypair.publicKeyHex,
-      // The payment-processor gRPC proto cannot carry the method name yet
-      // (upstream PR #2275), so flattened extra fields are the documented
-      // pass-through: the rail tag routes, the purchase id binds issuance
-      // to Sarah's settled signet payment.
       rail: "future",
       purchase: purchaseId,
     })

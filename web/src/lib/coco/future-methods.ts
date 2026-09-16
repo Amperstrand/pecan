@@ -10,7 +10,7 @@ import type { AmountLike, MeltQuoteBaseResponse, MintQuoteBaseResponse } from "@
  * handover). Proof secrets carry the future tag with the terms URI.
  */
 export interface FutureMintQuoteResponse extends MintQuoteBaseResponse {
-  amount?: number
+  amount?: AmountLike
 }
 
 export interface FutureMeltQuoteResponse extends MeltQuoteBaseResponse {
@@ -23,7 +23,7 @@ declare module "@cashu/coco-core/operations/mint" {
       methodData: Record<string, never>
       createQuoteData: {
         amount: UnitAmount
-        purchaseId: string
+        description?: string
         locked?: boolean
       }
       quoteData: { amount: AmountLike; request: string }

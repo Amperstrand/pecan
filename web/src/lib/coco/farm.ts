@@ -153,12 +153,16 @@ export interface MintedFuture {
  */
 export async function mintFuture(purchase: FarmPurchaseInfo): Promise<MintedFuture> {
   const coco = await getCoco()
+  // The purchase id rides the create call's `description` slot — the
+  // generic quote-create input has no custom-field passthrough, and the
+  // handler remaps it into the flattened `purchase` extra field the
+  // processor binds issuance to.
   const quote = await raceTimeout(
     coco.quotes.mint.create({
       mintUrl: farmMintUrl(),
       method: "future",
       amount: { amount: BigInt(purchase.quantity), unit: purchase.unit },
-      purchaseId: purchase.purchase_id,
+      description: purchase.purchase_id,
       locked: true,
     }),
     20_000,

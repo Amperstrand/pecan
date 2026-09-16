@@ -934,6 +934,7 @@ export function WalletPage() {
       {currency === "farm" ? (
         <FarmPanel />
       ) : (
+      <>
       <Card>
         <CardHeader>
           <CardDescription>Balance</CardDescription>
@@ -1440,7 +1441,7 @@ export function WalletPage() {
           </CardContent>
         </Card>
       )}
-
+      </>
       )}
 
       {DEV_WALLET_TOOLS && (
