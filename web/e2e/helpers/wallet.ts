@@ -115,9 +115,28 @@ export function decodeInvoiceDescription(invoice: string): string {
   return JSON.parse(`"${match[1]}"`) as string
 }
 
-/** Pays from the hub node (well-connected, multiple channels). */
+/**
+ * Pays from the lab nodes, failing over: the hub is usually the best
+ * connected, but its channel to a given mint node can be locally
+ * disabled (seen 2026-09-16: hub→farm mint channels dark, clboss fine).
+ */
+const LIGHTNING_PAYERS = [
+  "cln-hub-signet",
+  "cln-clboss-signet",
+  "cln-nostr-signet",
+  "cln-vls-signet",
+] as const
+
 export function payLightningInvoice(invoice: string): string {
-  return payLightningInvoiceFrom("cln-hub-signet", invoice)
+  const failures: string[] = []
+  for (const node of LIGHTNING_PAYERS) {
+    try {
+      return payLightningInvoiceFrom(node, invoice)
+    } catch (err) {
+      failures.push(`${node}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  throw new Error(`lightning pay failed on all nodes:\n${failures.join("\n")}`)
 }
 
 /**
