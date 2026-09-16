@@ -39,6 +39,7 @@ import {
 import { parseChargeReceipt, refundEuros } from "@/lib/coco/charge-session"
 import { downloadWalletDump, exportWalletDump } from "@/lib/coco/wallet-backup"
 import { BackupCard } from "@/components/wallet/backup-card"
+import { FarmPanel } from "@/components/wallet/farm-panel"
 import { ExpiryCountdown } from "@/components/wallet/expiry-countdown"
 import {
   MultiTabBanner,
@@ -930,6 +931,9 @@ export function WalletPage() {
 
       <MultiTabBanner visible={multiTab} />
 
+      {currency === "farm" ? (
+        <FarmPanel />
+      ) : (
       <Card>
         <CardHeader>
           <CardDescription>Balance</CardDescription>
@@ -1435,6 +1439,8 @@ export function WalletPage() {
             </div>
           </CardContent>
         </Card>
+      )}
+
       )}
 
       {DEV_WALLET_TOOLS && (

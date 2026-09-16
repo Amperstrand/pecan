@@ -1,0 +1,272 @@
+import { Amount, OutputData, blindMessage, bytesToHex, splitAmount } from "@cashu/cashu-ts"
+import {
+  deriveBolt11MintQuoteState,
+  deserializeOutputData,
+  mapProofToCoreProof,
+  serializeOutputData,
+  type Keypair,
+  type MintMethodHandler,
+  type MintQuote,
+  type PendingMintOperation,
+} from "@cashu/coco-core"
+import type {
+  CreateMintQuoteContext,
+  ExecuteContext,
+  FetchRemoteMintQuoteContext,
+  MintExecutionResult,
+  PendingContext,
+  PrepareContext,
+  RecoverExecutingContext,
+  RecoverExecutingResult,
+} from "@cashu/coco-core/operations/mint"
+import type { FutureMintQuoteResponse } from "./future-methods"
+
+interface BranchKeyRing {
+  generateMintQuoteKeyPair(): Promise<Keypair>
+  getMintQuoteKeyPair(publicKeyHex: string): Promise<Keypair | null>
+}
+
+/**
+ * Random hex secret for a tagged output — the inner `secret` of the
+ * NUT-10 object form; the future tag rides in `tags`.
+ */
+function randomSecretHex(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return bytesToHex(bytes)
+}
+
+/**
+ * Build one future-tagged output: the proof secret becomes
+ * `{"secret":"<hex>","tags":[["future","1","<terms uri>"]]}` so the
+ * NUT-32 terms commitment is bound into the mint-signed message.
+ */
+export function taggedOutput(amount: Amount, keysetId: string, termsUri: string): OutputData {
+  const secretBytes = new TextEncoder().encode(
+    JSON.stringify({ secret: randomSecretHex(), tags: [["future", "1", termsUri]] }),
+  )
+  const { B_, r } = blindMessage(secretBytes)
+  return new OutputData({ amount, id: keysetId, B_: B_.toHex(true) }, r, secretBytes)
+}
+
+export class MintFutureHandler implements MintMethodHandler<"future"> {
+  constructor(
+    private readonly keyRing: BranchKeyRing,
+    private readonly termsUriFor: (unit: string) => Promise<string | null>,
+  ) {}
+
+  async createQuote(ctx: CreateMintQuoteContext<"future">): Promise<MintQuote<"future">> {
+    // NUT #20: > **Privacy:** To prevent the mint from being able to link multiple mint quotes, wallets **SHOULD** generate a unique public key for each mint quote request.
+    const keypair = await this.keyRing.generateMintQuoteKeyPair()
+    const { amount, purchaseId } = ctx.createQuoteData
+    const remote = await ctx.wallet.createMintQuote<FutureMintQuoteResponse>("future", {
+      amount: amount.amount,
+      unit: amount.unit,
+      pubkey: keypair.publicKeyHex,
+      // The payment-processor gRPC proto cannot carry the method name yet
+      // (upstream PR #2275), so flattened extra fields are the documented
+      // pass-through: the rail tag routes, the purchase id binds issuance
+      // to Sarah's settled signet payment.
+      rail: "future",
+      purchase: purchaseId,
+    })
+    if (remote.pubkey !== keypair.publicKeyHex) {
+      throw new Error("Mint returned a quote without the requested NUT-20 lock")
+    }
+    return this.toCanonical(ctx.mintUrl, remote, amount.unit)
+  }
+
+  async fetchRemoteQuote(
+    ctx: FetchRemoteMintQuoteContext<"future">,
+  ): Promise<MintQuote<"future">> {
+    const remote = await ctx.mintAdapter.checkMintQuote(
+      ctx.quote.mintUrl,
+      "future",
+      ctx.quote.quoteId,
+    )
+    return this.toCanonical(ctx.quote.mintUrl, remote, ctx.quote.unit)
+  }
+
+  async prepare(
+    ctx: PrepareContext<"future">,
+  ): Promise<PendingMintOperation<"future"> & { method: "future"; methodData: Record<string, never> }> {
+    const quote = ctx.importedQuote
+    if (!quote) {
+      throw new Error(`Mint quote ${ctx.operation.quoteId ?? "(missing)"} was not provided`)
+    }
+    if (ctx.operation.quoteId !== quote.quote) {
+      throw new Error(
+        `Mint quote ${quote.quote} does not match operation quote ${ctx.operation.quoteId}`,
+      )
+    }
+    const quoteUnit = quote.unit || ctx.operation.unit
+    const termsUri = await this.termsUriFor(quoteUnit)
+    if (!termsUri) {
+      throw new Error(`No farm series terms known for ${quoteUnit} — refresh the farm tab`)
+    }
+
+    // Tagged outputs: the future tag (terms URI) must be inside every
+    // minted secret — an untagged secret would make the proofs
+    // unspendable under NUT-32 spend-time validation.
+    const { keys } = await ctx.walletService.getWalletWithActiveKeysetId(
+      ctx.operation.mintUrl,
+      quoteUnit,
+    )
+    const keep = splitAmount(Amount.from(ctx.operation.amount ?? 0), keys.keys).map((a) =>
+      taggedOutput(a, keys.id, termsUri),
+    )
+    if (keep.length === 0) {
+      throw new Error("Failed to create tagged outputs for the future mint")
+    }
+
+    return {
+      ...ctx.operation,
+      quoteId: quote.quote,
+      request: quote.request,
+      expiry: quote.expiry ?? null,
+      ...(quote.pubkey !== undefined ? { pubkey: quote.pubkey } : {}),
+      outputData: serializeOutputData({ keep, send: [] }),
+      state: "pending",
+    }
+  }
+
+  async execute(ctx: ExecuteContext<"future">): Promise<MintExecutionResult> {
+    const outputData = deserializeOutputData(ctx.operation.outputData)
+    const signingOptions = await this.getSigningOptions(ctx.operation.pubkey)
+    // NUT #20: To mint a quote where a public key was provided, the wallet includes a signature on `msg_to_sign` in the `PostMintBolt11Request`.
+    try {
+      const proofs = await ctx.wallet.mintProofs(
+        "future",
+        ctx.operation.amount,
+        { quote: ctx.operation.quoteId },
+        signingOptions,
+        { type: "custom", data: outputData.keep },
+      )
+      return { status: "ISSUED", proofs }
+    } catch (err) {
+      if (err instanceof Error && /20002|already/i.test(err.message)) {
+        return { status: "ALREADY_ISSUED" }
+      }
+      throw err
+    }
+  }
+
+  async recoverExecuting(ctx: RecoverExecutingContext<"future">): Promise<RecoverExecutingResult> {
+    const { mintUrl, quoteId } = ctx.operation
+    let remote: FutureMintQuoteResponse
+    try {
+      remote = await ctx.mintAdapter.checkMintQuote(mintUrl, "future", quoteId)
+    } catch (error) {
+      return {
+        status: "PENDING",
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+
+    if (remote.amount_issued.greaterThan(Amount.zero())) {
+      try {
+        const recovered = await ctx.proofService.recoverProofsFromOutputData(
+          mintUrl,
+          ctx.operation.outputData,
+          {
+            unit: ctx.operation.unit,
+            createdByOperationId: ctx.operation.id,
+          },
+        )
+        if (recovered.length > 0) {
+          return { status: "FINALIZED" }
+        }
+      } catch {
+        // proof recovery failed; stay pending for the next sweep
+      }
+      return { status: "PENDING", error: `Quote ${quoteId} issued remotely; proofs not yet recovered` }
+    }
+
+    if (remote.amount_paid.greaterThan(Amount.zero())) {
+      const signingOptions = await this.getSigningOptions(ctx.operation.pubkey)
+      const outputData = deserializeOutputData(ctx.operation.outputData)
+      try {
+        const proofs = await ctx.wallet.mintProofs(
+          "future",
+          ctx.operation.amount,
+          { quote: quoteId },
+          signingOptions,
+          { type: "custom", data: outputData.keep },
+        )
+        await ctx.proofService.saveProofs(
+          mintUrl,
+          mapProofToCoreProof(mintUrl, "ready", proofs, {
+            unit: ctx.operation.unit,
+            createdByOperationId: ctx.operation.id,
+          }),
+        )
+        return { status: "FINALIZED" }
+      } catch (err) {
+        if (err instanceof Error && /20002|already/i.test(err.message)) {
+          return { status: "PENDING", error: "Quote already issued; awaiting proof recovery" }
+        }
+        return { status: "PENDING", error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+
+    return { status: "PENDING", error: `Quote ${quoteId} not yet paid` }
+  }
+
+  async checkPending(
+    ctx: PendingContext<"future">,
+  ): Promise<{ observedAt: number; quoteSnapshot: FutureMintQuoteResponse }> {
+    const remote = await ctx.mintAdapter.checkMintQuote(
+      ctx.operation.mintUrl,
+      "future",
+      ctx.operation.quoteId,
+    )
+    return {
+      observedAt: Date.now(),
+      quoteSnapshot: remote,
+    }
+  }
+
+  private async getSigningOptions(
+    pubkey: string | undefined,
+  ): Promise<{ privkey: string } | undefined> {
+    // NUT #20: `pubkey` is the compressed secp256k1 public key (33 bytes, hex-encoded) that will be required for signature verification during the minting operation. The mint will only mint ecash after receiving a valid signature from the corresponding private key in the subsequent `PostMintRequest`.
+    if (pubkey === undefined) return undefined
+    const key = await this.keyRing.getMintQuoteKeyPair(pubkey)
+    if (!key) {
+      throw new Error(`Missing NUT-20 lock key for future quote (${pubkey})`)
+    }
+    return { privkey: bytesToHex(key.secretKey) }
+  }
+
+  private toCanonical(
+    mintUrl: string,
+    remote: FutureMintQuoteResponse,
+    unit: string,
+  ): MintQuote<"future"> {
+    const now = Date.now()
+    const amountPaid = Amount.from(remote.amount_paid)
+    const amountIssued = Amount.from(remote.amount_issued)
+    return {
+      mintUrl,
+      method: "future",
+      quoteId: remote.quote,
+      quote: remote.quote,
+      request: remote.request,
+      unit: remote.unit || unit,
+      expiry: remote.expiry,
+      ...(remote.pubkey !== undefined ? { pubkey: remote.pubkey } : {}),
+      reusable: false,
+      amount: Amount.from(remote.amount ?? 0),
+      amountPaid,
+      amountIssued,
+      state: deriveBolt11MintQuoteState(amountPaid, amountIssued),
+      remoteUpdatedAt: remote.updated_at,
+      quoteData: {
+        amount: Amount.from(remote.amount ?? 0),
+        request: remote.request,
+      },
+      createdAt: now,
+      updatedAt: now,
+    } as MintQuote<"future">
+  }
+}

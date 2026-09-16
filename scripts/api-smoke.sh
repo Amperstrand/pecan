@@ -70,6 +70,55 @@ for pair in $PAIRS; do
   check "manifest served" "200 application/manifest+json" "$ct"
 done
 
+# Farm pair extras (NUT-32 spike): capability advert, series oracle,
+# content-addressed terms immutability.
+echo "== farm futures (NUT-32) =="
+if curl -sk -m 10 "$URL/farm/v1/info" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if d.get("nuts", {}).get("32", {}).get("supported") else 1)
+' 2>/dev/null; then
+  echo "  ok   NUT-32 advertised by the farm mint"
+else
+  echo "  FAIL NUT-32 capability missing from /farm/v1/info"
+  fail=$((fail + 1))
+fi
+
+FARM_SERIES=$(curl -sk -m 10 "$URL/farm-console/api/farm")
+if echo "$FARM_SERIES" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+s = d.get("series", [])
+sys.exit(0 if s and all(x.get("unit", "").startswith("future:") for x in s[:3]) else 1)
+' 2>/dev/null; then
+  echo "  ok   farm series served with future units"
+else
+  echo "  FAIL farm overview missing or units are not future:*"
+  fail=$((fail + 1))
+fi
+
+TERMS_URI=$(echo "$FARM_SERIES" | python3 -c \
+  'import json,sys; d=json.load(sys.stdin); print(d["series"][0]["terms_uri"])' 2>/dev/null || echo "")
+if [ -n "$TERMS_URI" ]; then
+  t1=$(curl -sk -m 10 "$TERMS_URI")
+  t2=$(curl -sk -m 10 "$TERMS_URI")
+  if [ -n "$t1" ] && [ "$t1" = "$t2" ]; then
+    echo "  ok   terms blob serves identical bytes (content-addressed)"
+  else
+    echo "  FAIL terms blob unstable at $TERMS_URI"
+    fail=$((fail + 1))
+  fi
+else
+  echo "  FAIL no terms URI in the farm overview"
+  fail=$((fail + 1))
+fi
+
 echo "== cross-pair =="
 
 check "metrics need auth" 401 "$(code "$URL/ops/metrics/eur")"

@@ -24,6 +24,9 @@ import { migrateLegacyMintUrls } from "./wallet-migration"
 export type { DepositMethod }
 import { MeltBranchHandler } from "./melt-branch-handler"
 import { MintBranchHandler } from "./mint-branch-handler"
+import { MeltFutureHandler } from "./melt-future-handler"
+import { MintFutureHandler } from "./mint-future-handler"
+import { termsUriFor } from "./farm"
 
 export interface HistoryRow {
   id?: number
@@ -205,6 +208,15 @@ export function getCoco(): Promise<Manager> {
       coco.registerMintMethod("branch", new MintBranchHandler("branch", coco.keyRingService))
       coco.registerMintMethod("ln", new MintBranchHandler("ln", coco.keyRingService))
       coco.registerMintMethod("btc", new MintBranchHandler("btc", coco.keyRingService))
+      // NUT-32 futures: issuance needs the series terms URI for the
+      // tagged output secrets; redemption rides the teller melt flow.
+      coco.registerMeltMethod("future", new MeltFutureHandler())
+      coco.registerMintMethod(
+        "future",
+        new MintFutureHandler(coco.keyRingService, (unit) =>
+          Promise.resolve(termsUriFor(unit)),
+        ),
+      )
       subscribeWalletLogging(coco)
       for (const currency of Object.keys(CURRENCIES) as Currency[]) {
         // Best-effort: an unreachable external mint (sat) must not brick

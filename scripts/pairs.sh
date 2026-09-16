@@ -22,7 +22,7 @@
 # else (deploy, smoke, backup, reconcile, audit, e2e credentials)
 # picks it up from this table.
 
-PAIRS="eur usd nok"
+PAIRS="eur usd nok farm"
 
 pair_field() { # pair_field <unit> <field> — echoes the value
   case "$1" in
@@ -64,6 +64,19 @@ pair_field() { # pair_field <unit> <field> — echoes the value
         mint_dir)        echo /opt/giftcard-mint-nok ;;
         mint_cfg)        echo mint.toml ;;
         mint_container)  echo giftcard-mint-nok-mintd-1 ;;
+      esac ;;
+    farm)
+      case "$2" in
+        compose)         echo deploy/docker-compose.farm.yml ;;
+        compose_remote)  echo /opt/pecan-farm/docker-compose.yml ;;
+        compose_flags)   echo "-f docker-compose.farm.yml" ;;
+        server_dir)      echo /opt/pecan-farm ;;
+        pw_file)         echo /opt/pecan-farm-config/initial-admin-password.txt ;;
+        pw_env)          echo PECAN_FARM_ADMIN_PASSWORD ;;
+        pecan_container) echo pecan-farm-pecan-1 ;;
+        mint_dir)        echo /opt/giftcard-mint-farm ;;
+        mint_cfg)        echo mint.toml ;;
+        mint_container)  echo giftcard-mint-farm-mintd-1 ;;
       esac ;;
     *)
       echo "pairs.sh: unknown unit '$1'" >&2 ;;
