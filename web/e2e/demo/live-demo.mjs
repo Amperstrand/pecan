@@ -30,7 +30,7 @@ const CHARGER_TAB = {
   atomB: "Charger B",
   atomC: "Charger C",
   atomD: "Charger D",
-  atomV: "Charger V",
+  atomV: "Sim Charger",
 }[DEVICE]
 const PASSWORD = process.env.PECAN_DEMO_ADMIN_PASSWORD ?? ""
 
