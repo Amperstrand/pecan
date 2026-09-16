@@ -53,11 +53,11 @@ export class MintFutureHandler implements MintMethodHandler<"future"> {
   constructor(
     private readonly keyRing: BranchKeyRing,
     private readonly termsUriFor: (unit: string) => Promise<string | null>,
+    private readonly lockKeyFor: (purchaseId: string) => Promise<string | null>,
   ) {}
 
   async createQuote(ctx: CreateMintQuoteContext<"future">): Promise<MintQuote<"future">> {
     // NUT #20: > **Privacy:** To prevent the mint from being able to link multiple mint quotes, wallets **SHOULD** generate a unique public key for each mint quote request.
-    const keypair = await this.keyRing.generateMintQuoteKeyPair()
     const { amount } = ctx.createQuoteData
     // The purchase id arrives on the generic create call's `description`
     // slot (the typed input has no custom-field passthrough) and moves
@@ -70,14 +70,23 @@ export class MintFutureHandler implements MintMethodHandler<"future"> {
     if (!purchaseId.startsWith("FP-")) {
       throw new Error("future mint quotes must reference a farm purchase (FP-…)")
     }
+    // The quote MUST lock with the purchase's own key — the processor
+    // refuses any other (issuance is bound to the paying wallet).
+    const lockPubkey = await this.lockKeyFor(purchaseId)
+    if (!lockPubkey) {
+      throw new Error(`no lock key remembered for ${purchaseId} — re-create the purchase`)
+    }
+    if ((await this.keyRing.getMintQuoteKeyPair(lockPubkey)) === null) {
+      throw new Error(`lock key ${lockPubkey} is not in this wallet's keyring`)
+    }
     const remote = await ctx.wallet.createMintQuote<FutureMintQuoteResponse>("future", {
       amount: amount.amount,
       unit: amount.unit,
-      pubkey: keypair.publicKeyHex,
+      pubkey: lockPubkey,
       rail: "future",
       purchase: purchaseId,
     })
-    if (remote.pubkey !== keypair.publicKeyHex) {
+    if (remote.pubkey !== lockPubkey) {
       throw new Error("Mint returned a quote without the requested NUT-20 lock")
     }
     return this.toCanonical(ctx.mintUrl, remote, amount.unit)

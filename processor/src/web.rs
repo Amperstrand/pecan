@@ -1162,6 +1162,9 @@ struct ApiFarmPurchase {
     date: String,
     unit: String,
     quantity: u64,
+    /// The NUT-20 lock key the issuance must be signed by (a per-purchase
+    /// wallet key, not an identity).
+    pubkey: String,
     price_per_egg_sats: u64,
     total_sats: u64,
     state: String,
@@ -1309,6 +1312,7 @@ async fn api_farm_purchase_quote(
         "series": format!("Farm-{}", purchase.series_date.replace('-', "")),
         "date": purchase.series_date,
         "unit": purchase.unit,
+        "pubkey": purchase.pubkey,
         "quantity": purchase.quantity,
         "price_per_egg_sats": purchase.price_per_egg_sats,
         "total_sats": purchase.total_sats,
@@ -1352,6 +1356,7 @@ fn farm_purchase_api(p: &crate::farm::FarmPurchase) -> ApiFarmPurchase {
         date: p.series_date.clone(),
         unit: p.unit.clone(),
         quantity: p.quantity,
+        pubkey: p.pubkey.clone(),
         price_per_egg_sats: p.price_per_egg_sats,
         total_sats: p.total_sats,
         state: format!("{:?}", p.state).to_lowercase(),

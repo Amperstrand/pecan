@@ -40,6 +40,7 @@ export interface FarmPurchaseInfo {
   price_per_egg_sats: number
   total_sats: number
   state: "open" | "paid" | "authorized" | "minted" | "expired" | "failed"
+  pubkey?: string
   payment_state: string
   capacity_reservation: string
   future_issuance: string
@@ -51,6 +52,7 @@ export interface FarmPurchaseInfo {
 }
 
 export const FARM_TERMS_MAP_KEY = "pecan-farm-terms"
+const PURCHASE_LOCK_MAP_KEY = "pecan-farm-purchase-locks"
 
 function farmConsole(): string {
   const base = consoleUrl("farm")
@@ -129,8 +131,34 @@ export async function createFarmPurchase(
       pubkey: keypair.publicKeyHex,
     }),
   })
-  const purchase = (await r.json()) as FarmPurchaseInfo & { payment: { bolt11: string; payment_hash: string } }
+  const purchase = (await r.json()) as FarmPurchaseInfo & {
+    pubkey: string
+    payment: { bolt11: string; payment_hash: string }
+  }
+  rememberPurchaseLock(purchase.purchase_id, purchase.pubkey)
   return purchase
+}
+
+/** purchase id → its NUT-20 lock key (the wallet-generated key the
+ * purchase bound issuance to — the mint quote must be locked with the
+ * SAME key, or the processor refuses). */
+export function rememberPurchaseLock(purchaseId: string, pubkey: string): void {
+  try {
+    const map = JSON.parse(window.localStorage.getItem(PURCHASE_LOCK_MAP_KEY) ?? "{}") as Record<string, string>
+    map[purchaseId] = pubkey
+    window.localStorage.setItem(PURCHASE_LOCK_MAP_KEY, JSON.stringify(map))
+  } catch {
+    // best-effort
+  }
+}
+
+export function purchaseLockFor(purchaseId: string): string | null {
+  try {
+    const map = JSON.parse(window.localStorage.getItem(PURCHASE_LOCK_MAP_KEY) ?? "{}") as Record<string, string>
+    return map[purchaseId] ?? null
+  } catch {
+    return null
+  }
 }
 
 export async function getFarmPurchase(id: string): Promise<FarmPurchaseInfo> {

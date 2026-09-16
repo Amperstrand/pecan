@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test"
-import { payLightningInvoice, readBalance } from "./helpers/wallet"
+import { readBalance } from "./helpers/wallet"
 
 // ALICE AT THE CHARGE POINT — the movie. One continuous phone-viewport
 // recording of the full lifecycle: a Lightning invoice paid, ecash
@@ -145,12 +145,29 @@ async function cardUntil(
   await page.waitForTimeout(2_200)
 }
 
-// The payer ssh→CLN hop wedges transiently on busy machines; CLN
-// dedupes by payment hash, so re-paying the same bolt11 is idempotent.
+// Alice's payment settles ON THE MINT'S OWN NODE (self-pay): the rail's
+// invoices are issued by cln-swap-signet and we control it, so the node
+// settles its own invoice directly — no channels, no routing, no
+// balance choreography (the 2026-09-16 outage: drained channels +
+// misleading CLN path errors — lightning-playground#243). CLN dedupes
+// by payment hash, so re-paying the same bolt11 is idempotent.
+function selfPayInvoice(invoice: string): string {
+  const { execSync } = require("node:child_process") as typeof import("node:child_process")
+  const out = execSync(
+    `ssh root@46.224.104.12 "docker exec cln-swap-signet lightning-cli --network=signet pay ${invoice}"`,
+    { timeout: 90_000, stdio: ["ignore", "pipe", "pipe"] },
+  )
+    .toString()
+    .replace(/^#.*$/gm, "")
+  const match = out.match(/"payment_preimage":\s*"([0-9a-f]+)"/)
+  if (!match) throw new Error(`self-pay did not complete: ${out.slice(0, 300)}`)
+  return match[1]
+}
+
 async function payWithRetry(invoice: string, attempts = 5, gapMs = 8_000) {
   for (let attempt = 1; ; attempt++) {
     try {
-      return payLightningInvoice(invoice)
+      return selfPayInvoice(invoice)
     } catch (err) {
       if (attempt >= attempts) throw err
       await new Promise(resolve => setTimeout(resolve, gapMs))

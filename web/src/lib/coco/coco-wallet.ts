@@ -26,7 +26,7 @@ import { MeltBranchHandler } from "./melt-branch-handler"
 import { MintBranchHandler } from "./mint-branch-handler"
 import { MeltFutureHandler } from "./melt-future-handler"
 import { MintFutureHandler } from "./mint-future-handler"
-import { termsUriFor } from "./farm"
+import { purchaseLockFor, termsUriFor } from "./farm"
 
 export interface HistoryRow {
   id?: number
@@ -213,8 +213,10 @@ export function getCoco(): Promise<Manager> {
       coco.registerMeltMethod("future", new MeltFutureHandler())
       coco.registerMintMethod(
         "future",
-        new MintFutureHandler(coco.keyRingService, (unit) =>
-          Promise.resolve(termsUriFor(unit)),
+        new MintFutureHandler(
+          coco.keyRingService,
+          (unit) => Promise.resolve(termsUriFor(unit)),
+          (purchaseId) => Promise.resolve(purchaseLockFor(purchaseId)),
         ),
       )
       subscribeWalletLogging(coco)
