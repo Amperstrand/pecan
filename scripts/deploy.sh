@@ -59,6 +59,18 @@ for u in $PAIRS; do
   mints="$mints $(pair_field "$u" mint_container)"
 done
 ssh "$SERVER" "docker restart $mints >/dev/null 2>&1 && echo 'mints restarted' || echo 'WARN: mint restart failed'"
+# A retagged image (mintd fork rebuilds) is not picked up by plain restart;
+# recreate any container not running its tag's current image.
+ssh "$SERVER" 'for c in $(docker ps --format "{{.Names}}"); do
+  img=$(docker inspect "$c" --format "{{.Image}}")
+  tag=$(docker inspect "$c" --format "{{.Config.Image}}")
+  cur=$(docker images --no-trunc --format "{{.ID}}" "$tag" 2>/dev/null | head -1)
+  if [ -n "$cur" ] && [ "$img" != "$cur" ]; then
+    echo "$c on stale image, recreating"
+    dir=$(docker inspect "$c" --format "{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}")
+    if [ -n "$dir" ]; then (cd "$dir" && docker compose up -d --force-recreate >/dev/null 2>&1); fi
+  fi
+done' 
 
 # inr2 disk is tight — drop the scrambled legacy tags once nothing runs
 # on them (the recreate above moved every pair onto $IMAGE).
