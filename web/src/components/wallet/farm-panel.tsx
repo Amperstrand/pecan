@@ -323,12 +323,6 @@ export function FarmPanel() {
                 )}
               </div>
             ))}
-            <div className="grid gap-2">
-              <TextareaLike value={tokenIn} onChange={setTokenIn} placeholder="paste a token to receive Bob's eggs" />
-              <Button variant="outline" size="sm" disabled={busy} onClick={() => void doReceive()}>
-                Receive token
-              </Button>
-            </div>
             {tokenOut && (
               <div className="grid gap-1">
                 <span className="text-xs text-muted-foreground">
@@ -343,6 +337,15 @@ export function FarmPanel() {
             )}
           </CardContent>
         )}
+      </Card>
+
+      <Card>
+        <CardContent className="pt-6 grid gap-2">
+          <TextareaLike value={tokenIn} onChange={setTokenIn} placeholder="paste a token to receive eggs" />
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => void doReceive()}>
+            Receive token
+          </Button>
+        </CardContent>
       </Card>
 
       <Card>
