@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Off-box encrypted backup of BOTH giftcard mints (EUR + USD) on inr2:
-# docker-compose.yml, .env (holds CDK_MINTD_MNEMONIC), mint.toml, and a
-# consistent sqlite snapshot (live-service safe, .backup API) per mint.
+# Off-box encrypted backup of EVERY giftcard mint on inr2 (EUR, USD,
+# NOK — the pair list lives in scripts/pairs.sh): docker-compose.yml,
+# .env (holds CDK_MINTD_MNEMONIC), mint.toml, and a consistent sqlite
+# snapshot (live-service safe, .backup API) per mint.
 #
 #   scripts/mint-backup.sh            # archive to ~/backups/pecan-mint/
 #
@@ -21,6 +22,8 @@
 #   openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
 #     -in ~/backups/pecan-mint/<archive> -pass pass:'<passphrase>' | tar tz
 set -euo pipefail
+cd "$(dirname "$0")/.."
+. scripts/pairs.sh
 INR2=root@46.224.104.12
 STAMP=$(date +%Y%m%d)
 ARCHIVE=pecan-mint-backup-$STAMP.tar.gz.enc
@@ -36,22 +39,24 @@ fi
 [ -f "$DEST/$ARCHIVE" ] && { echo "refusing to overwrite $DEST/$ARCHIVE"; exit 1; }
 
 # Stage + snapshot on inr2 via a script file — nested SSH quoting has
-# corrupted commands here before (same lesson as rails-audit.sh).
-cat > /tmp/mint-stage.sh <<'EOF'
-set -euo pipefail
-STAGE=/tmp/mint-backup-stage
-rm -rf $STAGE && mkdir -p $STAGE/eur $STAGE/usd
-for side in eur:giftcard-mint usd:giftcard-mint-usd; do
-  name=${side%%:*}
-  dir=/opt/${side#*:}
-  [ "$name" = eur ] && cfg=$dir/mint.toml || cfg=$dir/data/mint.toml
-  cp $dir/docker-compose.yml $cfg $STAGE/$name/
-  [ -f $dir/.env ] && cp $dir/.env $STAGE/$name/
-  sqlite3 $dir/data/cdk-mintd.sqlite ".backup '$STAGE/$name/cdk-mintd.sqlite'"
-done
-tar czf /tmp/mint-backup-tmp.tar.gz -C /tmp mint-backup-stage
-chmod 600 /tmp/mint-backup-tmp.tar.gz
-EOF
+# corrupted commands here before (same lesson as rails-audit.sh). The
+# body is emitted per-pair from the manifest, so the remote script is
+# explicit paths only.
+{
+  echo 'set -euo pipefail'
+  echo 'STAGE=/tmp/mint-backup-stage'
+  echo 'rm -rf $STAGE && mkdir -p $STAGE'
+  for u in $PAIRS; do
+    d=$(pair_field "$u" mint_dir)
+    c=$(pair_field "$u" mint_cfg)
+    echo "mkdir -p \$STAGE/$u"
+    echo "cp $d/docker-compose.yml $d/$c \$STAGE/$u/"
+    echo "[ -f $d/.env ] && cp $d/.env \$STAGE/$u/"
+    echo "sqlite3 $d/data/cdk-mintd.sqlite \".backup '\$STAGE/$u/cdk-mintd.sqlite'\""
+  done
+  echo 'tar czf /tmp/mint-backup-tmp.tar.gz -C /tmp mint-backup-stage'
+  echo 'chmod 600 /tmp/mint-backup-tmp.tar.gz'
+} > /tmp/mint-stage.sh
 scp -q /tmp/mint-stage.sh $INR2:/tmp/mint-stage.sh
 ssh $INR2 'bash /tmp/mint-stage.sh' </dev/null
 
@@ -64,8 +69,11 @@ ssh $INR2 "rm -f /tmp/$ARCHIVE" </dev/null
 chmod 600 "$DEST/$ARCHIVE"
 
 # Round-trip: prove the fetched archive decrypts with the Keychain passphrase.
+# Three entries per pair minimum (compose, mint.toml, sqlite) — a missing
+# pair fails here, not at restore time.
 entries=$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in "$DEST/$ARCHIVE" -pass stdin <<< "$PASS" | tar tz | grep -c .)
-[ "$entries" -ge 8 ] || { echo "decrypt verification FAILED ($entries entries)"; exit 1; }
+min_entries=$(( $(printf '%s\n' $PAIRS | wc -w) * 3 ))
+[ "$entries" -ge "$min_entries" ] || { echo "decrypt verification FAILED ($entries entries, need >= $min_entries — a pair is missing)"; exit 1; }
 
 echo "ok: $DEST/$ARCHIVE ($entries entries, decrypt-verified)"
 echo "reminder: passphrase is in the macOS Keychain ($KEYCHAIN_SERVICE) — also record it physically."
