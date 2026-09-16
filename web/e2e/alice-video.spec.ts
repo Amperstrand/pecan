@@ -27,7 +27,7 @@ test.skip(!process.env.PECAN_VIDEO, "movie run only (run scripts/movie.sh)")
 const WALLET = "https://giftcard.cashu.exchange/eur-console/wallet"
 const DEEP_LINK = `${WALLET}?charger=atomV`
 const DEPOSIT_EUR = 50
-const STOP_AT_KWS = 15
+const STOP_AT_KWS = 22
 
 // ---------------------------------------------------------------------------
 // movie chrome: overlay cards + the companion strip
@@ -72,6 +72,30 @@ const CHROME_CSS = `
   #companion .bolt { display: inline-block; margin-right: 6px; }
   #companion.live .bolt { animation: movie-bolt 1.1s ease-in-out infinite; }
   @keyframes movie-bolt { 0%,100%{opacity:1} 50%{opacity:.25} }
+  #pole-panel {
+    position: fixed; top: 64px; right: 10px; width: 105px; height: 208px; z-index: 2147483644;
+    pointer-events: none; box-sizing: border-box; padding: 10px 8px;
+    background: linear-gradient(180deg, #060a12, #03050a);
+    border: 3px solid #38bdf8; border-radius: 10px;
+    color: #7ef0c1; font-family: "IBM Plex Mono", ui-monospace, monospace;
+    text-align: center; overflow: hidden;
+    opacity: 0; transform: translateY(-14px); transition: opacity .5s ease, transform .5s ease;
+    box-shadow: 0 6px 18px rgba(3,10,20,.6);
+  }
+  #pole-panel.show { opacity: 1; transform: translateY(0); }
+  #pole-panel .scanlines {
+    position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(126,240,193,.05) 0 1px, transparent 1px 3px);
+  }
+  #pole-panel .fw { font-size: 8px; letter-spacing: .12em; color: #4e6a5e; }
+  #pole-panel .led { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    background: #233; margin: 6px 0 2px; }
+  #pole-panel.on .led { background: #34d399; box-shadow: 0 0 8px #34d399; animation: pole-bolt 1.1s infinite; }
+  #pole-panel .kw { font-size: 26px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  #pole-panel .kw small { font-size: 10px; }
+  #pole-panel .kws { font-size: 13px; color: #9fb0c3; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  #pole-panel .relay { margin-top: 7px; font-size: 9px; letter-spacing: .18em; color: #34d399; }
+  @keyframes pole-bolt { 50% { opacity: .3; } }
   #movie-fade { position: fixed; inset: 0; z-index: 2147483647; background: #000;
     opacity: 0; transition: opacity 1.4s ease; pointer-events: none; }
 `
@@ -87,9 +111,17 @@ async function installChrome(page: Page) {
   })
 }
 
+// Human-paced holds (2026-09-17 review: transitions were too fast to
+// read): ~3 words/second plus entry/exit slack, floor 3.2s. QR cards
+// pass explicit holds — the visual carries them.
+function holdFor(...texts: (string | undefined)[]): number {
+  const words = texts.join(" ").split(/\s+/).filter(Boolean).length
+  return Math.max(3_200, 1_400 + words * 450)
+}
+
 async function card(
   page: Page,
-  opts: { title?: string; body?: string; qrDataUrl?: string; holdMs: number; brand?: boolean },
+  opts: { title?: string; body?: string; qrDataUrl?: string; holdMs?: number; brand?: boolean },
 ) {
   await page.evaluate(
     ({ title, body, qrDataUrl, brand }) => {
@@ -109,7 +141,7 @@ async function card(
     },
     { title: opts.title, body: opts.body, qrDataUrl: opts.qrDataUrl, brand: opts.brand },
   )
-  await page.waitForTimeout(opts.holdMs)
+  await page.waitForTimeout(opts.holdMs ?? holdFor(opts.title, opts.body))
 }
 
 // A card that stays up until the predicate passes — no dead air while
@@ -335,6 +367,70 @@ async function mountCompanion(page: Page) {
   }, meterCreds)
 }
 
+// The charger's FIRMWARE DISPLAY as a corner bubble (2026-09-17 design
+// pass, from PiP best-practice research): 25% of frame width — the
+// floor for readability — top-right (the calm region while the charging
+// counter owns the center), pointer-transparent, black-glass firmware
+// face driven by the SAME meter topic as the strip. It BOOTS when the
+// session starts (arrival draws the eye at the narrated moment) and
+// fades after completion — the strip persists as the compact record.
+async function mountPolePanel(page: Page) {
+  const creds = {
+    url:
+      process.env.PECAN_EV_MQTT_URL?.replace("mqtts://", "wss://").replace(":8883", ":8884") +
+      "/mqtt",
+    user: process.env.PECAN_EV_MQTT_USER,
+    pass: process.env.PECAN_EV_MQTT_PASS,
+  }
+  if (!creds.url || !creds.user) return
+  await page
+    .addScriptTag({ url: "https://unpkg.com/mqtt@5/dist/mqtt.min.js" })
+    .catch(() => undefined)
+  await page.evaluate(creds => {
+    document.getElementById("pole-panel")?.remove()
+    const el = document.createElement("div")
+    el.id = "pole-panel"
+    el.innerHTML = `
+      <div class="fw">atomV · FW 1.0</div>
+      <span class="led"></span>
+      <div class="kw"><span id="pp-kw">—</span><small> kW</small></div>
+      <div class="kws"><span id="pp-kws">0</span> kW·s</div>
+      <div class="relay" id="pp-relay">RELAY OFF</div>
+      <div class="scanlines"></div>`
+    document.body.appendChild(el)
+    requestAnimationFrame(() => el.classList.add("show"))
+    const kw = el.querySelector("#pp-kw") as HTMLElement
+    const kws = el.querySelector("#pp-kws") as HTMLElement
+    const relay = el.querySelector("#pp-relay") as HTMLElement
+    let idleTimer = 0
+    const cli = (window as unknown as { mqtt: { connect: (u: string, o: object) => {
+      on: (ev: string, cb: (...a: unknown[]) => void) => void
+      subscribe: (t: string) => void
+    } } }).mqtt.connect(creds.url, {
+      username: creds.user,
+      password: creds.pass,
+      reconnectPeriod: 2000,
+    })
+    cli.on("connect", () => cli.subscribe("charger/atomV/meter"))
+    cli.on("message", (_t: unknown, payload: Uint8Array) => {
+      try {
+        const m = JSON.parse(new TextDecoder().decode(payload))
+        el.classList.toggle("on", m.kw !== null)
+        kw.textContent = m.kw === null ? "—" : String(m.kw)
+        kws.textContent = String(m.kws ?? 0)
+        relay.textContent = m.kw === null ? "RELAY OFF" : "RELAY ON"
+        if (m.kw === null) {
+          window.clearTimeout(idleTimer)
+          idleTimer = window.setTimeout(() => el.classList.remove("show"), 3_000)
+        } else {
+          window.clearTimeout(idleTimer)
+          el.classList.add("show")
+        }
+      } catch {}
+    })
+  }, creds)
+}
+
 async function hideCompanion(page: Page) {
   await page.evaluate(() => document.getElementById("companion")?.remove())
 }
@@ -359,12 +455,12 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await installChrome(page)
 
   // SCENE 1 — Meet Alice
-  await card(page, { title: "Meet Alice.", holdMs: 3_500 })
-  await card(page, { title: "Alice drives an electric car.", holdMs: 3_000 })
+  await card(page, { title: "Meet Alice.", holdMs: undefined })
+  await card(page, { title: "Alice drives an electric car.", holdMs: undefined })
   await card(page, {
     title: "Her phone has an app for every charging network.",
     body: "eChargeGo · Voltly · PowerPort · kWh! · Chargr · eFlow",
-    holdMs: 4_500,
+    holdMs: undefined,
   })
   await card(page, {
     title: "Every few months: re-enter the credit card.",
@@ -374,7 +470,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await card(page, {
     title: "Last spring, one network leaked its users' charging history.",
     body: "Home addresses, habits, overnight stops — onto the darknet.",
-    holdMs: 5_000,
+    holdMs: undefined,
   })
   await card(page, {
     title: "Alice just wants to plug in, pay, and drive.",
@@ -396,7 +492,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     title: "No screen to trust. No card reader.",
     body: "Just a QR that opens the wallet.",
     qrDataUrl: qr,
-    holdMs: 5_000,
+    holdMs: 5_500,
     brand: false,
   })
   await hideCard(page)
@@ -449,13 +545,13 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await card(page, {
     title: `€${DEPOSIT_EUR}, minted as ecash.`,
     body: "No name. No card. No account attached.",
-    holdMs: 4_500,
+    holdMs: undefined,
   })
   await hideCard(page)
   await page.waitForTimeout(1_000)
 
   // SCENE 5 — scan the charge point: the QR is the deep link
-  await card(page, { title: "Back at the pole, Alice scans the QR…", holdMs: 3_000 })
+  await card(page, { title: "Back at the pole, Alice scans the QR…", holdMs: undefined })
   await page.goto(DEEP_LINK)
   await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({ timeout: 30_000 })
   await installChrome(page)
@@ -467,7 +563,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await card(page, {
     title: "The QR is just a link.",
     body: "It hands the wallet the charge point. Nothing else leaves Alice's phone.",
-    holdMs: 4_500,
+    holdMs: undefined,
   })
   await hideCard(page)
   await page.waitForTimeout(1_000)
@@ -485,6 +581,8 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await page.getByPlaceholder("1.00").fill(String(DEPOSIT_EUR))
   await page.getByRole("button", { name: "Start charging" }).click()
   await expect(page.getByText("Charging at Sim Charger")).toBeVisible({ timeout: 60_000 })
+  await mountPolePanel(page)
+  await page.waitForTimeout(2_200)
   await still(page, "06-charging-early")
   const progress = page.getByRole("progressbar")
   // Tight poll: the meter climbs ~6 units/second, the cap is 50 — stop
@@ -532,17 +630,17 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await card(page, {
     title: `Alice paid for ${delivered} kilowatt-seconds.`,
     body: `The other €${DEPOSIT_EUR - delivered} came back — automatically.`,
-    holdMs: 5_500,
+    holdMs: undefined,
   })
   await card(page, {
     title: "No app. No card on file. No charging history.",
     body: "Ecash is cash.",
-    holdMs: 5_000,
+    holdMs: undefined,
   })
   await card(page, {
     title: "Pay for energy the way you pay for anything else.",
     body: "Lightning in. Kilowatt-seconds out.",
-    holdMs: 5_000,
+    holdMs: undefined,
   })
   await hideCompanion(page)
   await card(page, {
@@ -578,17 +676,17 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({ timeout: 30_000 })
   await installChrome(page)
 
-  await card(page, { title: "Meet Alice.", holdMs: 2_200 })
+  await card(page, { title: "Meet Alice.", holdMs: undefined })
   await card(page, {
     title: "Six charger apps. One leaked her history.",
     body: "Alice just wants to plug in and pay — over Lightning.",
-    holdMs: 3_800,
+    holdMs: undefined,
   })
 
   const qr = await import("qrcode").then(m =>
     m.default.toDataURL(DEEP_LINK, { margin: 1, width: 420 }),
   )
-  await card(page, { title: "One QR at the pole.", qrDataUrl: qr, holdMs: 3_200, brand: false })
+  await card(page, { title: "One QR at the pole.", qrDataUrl: qr, holdMs: 5_000, brand: false })
   await hideCard(page)
   await mountCompanion(page)
 
@@ -624,6 +722,7 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
   await page.getByPlaceholder("1.00").fill(String(DEPOSIT_EUR))
   await page.getByRole("button", { name: "Start charging" }).click()
   await expect(page.getByText("Charging at Sim Charger")).toBeVisible({ timeout: 60_000 })
+  await mountPolePanel(page)
   const progress = page.getByRole("progressbar")
   await expect
     .poll(async () => Number(await progress.getAttribute("aria-valuenow")), {
@@ -645,13 +744,13 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
   await card(page, {
     title: `\${delivered} kW·s used. €${DEPOSIT_EUR - delivered} came back.`,
     body: "No app. No card. No history. Ecash is cash.",
-    holdMs: 5_000,
+    holdMs: undefined,
   })
   await hideCompanion(page)
   await card(page, {
     title: "pecan · Cashu · Lightning",
     body: "giftcard.cashu.exchange",
-    holdMs: 4_500,
+    holdMs: undefined,
   })
   await fadeOut(page)
   await page.waitForTimeout(1_500)
