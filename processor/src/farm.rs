@@ -686,13 +686,27 @@ impl FarmRail {
     fn spawn_bootstrap(&self) {
         let state = self.state.clone();
         tokio::spawn(async move {
+            // Boot-order chicken-and-egg: mintd waits for this processor's
+            // gRPC before serving HTTP, while series registration needs
+            // mintd's admin routes — so failures retry fast (the mint is
+            // probably mid-boot) until one pass succeeds, then relax to
+            // the horizon-refresh cadence.
+            let mut healthy = false;
             loop {
+                let mut pass_ok = true;
                 for date in upcoming_dates(state.config().horizon_days) {
                     if let Err(e) = state.ensure_series(&date).await {
                         tracing::warn!("farm series bootstrap {date}: {e:#}");
+                        pass_ok = false;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(BOOTSTRAP_INTERVAL_SECS)).await;
+                healthy = healthy || pass_ok;
+                let wait = if healthy {
+                    BOOTSTRAP_INTERVAL_SECS
+                } else {
+                    15
+                };
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             }
         });
     }
