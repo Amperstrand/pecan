@@ -143,17 +143,22 @@ test.describe("farm futures (NUT-32 spike)", () => {
 
     // Proofs really exist, carry the unit, the exactly-one future tag,
     // and the series' exact terms URI.
-    const proofs = await readFutureProofs(page)
-    const mine = proofs.filter((p) => p.unit === series.unit && p.state !== "spent")
-    if (mine.reduce((sum, p) => sum + p.amount, 0) !== 5) {
-      console.log(
-        "FUTURE ROWS:",
-        JSON.stringify(
-          proofs.map((p) => ({ unit: p.unit, amount: p.amount, state: p.state, secretHead: p.secret.slice(0, 40) })),
-        ),
+    // Proof rows can land a beat after the balance projection — the
+    // background watcher drives the op to finalized and saves the proofs.
+    await expect
+      .poll(
+        async () => {
+          const mine = (await readFutureProofs(page)).filter(
+            (p) => p.unit === series.unit && p.state !== "spent",
+          )
+          return mine.reduce((sum, p) => sum + p.amount, 0)
+        },
+        { timeout: 45_000 },
       )
-    }
-    expect(mine.reduce((sum, p) => sum + p.amount, 0)).toBe(5)
+      .toBe(5)
+    const mine = (await readFutureProofs(page)).filter(
+      (p) => p.unit === series.unit && p.state !== "spent",
+    )
     for (const proof of mine) {
       const tag = futureTag(proof.secret)
       expect(tag, `proof secret must carry exactly one future tag: ${proof.secret.slice(0, 80)}`).not.toBeNull()

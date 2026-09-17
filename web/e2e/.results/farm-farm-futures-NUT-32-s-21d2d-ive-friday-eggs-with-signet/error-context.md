@@ -12,14 +12,10 @@
 # Error details
 
 ```
-Test timeout of 60000ms exceeded while running "beforeEach" hook.
-```
+Error: expect(received).toBe(expected) // Object.is equality
 
-```
-Error: locator.click: Test timeout of 60000ms exceeded.
-Call log:
-  - waiting for getByRole('tab', { name: 'FARM' })
-
+Expected: 5
+Received: 0
 ```
 
 # Page snapshot
@@ -30,147 +26,60 @@ Call log:
     - generic [ref=e4]:
       - heading "Wallet" [level=1] [ref=e8]
       - tablist "Currency" [ref=e9]:
-        - tab "EUR" [selected] [ref=e10]
+        - tab "EUR" [ref=e10]
         - tab "NOK" [ref=e11]
         - tab "USD" [ref=e12]
         - tab "SATS" [ref=e13]
-    - generic [ref=e15]:
-      - generic [ref=e16]: Balance
-      - generic [ref=e17]: 0.00 €
-    - generic [ref=e18]:
-      - generic [ref=e19]:
-        - generic [ref=e20]: Deposit
-        - generic [ref=e23]: Mint ecash at the counter (teller) or over lightning.
+        - tab "FARM" [selected] [ref=e14]
+    - generic [ref=e16]:
+      - generic [ref=e17]: YOU OWN
+      - generic [ref=e18]: 0 egg claims
+    - generic [ref=e20]:
+      - textbox "paste a token to receive eggs" [ref=e21]
+      - button "Receive token" [ref=e22] [cursor=pointer]
+    - generic [ref=e23]:
       - generic [ref=e24]:
-        - generic [ref=e25]:
-          - button "Teller" [ref=e26]
-          - button "Lightning" [ref=e27]
-          - button "On-chain" [ref=e28]
+        - generic [ref=e25]: FARM
+        - generic [ref=e26]:
+          - combobox "production day" [ref=e27]:
+            - option "Thursday, Sep 17 · 5 of 10 free · matured"
+            - option "Friday, Sep 18 · 0 of 10 free"
+            - option "Saturday, Sep 19 · 5 of 10 free" [selected]
+            - option "Sunday, Sep 20 · 0 of 10 free"
+            - option "Monday, Sep 21 · 0 of 10 free"
+            - option "Tuesday, Sep 22 · 8 of 10 free"
+            - option "Wednesday, Sep 23 · 10 of 10 free"
+            - option "Thursday, Sep 24 · 10 of 10 free"
+            - option "Friday, Sep 25 · 10 of 10 free"
+            - option "Saturday, Sep 26 · 10 of 10 free"
+          - text: · 1000 signet sats / egg
+      - generic [ref=e28]:
         - generic [ref=e29]:
-          - generic [ref=e30]: Amount (€)
-          - spinbutton "Amount (€)" [ref=e31]
-        - button "Create deposit quote" [disabled]
-    - generic [ref=e32]:
-      - generic [ref=e33]:
-        - generic [ref=e34]: Withdraw
-        - generic [ref=e37]: Send ecash to a recipient via the teller.
-      - generic [ref=e38]:
-        - tablist "Withdraw rail" [ref=e39]:
-          - tab "Teller" [selected] [ref=e40]
-          - tab "SEPA" [ref=e41]
-          - tab "Instant" [ref=e42]
-          - tab "Swish" [ref=e43]
-          - tab "MobilePay" [ref=e44]
-          - tab "iDEAL" [ref=e45]
-          - tab "Bizum" [ref=e46]
-          - tab "Sim" [ref=e47]
-          - tab "Charger A" [ref=e48]
-          - tab "Charger B" [ref=e49]
-          - tab "Charger C" [ref=e50]
-          - tab "Charger D" [ref=e51]
-          - tab "Sim Charger" [ref=e52]
-        - generic [ref=e53]:
-          - generic [ref=e54]: Destination
-          - textbox "Destination" [ref=e55]:
-            - /placeholder: Phone or reference
-        - generic [ref=e56]:
-          - generic [ref=e57]: Amount (€)
-          - spinbutton "Amount (€)" [ref=e58]
-        - button "Send" [disabled]
-    - generic [ref=e59]:
-      - generic [ref=e60]:
-        - generic [ref=e61]: Backup
-        - generic [ref=e62]: Your money lives only in this browser. Download a fresh backup after every transaction — a backup goes stale the moment you spend.
-      - generic [ref=e63]:
-        - button "Download backup (JSON)" [ref=e64] [cursor=pointer]
-        - button "Restore from backup…" [ref=e65] [cursor=pointer]
-    - generic [ref=e66]:
-      - generic [ref=e67]:
-        - generic [ref=e68]: Developer Tools
-        - generic [ref=e69]: Signet/test only. These actions are irreversible.
-      - generic [ref=e70]:
-        - button "Export wallet data (JSON)" [ref=e71] [cursor=pointer]
-        - button "Force clear wallet (downloads backup first)" [ref=e72] [cursor=pointer]
-    - paragraph [ref=e73]:
-      - text: Self-custodied — Coco 2 · keys stay in your browser.
-      - link "Operator console" [ref=e74] [cursor=pointer]:
-        - /url: https://giftcard.cashu.exchange/eur-console/
-      - text: ·
-      - link "Teller" [ref=e75] [cursor=pointer]:
-        - /url: https://giftcard.cashu.exchange/eur-console/teller
+          - generic [ref=e30]:
+            - generic [ref=e31]: Quantity
+            - textbox "egg quantity" [ref=e32]: "5"
+          - generic [ref=e33]:
+            - generic [ref=e34]: 5 eggs
+            - generic [ref=e35]: 5000 signet sats
+            - generic [ref=e36]: "Production: Saturday, Sep 19Available for pickup: Sat, 19 Sep 2026 16:00:00 UTC"
+        - generic [ref=e37]: Payment received — minting 5 egg claims…
+        - button "verify terms" [ref=e41] [cursor=pointer]
+        - group [ref=e42]:
+          - generic "all series (10)" [ref=e43] [cursor=pointer]
+    - generic [ref=e44]:
+      - generic [ref=e45]:
+        - generic [ref=e46]: Developer Tools
+        - generic [ref=e47]: Signet/test only. These actions are irreversible.
+      - generic [ref=e48]:
+        - button "Export wallet data (JSON)" [ref=e49] [cursor=pointer]
+        - button "Force clear wallet (downloads backup first)" [ref=e50] [cursor=pointer]
+    - paragraph [ref=e51]: Self-custodied — Coco 2 · keys stay in your browser.
   - region "Notifications alt+T"
 ```
 
 # Test source
 
 ```ts
-  1   | import { test, expect, type Page } from "@playwright/test"
-  2   | import {
-  3   |   apiLogin,
-  4   |   matchAndSettle,
-  5   |   payLightningInvoice,
-  6   |   rebalanceSwapChannels,
-  7   | } from "./helpers/wallet"
-  8   | 
-  9   | // Sarah's story (NUT-32 egg-futures spike): buy five next-Friday egg
-  10  | // futures with 5000 real signet sats, receive 5 tagged bearer claims,
-  11  | // send 2 to Bob, redeem at the farm counter — the whole physical-futures
-  12  | // loop against the deployed farm pair.
-  13  | 
-  14  | const FARM_BASE = "/farm-console"
-  15  | const FARM_ADMIN_PASSWORD = process.env.PECAN_FARM_ADMIN_PASSWORD ?? ""
-  16  | 
-  17  | interface FarmSeries {
-  18  |   date: string
-  19  |   unit: string
-  20  |   maturity: number
-  21  |   capacity: number
-  22  |   issued: number
-  23  |   redeemed: number
-  24  |   available: number
-  25  |   price_sats: number
-  26  |   terms_uri: string
-  27  |   terms_sha256: string
-  28  |   matured: boolean
-  29  | }
-  30  | 
-  31  | async function farmOverview(page: Page): Promise<{ series: FarmSeries[] }> {
-  32  |   const r = await page.request.get(`${FARM_BASE}/api/farm`)
-  33  |   expect(r.status()).toBe(200)
-  34  |   return await r.json()
-  35  | }
-  36  | 
-  37  | async function firstOpenSeries(page: Page): Promise<FarmSeries> {
-  38  |   const overview = await farmOverview(page)
-  39  |   const open = overview.series.filter((s) => !s.matured && s.available >= 5)
-  40  |   const series = open[0]
-  41  |   if (!series) {
-  42  |     test.skip(
-  43  |       true,
-  44  |       "no series with 5+ free eggs (earlier runs consumed the horizon — raise FARM_HORIZON_DAYS or wait for the claim-window sweep)",
-  45  |     )
-  46  |   }
-  47  |   return series
-  48  | }
-  49  | 
-  50  | async function openFarmWallet(page: Page): Promise<void> {
-  51  |   await page.goto("/wallet")
-  52  |   await page
-  53  |     .getByRole("tab", { name: "FARM" })
-> 54  |     .click()
-      |      ^ Error: locator.click: Test timeout of 60000ms exceeded.
-  55  |   await expect(page.getByLabel("production day")).toBeVisible({ timeout: 30_000 })
-  56  | }
-  57  | 
-  58  | /** Read the future-unit proof rows straight out of the wallet's IDB —
-  59  |  * the independent "proofs really exist and carry the NUT-32 tag" check. */
-  60  | async function readFutureProofs(page: Page): Promise<
-  61  |   Array<{ unit: string; amount: number; secret: string; state: string }>
-  62  | > {
-  63  |   return page.evaluate(async () => {
-  64  |     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-  65  |       const req = indexedDB.open("giftcard-coco-wallet")
-  66  |       req.onsuccess = () => resolve(req.result)
   67  |       req.onerror = () => reject(req.error)
   68  |     })
   69  |     const rows = await new Promise<Array<Record<string, unknown>>>((resolve) => {
@@ -253,10 +162,124 @@ Call log:
   146 |     const proofs = await readFutureProofs(page)
   147 |     const mine = proofs.filter((p) => p.unit === series.unit && p.state !== "spent")
   148 |     if (mine.reduce((sum, p) => sum + p.amount, 0) !== 5) {
-  149 |       console.log(
-  150 |         "FUTURE ROWS:",
-  151 |         JSON.stringify(
-  152 |           proofs.map((p) => ({ unit: p.unit, amount: p.amount, state: p.state, secretHead: p.secret.slice(0, 40) })),
-  153 |         ),
-  154 |       )
+  149 |       const all = await page.evaluate(async () => {
+  150 |         const db = await new Promise((resolve, reject) => {
+  151 |           const req = indexedDB.open("giftcard-coco-wallet")
+  152 |           req.onsuccess = () => resolve(req.result)
+  153 |           req.onerror = () => reject(req.error)
+  154 |         })
+  155 |         return await new Promise((resolve) => {
+  156 |           const tx = db.transaction("coco_cashu_proofs", "readonly")
+  157 |           const req = tx.objectStore("coco_cashu_proofs").getAll()
+  158 |           req.onsuccess = () => resolve(req.result.slice(0, 8))
+  159 |           req.onerror = () => resolve([])
+  160 |         })
+  161 |       })
+  162 |       console.log(
+  163 |         "RAW ROWS:",
+  164 |         JSON.stringify(all.map((r) => ({ unit: r.unit, amount: r.amount, state: r.state, keys: Object.keys(r).join("|") }))),
+  165 |       )
+  166 |     }
+> 167 |     expect(mine.reduce((sum, p) => sum + p.amount, 0)).toBe(5)
+      |                                                        ^ Error: expect(received).toBe(expected) // Object.is equality
+  168 |     for (const proof of mine) {
+  169 |       const tag = futureTag(proof.secret)
+  170 |       expect(tag, `proof secret must carry exactly one future tag: ${proof.secret.slice(0, 80)}`).not.toBeNull()
+  171 |       expect(tag?.version).toBe("1")
+  172 |       expect(tag?.uri).toBe(series.terms_uri)
+  173 |     }
+  174 | 
+  175 |     // Series accounting moved (the farm's minted-marker polls the mint
+  176 |     // quote state, so `issued` converges within a few seconds); capacity
+  177 |     // ledger is aggregate-only.
+  178 |     await expect
+  179 |       .poll(
+  180 |         async () =>
+  181 |           (await farmOverview(page)).series.find((s) => s.date === series.date)?.issued ?? -1,
+  182 |         { timeout: 30_000 },
+  183 |       )
+  184 |       .toBe(series.issued + 5)
+  185 |     const after = (await farmOverview(page)).series.find((s) => s.date === series.date)
+  186 |     expect(after?.available).toBe(series.available - 5)
+  187 | 
+  188 |     // Terms blob is content-addressed: the digest in the URI addresses
+  189 |     // the exact bytes served.
+  190 |     const termsResp = await page.request.get(`${FARM_BASE}/terms/${series.terms_sha256}`)
+  191 |     expect(termsResp.status()).toBe(200)
+  192 |     const blob = await termsResp.text()
+  193 |     const digest = await page.evaluate(async (text) => {
+  194 |       const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))
+  195 |       return Array.from(d).map((b) => b.toString(16).padStart(2, "0")).join("")
+  196 |     }, blob)
+  197 |     expect(digest).toBe(series.terms_sha256)
+  198 |     const envelope = JSON.parse(blob) as { mint: string; signature: string; terms: { unit: string } }
+  199 |     expect(envelope.terms.unit).toBe(series.unit)
+  200 |     expect(envelope.signature).toMatch(/^[0-9a-f]{128}$/)
+  201 |     expect(envelope.mint).toContain("/farm")
+  202 | 
+  203 |     // The mint advertises NUT-32.
+  204 |     const info = await page.request.get("/farm/v1/info").then((r) => r.json())
+  205 |     expect(info.nuts?.["32"]).toMatchObject({ supported: true, versions: [1] })
+  206 | 
+  207 |     // Issuance is wallet-bound: a locked future quote referencing an
+  208 |     // unknown purchase is refused by the mint/processor (wrong-key-
+  209 |     // for-known-purchase is pinned in processor tests).
+  210 |     const foreignQuote = await page.request.post("/farm/v1/mint/quote/future", {
+  211 |       data: {
+  212 |         amount: 5,
+  213 |         unit: series.unit,
+  214 |         pubkey: "02" + "ab".repeat(32),
+  215 |         description: "foreign key attempt",
+  216 |         purchase: "does-not-exist",
+  217 |       },
+  218 |     })
+  219 |     expect(foreignQuote.status()).toBeGreaterThanOrEqual(400)
+  220 | 
+  221 |     // ---------------------------------------------------------------
+  222 |     // Sarah → Bob: 2 of 5 via bearer transfer, farm blind to it.
+  223 |     // ---------------------------------------------------------------
+  224 |     await page.getByLabel(`send quantity for ${series.unit}`).fill("2")
+  225 |     await page.getByRole("button", { name: /Send to Bob/i }).click()
+  226 |     const tokenBox = page.getByTestId("farm-token")
+  227 |     await tokenBox.waitFor({ state: "visible", timeout: 60_000 })
+  228 |     const token = await tokenBox.inputValue()
+  229 |     expect(token.length).toBeGreaterThan(50)
+  230 | 
+  231 |     await expect
+  232 |       .poll(async () => {
+  233 |         const balances = await readFutureProofs(page)
+  234 |         return balances
+  235 |           .filter((p) => p.unit === series.unit && p.state !== "spent")
+  236 |           .reduce((sum, p) => sum + p.amount, 0)
+  237 |       })
+  238 |       .toBe(3)
+  239 | 
+  240 |     // The swap preserved unit and terms URI on every replacement proof.
+  241 |     const sarahProofs = (await readFutureProofs(page)).filter(
+  242 |       (p) => p.unit === series.unit && p.state !== "spent",
+  243 |     )
+  244 |     for (const proof of sarahProofs) {
+  245 |       expect(futureTag(proof.secret)?.uri).toBe(series.terms_uri)
+  246 |     }
+  247 | 
+  248 |     // Bob: a fresh browser profile receives the token and owns 2.
+  249 |     const bobContext = await browser.newContext()
+  250 |     const bobPage = await bobContext.newPage()
+  251 |     await openFarmWallet(bobPage)
+  252 |     await bobPage.getByPlaceholder(/paste a token/i).fill(token)
+  253 |     await bobPage.getByRole("button", { name: /Receive token/i }).click()
+  254 |     // A fresh context boots five mints (incl. the external sat mint)
+  255 |     // before the receive can run — give it a real budget.
+  256 |     await expect
+  257 |       .poll(async () => {
+  258 |         const bobProofs = await readFutureProofs(bobPage)
+  259 |         return bobProofs
+  260 |           .filter((p) => p.unit === series.unit && p.state !== "spent")
+  261 |           .reduce((sum, p) => sum + p.amount, 0)
+  262 |       }, { timeout: 120_000 })
+  263 |       .toBe(2)
+  264 | 
+  265 |     // Total supply unchanged by the transfer: issued unchanged.
+  266 |     const transferred = (await farmOverview(page)).series.find((s) => s.date === series.date)
+  267 |     expect(transferred?.issued).toBe(after?.issued ?? series.issued + 5)
 ```
