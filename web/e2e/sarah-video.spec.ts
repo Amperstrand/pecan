@@ -220,6 +220,9 @@ async function cardUntil(
   while (Date.now() < deadline) {
     if (await predicate().catch(() => false)) break
     await page.waitForTimeout(1_000)
+    if (await pageDead(page)) {
+      throw new Error("wallet renderer died while waiting (known post-mint crash) — take lost")
+    }
   }
   await page.evaluate((done) => {
     const el = document.getElementById("movie-card")
@@ -236,6 +239,17 @@ async function cardUntil(
   await hideCard(page)
 }
 
+/** True when the page's renderer has died (the known post-mint crash
+ * vector) — fail fast with the cause instead of hanging on dead waits. */
+async function pageDead(page: Page): Promise<boolean> {
+  try {
+    await page.evaluate(() => 1)
+    return false
+  } catch {
+    return true
+  }
+}
+
 /** A narration beat on live UI (no card): holds ≥ the line's audio. */
 async function beat(
   page: Page,
@@ -249,7 +263,12 @@ async function beat(
   const actionStart = Date.now()
   if (action) await action()
   const actionMs = Date.now() - actionStart
-  await page.waitForTimeout(Math.max(1_000, hold - actionMs))
+  for (let slept = 0; slept < Math.max(1_000, hold - actionMs); slept += 1_000) {
+    await page.waitForTimeout(Math.min(1_000, hold - actionMs - slept))
+    if (await pageDead(page)) {
+      throw new Error("wallet renderer died mid-beat (known post-mint crash) — take lost")
+    }
+  }
   markEnd()
 }
 
@@ -357,17 +376,31 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   }
   expect(paid, "the invoice was paid over signet Lightning").toBe(true)
 
-  // Ownership is proven by the panel's own YOU-OWN banner (set the moment
-  // the mint op resolves) — the balance header can lag minutes on a fresh
-  // context and burned a 3.7-minute hole in the first cut. Hard 45 s cap.
+  // The wallet's post-mint path (proof persist + balance events) hard-
+  // crashes the renderer intermittently; a reload behind a card both
+  // dodges the crash window and reads the claims cleanly. Hard 45 s cap.
   await cardUntil(
     sarah,
     "a",
     { title: "Payment confirmed.", body: "Minting 5 Friday egg claims — locked to Sarah's wallet key.", done: "5 claims minted.", sayId: "l06" } as CardOpts & { done: string },
     async () =>
-      /YOU OWN — Farm eggs/.test((await sarah.locator("main").textContent().catch(() => "")) ?? ""),
+      /YOU OWN — Farm eggs|5 egg claims/.test((await sarah.locator("main").textContent().catch(() => "")) ?? ""),
     45_000,
   )
+  await card(sarah, "a", {
+    title: "Her wallet…",
+    body: "Picks up the freshly minted claims.",
+    holdMs: 3_500,
+  })
+  await sarah.reload()
+  await installChrome(sarah)
+  await sarah.getByRole("tab", { name: "FARM" }).click()
+  await sarah.getByLabel("production day").waitFor({ timeout: 60_000 })
+  for (let i = 0; i < 20; i++) {
+    if (/\b5 egg claims\b/.test((await sarah.locator("main").textContent().catch(() => "")) ?? "")) break
+    if (await pageDead(sarah)) throw new Error("renderer died on the post-mint reload — take lost")
+    await sarah.waitForTimeout(2_000)
+  }
 
   // ---- 5 · ownership + details ------------------------------------------
   await beat(sarah, "a", "l07", 4_500, async () => {
