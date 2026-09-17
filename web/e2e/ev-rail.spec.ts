@@ -181,7 +181,7 @@ test("ev rail: deposit pattern — slider, remote stop, refund of the unspent de
 
   // The slider appears and tracks delivery against the 6 s window.
   await expect(page.getByText("⚡ Charging at " + TAB)).toBeVisible({ timeout: 60_000 })
-  await expect(page.getByText(/€\d+\.00 of the deposit remaining/)).toBeVisible({
+  await expect(page.getByText(/≈ \d+\.\d\d € of the deposit remaining/)).toBeVisible({
     timeout: 30_000,
   })
   // Let a second deliver, then stop from the BROWSER — the stop must
@@ -336,7 +336,7 @@ test("ev rail: double-stop is idempotent — one settle, one refund, exact balan
   await page.getByRole("button", { name: "Start charging" }).click()
   await expect(page.getByText("⚡ Charging at " + TAB)).toBeVisible({ timeout: 60_000 })
   await expect(
-    page.getByText(/€\d+\.00 of the deposit remaining/),
+    page.getByText(/≈ \d+\.\d\d € of the deposit remaining/),
   ).toBeVisible({ timeout: 30_000 })
 
   // A double-click (or an impatient retry) must not double-settle or
