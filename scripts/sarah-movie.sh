@@ -28,7 +28,9 @@ for arg in "$@"; do
   esac
 done
 
-VOICE_DIR="web/e2e/.results-video/sarah-voice"
+# OUTSIDE playwright's outputDir — the runner wipes .results-video at
+# every test start, which ate the first voice cache mid-pipeline.
+VOICE_DIR="web/e2e/sarah-voice"
 
 echo "==> pass 1: voice (builder GPU)"
 if [ "$FRESH_VOICE" = "1" ] || [ ! -f "$VOICE_DIR/durations.json" ]; then
@@ -84,7 +86,7 @@ json.dump({"a": "take/" + os.path.basename(parts["a"]),
           open("/tmp/sarah-parts-remote.json", "w"))
 PYEOF
 rsync -q /tmp/sarah-parts-remote.json "$BUILDER":/tmp/sarah-film/parts.json
-rsync -r web/e2e/.results-video/sarah-voice/ "$BUILDER":/tmp/sarah-film/voice/
+rsync -r "$VOICE_DIR"/ "$BUILDER":/tmp/sarah-film/voice/
 $SSH_BUILDER "$BUILDER" 'cd /tmp/sarah-film && python3 sarah-assemble.py parts.json sarah-timeline.json voice sarah-final.mp4' 2>&1 | grep -v muxclient
 rsync -q "$BUILDER":/tmp/sarah-film/sarah-final.mp4 web/e2e/.results-video/sarah-final.mp4
 echo "==> final: web/e2e/.results-video/sarah-final.mp4 ($(ffprobe -v error -show_entries format=duration -of csv=p=0 web/e2e/.results-video/sarah-final.mp4)s)"
