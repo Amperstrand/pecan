@@ -25,24 +25,24 @@ import {
  *
  * Coverage matrix (rail × currency — keep every cell owned exactly once):
  *
- *   flow                                EUR               USD       SAT
- *   teller deposit → auto-claim         suite             suite     —
- *   lightning deposit (+rate desc)      suite             suite     sat.spec (bolt11, no rate)
- *   deposit survives reload             wallet.spec EUR   —         sat.spec (bolt11 restore)
- *   onchain deposit → settle            wallet.spec EUR   usd.spec  —
- *   teller withdraw, zero change        suite             suite     —
- *   bolt11 melt withdraw → preimage     —                 —         sat.spec
- *   one-way mint: ln/btc melt refused   wallet.spec EUR   usd.spec  — (signut melts ARE the rail)
- *   generic payout rail (sim adapter)   wallet.spec EUR   —         —
- *   simulated EU bank rails (sepa)      wallet.spec EUR   —         —
- *   cross-currency concurrency          wallet.spec EUR   —         sat.spec (switch isolation)
- *   currency-switcher isolation         (from USD side)   usd.spec  sat.spec (from SAT side)
- *   charger A rail (all ev-rail tests)  ev-rail           —         —
- *   charger B rail (window+stop+refund) ev-rail           —         —
- *   charger C/D full sessions           ev-rail/charger-d —         —
- *   charger D USD session (self-funded) —                 usd.spec   —
- *   charger D NOK session               —                 —         charger-d-nok
- *   expired deposit auto-refund (#13)   charger-expired-refund (@expiry) — —
+ *   flow                                EUR               USD       NOK       SAT
+ *   teller deposit → auto-claim         suite             suite     suite     —
+ *   lightning deposit (+rate desc)      suite             suite     suite     sat.spec (bolt11, no rate)
+ *   deposit survives reload             wallet.spec EUR   —         —         sat.spec (bolt11 restore)
+ *   onchain deposit → settle            wallet.spec EUR   usd.spec  —         —
+ *   teller withdraw, zero change        suite             suite     suite     —
+ *   bolt11 melt withdraw → preimage     —                 —         —         sat.spec
+ *   one-way mint: ln/btc melt refused   wallet.spec EUR   usd.spec  api-smoke — (signut melts ARE the rail)
+ *   generic payout rail (sim adapter)   wallet.spec EUR   —         —         —
+ *   simulated EU bank rails (sepa)      wallet.spec EUR   —         —         —
+ *   cross-currency concurrency          wallet.spec EUR   —         —         sat.spec (switch isolation)
+ *   currency-switcher isolation         (from USD side)   usd.spec  —         sat.spec (from SAT side)
+ *   charger A rail (all ev-rail tests)  ev-rail           —         —         —
+ *   charger B rail (window+stop+refund) ev-rail           —         —         —
+ *   charger C/D full sessions           ev-rail/charger-d —         —         —
+ *   charger D USD session (self-funded) —                 usd.spec   —        —
+ *   charger D NOK session               —                 —         charger-d-nok —
+ *   expired deposit auto-refund (#13)   charger-expired-refund (@expiry) — — —
  *
  * Deliberately EUR-only: the saga and wallet-UX rows exercise
  * currency-agnostic machinery (same code, different mint URL) — reload
@@ -50,9 +50,18 @@ import {
  * currency, amount validation, backup v2 round-trip, fresh-browser
  * restore, multi-tab warning, sim-teller policy. Do NOT duplicate them
  * per currency: 2× runtime, ~0 new signal.
+ *
+ * NOK (nok.spec) runs the shared core only: its charger chain is owned by
+ * charger-d-nok.spec.ts and its one-way melt refusal by api-smoke (which
+ * loops every pair in the e2e preflight).
  */
 export interface CurrencySuiteConfig {
-  /** Currency the wallet boots in (localStorage pecan-currency). */
+  /**
+   * Currency the wallet boots in. Seeded into localStorage AND pinned by
+   * clicking the currency tab in beforeAll — wallet init does not honor
+   * the stored value (charger-d-nok.spec.ts), so the click is what makes
+   * the boot deterministic.
+   */
   currency: string
   /** Pecan console path prefix for teller API calls, e.g. "/eur-console". */
   consoleBase: string
@@ -75,7 +84,7 @@ export function defineWalletSuite(
   cfg: CurrencySuiteConfig,
   extraTests?: (ctx: SuiteContext) => void,
 ): void {
-  const WALLET = "/eur-console/wallet"
+  const WALLET = `${cfg.consoleBase}/wallet`
 
   let sharedPage: Page | null = null
   let walletErrors: string[] = []
@@ -103,6 +112,18 @@ export function defineWalletSuite(
       await sharedPage
         .getByRole("heading", { name: "Wallet" })
         .waitFor({ state: "visible", timeout: 30_000 })
+
+      // Pin the unit by clicking the tab like a user. Wallet init does
+      // NOT honor the stored localStorage currency (see charger-d-nok.spec
+      // .ts): without this click a lane can pass while silently running
+      // EUR. Clicking the already-selected tab is harmless — the handler
+      // only re-pins state that is idle at boot.
+      const currencyTab = sharedPage.getByRole("tab", {
+        name: cfg.currency.toUpperCase(),
+        exact: true,
+      })
+      await currencyTab.click()
+      await expect(currencyTab).toHaveAttribute("aria-selected", "true")
     })
 
     test.afterEach(async ({}, testInfo) => {
