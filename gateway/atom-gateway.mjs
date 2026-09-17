@@ -288,8 +288,12 @@ const server = http.createServer(async (req, res) => {
   } catch {
     return json(res, 400, { triggered: false, reason: "bad json" });
   }
-  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) {
-    return json(res, 400, { triggered: false, reason: "seconds must be 1..3600" });
+  // `seconds` is the metered-energy budget in kW·s (issue #30), not
+  // wall time — a realistic tariff authorizes thousands of kW·s per
+  // unit; the meter caps delivery long before the legacy window could
+  // matter. The old 3600 wall-cap rejected every realistic budget.
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10_000_000) {
+    return json(res, 400, { triggered: false, reason: "seconds must be 1..10000000" });
   }
   const end = Math.floor(Date.now() / 1000) + seconds;
   const session = crypto.randomUUID();

@@ -17,10 +17,11 @@
 //               while the meter is fresh the session's delivered kW·s
 //               comes from HERE, not wall-clock.
 //
-// THE CAR IS NOT CONSTANT: while a session runs, the simulated car's
-// draw walks smoothly between 3 and 10 kW (an EV's onboard charger
-// tapers and pauses; billing here stays on the gateway's per-second
-// demo tariff — the meter topic is the car's own truth).
+// THE CAR RAMPS LIKE A REAL ONE: 3 kW for the first STAGE1_S seconds
+// (pilot handshake, conservative entry), 7 kW for the next STAGE2_S
+// (negotiated step-up), then 22 kW (full three-phase AC). Stage
+// lengths come from the service env (default the realistic 30/30;
+// test lanes shrink them via scripts/virtual-charger.sh stages).
 //
 // Runs on inr2 as ev-virtual-charger.service (EnvironmentFile=/opt/
 // atom-bridge/.env for MQTT creds); lifecycle is owned by
@@ -30,8 +31,13 @@ import mqtt from "mqtt"
 const DEVICE = "atomV"
 const STATUS = `charger/${DEVICE}/status`
 const METER = `charger/${DEVICE}/meter`
-const MIN_KW = 3
-const MAX_KW = 10
+const STAGE1_S = Number(process.env.STAGE1_S ?? 30)
+const STAGE2_S = Number(process.env.STAGE2_S ?? 30)
+const STAGES = [
+  { after: 0, kw: 3 },
+  { after: STAGE1_S, kw: 7 },
+  { after: STAGE1_S + STAGE2_S, kw: 22 },
+]
 
 const client = mqtt.connect(process.env.MQTT_URL, {
   clientId: `ev-virtual-${DEVICE}`,
@@ -47,20 +53,20 @@ let sessions = 0
 // The simulated car's draw: a bounded random walk with occasional
 // deep dips (battery tapers / balancing pauses).
 let sessionActive = false
-let loadKw = 6.5
+let sessionStart = 0
+let currentKw = 0
 let whDelivered = 0
 let kwsDelivered = 0
 
-function nextLoad() {
-  // Gentle-biased walk (better demo pacing): the base meanders 3-5.5 kW
-  // with occasional spikes toward the 10 kW ceiling — real EVs taper
-  // and pause; the billing contract stays the same [3, 10] kW.
-  const drift = (Math.random() - 0.5) * 1.6
-  loadKw = Math.min(MAX_KW, Math.max(MIN_KW, loadKw + drift))
-  loadKw += (4.2 - loadKw) * 0.08
-  if (Math.random() < 0.1) loadKw = 7 + Math.random() * 3
-  if (Math.random() < 0.06) loadKw = MIN_KW + Math.random() * 0.8
-  return Math.round(loadKw * 10) / 10
+function nextLoad(elapsedS) {
+  // The LAST stage whose `after` has been reached wins; stage 1
+  // (after: 0) is the default — the inverted comparison once skipped
+  // it entirely (the car entered at 7 kW, never 3).
+  let kw = STAGES[0].kw
+  for (const st of STAGES) {
+    if (elapsedS >= st.after) kw = st.kw
+  }
+  return Math.round(kw * 10) / 10
 }
 
 function log(msg, extra = "") {
@@ -71,7 +77,7 @@ function publishMeter() {
   client.publish(
     METER,
     JSON.stringify({
-      kw: sessionActive ? Math.round(loadKw * 10) / 10 : null,
+      kw: sessionActive ? currentKw : null,
       wh: Math.round(whDelivered),
       kws: Math.round(kwsDelivered),
       state: sessionActive ? "drawing" : "idle",
@@ -113,9 +119,9 @@ client.on("message", (topic, payload) => {
   sessions += 1
   if (timer) clearTimeout(timer)
   sessionActive = true
+  sessionStart = Date.now()
   whDelivered = 0
   kwsDelivered = 0
-  loadKw = 6.5
   client.publish(`charger/${DEVICE}/ack`, "start-acked", { qos: 1 })
   const msLeft = end * 1000 - Date.now()
   log(`start end=${end} (${Math.max(0, Math.round(msLeft / 1000))}s) — acked`)
@@ -135,9 +141,9 @@ client.on("message", (topic, payload) => {
 // The car's draw ticks every second; the telemetry publishes every 2s.
 setInterval(() => {
   if (sessionActive) {
-    const kw = nextLoad()
-    whDelivered += kw / 3.6
-    kwsDelivered += kw
+    currentKw = nextLoad((Date.now() - sessionStart) / 1000)
+    whDelivered += currentKw / 3.6
+    kwsDelivered += currentKw
   }
 }, 1000)
 setInterval(publishMeter, 2000)

@@ -38,7 +38,11 @@ for u in ${UNITS[*]}; do
   f=/etc/systemd/system/\$u
   grep -q '^ExecStart=' \$f || { echo \"!! no ExecStart in \$f\" >&2; exit 1; }
   if grep -q -- '--secs-per-eur' \$f; then
-    sed -i \"s/--secs-per-eur [0-9.]*//; s/--eur-per-kwh [0-9.]*//\" \$f
+    # Refresh the password too: units bake it at creation and a console
+    # password rotation silently wedges every daemon (open-ticket polls
+    # 401 forever, melts sit PENDING, wallets hang) — earned 2026-09-17.
+    PW=\$(cat \$PWD_FILE)
+    sed -i \"s/--password [A-Za-z0-9]*/--password \$PW/; s/--secs-per-eur [0-9.]*//; s/--eur-per-kwh [0-9..]*//\" \$f
     sed -i \"s|^\\(ExecStart=.*\\)\$|\\1 --eur-per-kwh $PRICE|\" \$f
   elif ! grep -q -- '--eur-per-kwh' \$f; then
     sed -i \"s|^\\(ExecStart=.*\\)\$|\\1 --eur-per-kwh $PRICE|\" \$f

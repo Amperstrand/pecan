@@ -46,6 +46,34 @@ if (!stop.stopped || !(stop.delivered > stopElapsedWall * 2.5)) {
   process.exit(1)
 }
 console.log(`ok: remote stop billed ${stop.delivered} kW·s after ~${stopElapsedWall}s wall (metered)`)
+
+// Natural cap: a 20 kW·s window under a 3 kW entry stage meters to
+// exactly 20 (the gateway's meter-cap clamps at the authorization).
+const capResp = await fetch(`${base}/device/atomV/trigger`, {
+  method: "POST",
+  headers: { "x-api-key": KEY, "content-type": "application/json" },
+  body: JSON.stringify({ seconds: 20, session_ref: `selftest-cap-${Date.now()}` }),
+})
+if (!capResp.ok) {
+  console.error(`FAIL: cap trigger answered ${capResp.status}`)
+  process.exit(1)
+}
+for (let i = 0; i < 30; i++) {
+  await new Promise(r => setTimeout(r, 1000))
+  const st = await fetch(`${base}/device/atomV/status`, { headers: { "x-api-key": KEY } }).then(r => r.json())
+  if (st.state === "done") {
+    // The gateway clamps metered delivery at the authorization; meter
+    // cadence (2s) means the settle lands at or just under it.
+    if (st.seconds < 10 || st.seconds > 20) {
+      console.error(`FAIL: cap settled at ${st.seconds}, expected 10..20`)
+      process.exit(1)
+    }
+    console.log(`ok: natural cap settled at ${st.seconds} kW·s (authorization 20)`)
+    process.exit(0)
+  }
+}
+console.error("FAIL: cap session never completed")
+process.exit(1)
 await new Promise(resolve => setTimeout(resolve, 4500))
 c.end()
 
@@ -69,5 +97,5 @@ if (outOfRange.length || nonIncreasing.length || !varied || missingKws.length) {
   process.exit(1)
 }
 console.log(
-  `ok: ${drawing.length} meter samples, kw range ${Math.min(...drawing.map(s => s.kw))}..${Math.max(...drawing.map(s => s.kw))} kW, wh ${drawing[0].wh}→${drawing[drawing.length - 1].wh}, kws ${drawing[0].kws}→${drawing[drawing.length - 1].kws}`,
+  `ok: ${drawing.length} meter samples, stage-1 kw ${drawing[0].kw} kW, kws ${drawing[0].kws}→${drawing[drawing.length - 1].kws} (rate ≈ ${((drawing[drawing.length - 1].kws - drawing[0].kws) / Math.max(1, drawing.length * 2)).toFixed(1)}/s)`,
 )

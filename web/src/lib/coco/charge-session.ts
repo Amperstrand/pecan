@@ -16,7 +16,7 @@
  * constant against the deployment — change them together.
  */
 
-export const PRICE_PER_KWH = 100
+export const PRICE_PER_KWH = 0.5
 
 /** Cost in cents of delivered metered kW·s at the given tariff. */
 export function kwsToCostCents(kws: number, pricePerKwh = PRICE_PER_KWH): number {

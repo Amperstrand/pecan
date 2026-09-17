@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process"
+import fs from "node:fs"
 import { test, expect, type Page } from "@playwright/test"
 import { readBalance } from "./helpers/wallet"
-import { kwsToCents } from "./helpers/ev-rail"
 
 // ALICE AT THE CHARGE POINT — the movie. One continuous phone-viewport
 // recording of the full lifecycle: a Lightning invoice paid, ecash
@@ -21,9 +21,6 @@ import { kwsToCents } from "./helpers/ev-rail"
 // sessions (it mirrors the atom box's A+B chargers) and its portrait
 // shape covers the phone UI — see the charger-display issue.
 //
-// The card/timeline chrome here mirrors templates/film-chrome.ts in
-// the film knowledge base (~/src/test-films) — its canon. Project
-// views (companion strip, pole panel) are this repo's own.
 // Text cards are baked in; voiceover is a post-production layer.
 
 test.skip(!process.env.PECAN_VIDEO, "movie run only (run scripts/movie.sh)")
@@ -31,7 +28,7 @@ test.skip(!process.env.PECAN_VIDEO, "movie run only (run scripts/movie.sh)")
 const WALLET = "https://giftcard.cashu.exchange/eur-console/wallet"
 const DEEP_LINK = `${WALLET}?charger=atomV`
 const DEPOSIT_EUR = 50
-const STOP_AT_KWS = 22
+const STOP_AT_KWS = 750
 
 // ---------------------------------------------------------------------------
 // movie chrome: overlay cards + the companion strip
@@ -100,6 +97,18 @@ const CHROME_CSS = `
   #pole-panel .kws { font-size: 13px; color: #9fb0c3; margin-top: 4px; font-variant-numeric: tabular-nums; }
   #pole-panel .relay { margin-top: 7px; font-size: 9px; letter-spacing: .18em; color: #34d399; }
   @keyframes pole-bolt { 50% { opacity: .3; } }
+  #movie-frame {
+    position: fixed; inset: 0; z-index: 2147483643; pointer-events: none;
+    border: 7px solid #0a0d14; border-radius: 26px;
+    box-shadow: inset 0 0 0 1.5px rgba(120,140,170,.35), 0 0 0 1px rgba(0,0,0,.8);
+  }
+  #movie-statusbar {
+    position: fixed; top: 0; left: 0; right: 0; height: 22px; z-index: 2147483643;
+    pointer-events: none; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; box-sizing: border-box;
+    color: #e6edf3; font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 600;
+    text-shadow: 0 1px 2px rgba(0,0,0,.6);
+  }
   #movie-fade { position: fixed; inset: 0; z-index: 2147483647; background: #000;
     opacity: 0; transition: opacity 1.4s ease; pointer-events: none; }
 `
@@ -112,7 +121,38 @@ async function installChrome(page: Page) {
       fade.id = "movie-fade"
       document.body.appendChild(fade)
     }
+    if (!document.getElementById("movie-frame")) {
+      const frame = document.createElement("div")
+      frame.id = "movie-frame"
+      const bar = document.createElement("div")
+      bar.id = "movie-statusbar"
+      bar.innerHTML = "<span>9:41</span><span>▮▮▮ ⌁ 84%</span>"
+      document.body.appendChild(frame)
+      document.body.appendChild(bar)
+    }
   })
+}
+
+// Narration timeline: every card records its window + spoken line; the
+// VO post pass (scripts/movie-voice.sh) turns this into a synced
+// voiceover with macOS say + ffmpeg. T0 anchors to the first load.
+const TIMELINE: { start: number; end?: number; say?: string }[] = []
+let T0 = 0
+function markStart(say?: string) {
+  if (!T0) T0 = Date.now()
+  TIMELINE.push({ start: Date.now() - T0, say })
+}
+function markEnd() {
+  const last = TIMELINE[TIMELINE.length - 1]
+  if (last && last.end === undefined) last.end = Date.now() - T0
+}
+function writeTimeline() {
+  markEnd()
+  fs.mkdirSync("e2e/.results-video", { recursive: true })
+  fs.writeFileSync(
+    "e2e/.results-video/movie-timeline.json",
+    JSON.stringify({ t0_offset_hint_ms: 1500, entries: TIMELINE }, null, 2),
+  )
 }
 
 // Human-paced holds (2026-09-17 review: transitions were too fast to
@@ -125,7 +165,7 @@ function holdFor(...texts: (string | undefined)[]): number {
 
 async function card(
   page: Page,
-  opts: { title?: string; body?: string; qrDataUrl?: string; holdMs?: number; brand?: boolean },
+  opts: { title?: string; body?: string; qrDataUrl?: string; holdMs?: number; brand?: boolean; say?: string },
 ) {
   await page.evaluate(
     ({ title, body, qrDataUrl, brand }) => {
@@ -145,14 +185,16 @@ async function card(
     },
     { title: opts.title, body: opts.body, qrDataUrl: opts.qrDataUrl, brand: opts.brand },
   )
+  markStart(opts.say ?? opts.title)
   await page.waitForTimeout(opts.holdMs ?? holdFor(opts.title, opts.body))
+  markEnd()
 }
 
 // A card that stays up until the predicate passes — no dead air while
 // Lightning settles or a refund claims.
 async function cardUntil(
   page: Page,
-  opts: { title: string; body: string; done: string },
+  opts: { title: string; body: string; done: string; say?: string },
   predicate: () => Promise<boolean>,
   timeoutMs: number,
 ) {
@@ -167,6 +209,7 @@ async function cardUntil(
     },
     opts,
   )
+  markStart(opts.say)
   const deadline = Date.now() + timeoutMs
   while (!(await predicate())) {
     if (Date.now() > deadline) throw new Error(`cardUntil timeout: ${opts.title}`)
@@ -180,6 +223,7 @@ async function cardUntil(
     }
   }, opts.done)
   await page.waitForTimeout(2_200)
+  markEnd()
 }
 
 // Alice's payment settles ON THE MINT'S OWN NODE (self-pay): the rail's
@@ -287,8 +331,8 @@ async function mountCompanion(page: Page) {
       ctx.clearRect(0, 0, W, H)
       ctx.strokeStyle = "rgba(125,143,165,.35)"
       ctx.setLineDash([3, 4])
-      for (const band of [3, 10]) {
-        const y = H - (band / 10) * (H - 6) - 3
+      for (const band of [3, 7, 22]) {
+        const y = H - (band / 25) * (H - 6) - 3
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke()
       }
       ctx.setLineDash([])
@@ -296,7 +340,7 @@ async function mountCompanion(page: Page) {
       ctx.beginPath()
       samples.forEach((v, i) => {
         const x = (i / (samples.length - 1)) * W
-        const y = H - (v / 10) * (H - 6) - 3
+        const y = H - (v / 25) * (H - 6) - 3
         i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
       })
       ctx.strokeStyle = "#38bdf8"
@@ -334,17 +378,16 @@ async function mountCompanion(page: Page) {
     const eur = el.querySelector("#cp-eur") as HTMLElement
     const moneySub = el.querySelector("#cp-money-sub") as HTMLElement
     const sub = el.querySelector("#cp-sub") as HTMLElement
-    // Energy pricing: €100/kWh — the € column converts metered kW·s
-    // to the remaining deposit in cents (matches the wallet's math).
-    const BUDGET_CENTS = 5000
-    const PRICE_PER_KWH = 100
-    const kwsToCents = (kws: number) => Math.round((kws * PRICE_PER_KWH) / 36)
+    const BUDGET = 50
     const tick = () => {
       const bar = document.querySelector('[role="progressbar"]')
       const body = document.body.innerText || ""
       let delivered: number | null = null
+      let remaining: number | null = null
       if (bar) {
         delivered = Number(bar.getAttribute("aria-valuenow") ?? 0)
+        const max = Number(bar.getAttribute("aria-valuemax") ?? BUDGET)
+        remaining = Math.max(0, max - delivered)
         strip.classList.add("live")
         sub.textContent = "delivering energy"
       } else {
@@ -353,19 +396,22 @@ async function mountCompanion(page: Page) {
           body.match(/Charged (\d+) s at/)
         if (m) {
           delivered = Number(m[1])
+          remaining = BUDGET - delivered
           strip.classList.remove("live")
           sub.textContent = "session complete"
         } else {
           strip.classList.remove("live")
           sub.textContent = "charge point · online"
-          eur.textContent = `€${(BUDGET_CENTS / 100).toFixed(2)}`
+          eur.textContent = `€${BUDGET.toFixed(2)}`
           moneySub.textContent = "ready"
           return
         }
       }
-      const remainingCents = Math.max(0, BUDGET_CENTS - kwsToCents(delivered ?? 0))
-      eur.textContent = `€${(remainingCents / 100).toFixed(2)}`
-      moneySub.textContent = remainingCents > 0 ? "still hers" : "settled"
+      // €0.50/kWh: one unit authorizes 7200 kW·s — the euro column is
+      // the deposit minus the METERED cost, never a 1:1 kW·s mirror.
+      const spentEur = (delivered ?? 0) / 7200
+      eur.textContent = `€${(BUDGET - spentEur).toFixed(2)}`
+      moneySub.textContent = spentEur > 0 ? "still hers" : "authorized"
     }
     tick()
     window.setInterval(tick, 400)
@@ -449,7 +495,7 @@ async function still(page: Page, name: string) {
 // ---------------------------------------------------------------------------
 
 test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
-  test.setTimeout(360_000)
+  test.setTimeout(480_000)
 
   await page.addInitScript(() => {
     window.localStorage.setItem("pecan-debug", "1")
@@ -459,13 +505,27 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({ timeout: 30_000 })
   await installChrome(page)
 
+  // COLD OPEN — title
+  await card(page, {
+    title: "ALICE AT THE CHARGE POINT",
+    body: "a Cashu demo",
+    holdMs: 4_200,
+    brand: false,
+    say: "Alice, at the charge point. A Cashu demo.",
+  })
+
   // SCENE 1 — Meet Alice
-  await card(page, { title: "Meet Alice.", holdMs: undefined })
+  await card(page, {
+    title: "Meet Alice.",
+    holdMs: undefined,
+    say: "Meet Alice.",
+  })
   await card(page, { title: "Alice drives an electric car.", holdMs: undefined })
   await card(page, {
     title: "Her phone has an app for every charging network.",
     body: "eChargeGo · Voltly · PowerPort · kWh! · Chargr · eFlow",
     holdMs: undefined,
+    say: "Her phone has an app for every charging network. Six of them.",
   })
   await card(page, {
     title: "Every few months: re-enter the credit card.",
@@ -476,6 +536,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     title: "Last spring, one network leaked its users' charging history.",
     body: "Home addresses, habits, overnight stops — onto the darknet.",
     holdMs: undefined,
+    say: "Last spring, one network leaked its users' charging history. Home addresses, habits, overnight stops, onto the darknet.",
   })
   await card(page, {
     title: "Alice just wants to plug in, pay, and drive.",
@@ -498,6 +559,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     body: "Just a QR that opens the wallet.",
     qrDataUrl: qr,
     holdMs: 5_500,
+    say: "Just a QR that opens the wallet.",
     brand: false,
   })
   await hideCard(page)
@@ -529,6 +591,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await card(page, {
     title: "Alice pays from her Lightning wallet ⚡",
     body: "A real invoice — €50 on Lightning.",
+    say: "Alice pays a real fifty euro invoice, from her Lightning wallet.",
     holdMs: 4_000,
   })
   await cardUntil(
@@ -537,6 +600,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
       title: "Settling on Lightning…",
       body: "The mint issues Alice's ecash.",
       done: "Paid ⚡ — €50 in ecash.",
+      say: "Settling on Lightning. The mint issues Alice's ecash.",
     },
     async () => (await readBalance(page).catch(() => 0)) >= DEPOSIT_EUR - 0.5,
     120_000,
@@ -551,6 +615,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     title: `€${DEPOSIT_EUR}, minted as ecash.`,
     body: "No name. No card. No account attached.",
     holdMs: undefined,
+    say: "Fifty euro, minted as ecash. No name, no card, no account attached.",
   })
   await hideCard(page)
   await page.waitForTimeout(1_000)
@@ -569,18 +634,19 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     title: "The QR is just a link.",
     body: "It hands the wallet the charge point. Nothing else leaves Alice's phone.",
     holdMs: undefined,
+    say: "The QR is just a link. It hands the wallet the charge point, and nothing else leaves her phone.",
   })
   await hideCard(page)
   await page.waitForTimeout(1_000)
 
-  // SCENE 6 — charge, at the car's pace: metered truth (#30) + energy
-  // pricing mean €100/kWh buys 1800 kW·s — several minutes at a 3-10 kW
-  // draw — so the card plays BEFORE Start, the burn itself stays
-  // uncovered (slider + strip live), and Alice stops early (~22 kW·s
-  // ≈ €0.61) to keep most of her deposit.
+  // SCENE 6 — charge, at the car's pace: metered truth (#30) means a
+  // €50 budget burns in ~5-16 WALL seconds at a 3-10 kW draw — so the
+  // card plays BEFORE Start, the burn itself stays uncovered (slider +
+  // strip live), and Alice stops early to keep most of her deposit.
   await card(page, {
     title: `€${DEPOSIT_EUR} of energy, authorized.`,
-    body: "Her car draws between 3 and 10 kW — no two seconds alike — and the bill follows the meter, not the clock.",
+    body: "Her car negotiates power like a real one: 3 kW to start, then 7, then 22 — and at €0.50 per kWh, the bill follows the meter.",
+    say: "Fifty euro of energy, authorized. Her car negotiates power like a real one: three kilowatts to start, then seven, then twenty two. And at fifty cents per kilowatt hour, the bill follows the meter.",
     holdMs: 7_000,
   })
   await hideCard(page)
@@ -591,11 +657,13 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await page.waitForTimeout(2_200)
   await still(page, "06-charging-early")
   const progress = page.getByRole("progressbar")
-  // Tight poll: the meter climbs ~3-10 kW/s, the budget is 1800 kW·s —
-  // stop the moment ~22 kW·s shows to leave most of the deposit unspent.
+  // Tight poll: the meter climbs ~6 units/second, the cap is 50 — stop
+  // the moment ~18 kW·s shows to leave most of the deposit unspent.
   await expect
+    // The realistic ramp delivers 300 kW·s in its first 60 s — a 750
+    // target needs the 22 kW stage, ~85 s total.
     .poll(async () => Number(await progress.getAttribute("aria-valuenow")), {
-      timeout: 60_000,
+      timeout: 150_000,
       interval: 250,
     })
     .toBeGreaterThanOrEqual(STOP_AT_KWS)
@@ -629,25 +697,34 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await page.waitForTimeout(7_000)
   await still(page, "075-public-pole")
 
-  // SCENE 7 — receipt & close: the unspent euros come back
-  const spentEur = kwsToCents(delivered) / 100
+  // SCENE 7 — receipt & close: the unspent euros come back. A wallet
+  // reload is both the proven refund-claim path (reload-resume) and a
+  // natural beat — Alice checks her balance.
+  await page.reload({ waitUntil: "domcontentloaded" })
+  await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({ timeout: 30_000 })
+  await installChrome(page)
+  await mountCompanion(page)
+  const spent = Math.round((delivered * 0.5) / 36) / 100 // €0.50/kWh
   await expect
     .poll(() => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(DEPOSIT_EUR - spentEur, 1)
+    .toBeCloseTo(DEPOSIT_EUR - spent, 1)
   await card(page, {
-    title: `Alice paid for ${delivered} kilowatt-seconds.`,
-    body: `The other €${(DEPOSIT_EUR - spentEur).toFixed(2)} came back — automatically.`,
+    title: `Alice used ${(delivered / 3600).toFixed(2)} kWh.`,
+    body: `Cost: cents of her €${DEPOSIT_EUR}. The rest came back — automatically.`,
     holdMs: undefined,
+    say: `Alice used about ${(delivered / 3600).toFixed(2)} kilowatt hours, for a few cents. The rest of her deposit came back, automatically.`,
   })
   await card(page, {
     title: "No app. No card on file. No charging history.",
     body: "Ecash is cash.",
     holdMs: undefined,
+    say: "No app. No card on file. No charging history. Ecash is cash.",
   })
   await card(page, {
     title: "Pay for energy the way you pay for anything else.",
     body: "Lightning in. Kilowatt-seconds out.",
     holdMs: undefined,
+    say: "Pay for energy the way you pay for anything else. Lightning in. Kilowatt seconds out.",
   })
   await hideCompanion(page)
   await card(page, {
@@ -657,6 +734,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   })
   await fadeOut(page)
   await page.waitForTimeout(2_000)
+  writeTimeline()
 })
 
 
@@ -732,8 +810,10 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
   await mountPolePanel(page)
   const progress = page.getByRole("progressbar")
   await expect
+    // The realistic ramp delivers 300 kW·s in its first 60 s — a 750
+    // target needs the 22 kW stage, ~85 s total.
     .poll(async () => Number(await progress.getAttribute("aria-valuenow")), {
-      timeout: 60_000,
+      timeout: 150_000,
       interval: 250,
     })
     .toBeGreaterThanOrEqual(STOP_AT_KWS)
@@ -745,12 +825,11 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
   expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}/)
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
 
-  const spentEur = kwsToCents(delivered) / 100
   await expect
     .poll(() => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(DEPOSIT_EUR - spentEur, 1)
+    .toBeCloseTo(DEPOSIT_EUR - delivered, 1)
   await card(page, {
-    title: `${delivered} kW·s used. €${(DEPOSIT_EUR - spentEur).toFixed(2)} came back.`,
+    title: `\${delivered} kW·s used. €${DEPOSIT_EUR - delivered} came back.`,
     body: "No app. No card. No history. Ecash is cash.",
     holdMs: undefined,
   })
@@ -759,6 +838,7 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
     title: "pecan · Cashu · Lightning",
     body: "giftcard.cashu.exchange",
     holdMs: undefined,
+    say: "Pecan. Cashu. Lightning.",
   })
   await fadeOut(page)
   await page.waitForTimeout(1_500)

@@ -69,7 +69,8 @@ function registerUsdExtras(ctx: SuiteContext): void {
     const page = ctx.page()
     const password =
       process.env.PECAN_USD_ADMIN_PASSWORD ?? process.env.PECAN_ADMIN_PASSWORD ?? ""
-    const budget = 1
+    // 2 units keeps the refund above the mint's 1-unit minimum.
+    const budget = 2
 
     let before = await readBalance(page)
     if (before < budget) {
@@ -93,7 +94,19 @@ function registerUsdExtras(ctx: SuiteContext): void {
     await page.getByPlaceholder("1.00").fill(String(budget))
     await page.getByRole("button", { name: "Start charging" }).click()
     await expect(page.getByText("⚡ Charging at Charger D")).toBeVisible({ timeout: 60000 })
-    await expect(page.getByText(/Charged \d+ s at Charger D/)).toBeVisible({ timeout: 180000 })
+    // Realistic tariff: natural caps take minutes at the unit minimum —
+    // stop mid-session instead (how real sessions end).
+    const progress = page.getByRole("progressbar")
+    await expect
+      .poll(async () => Number(await progress.getAttribute("aria-valuenow")), {
+        timeout: 120_000,
+        interval: 250,
+      })
+      .toBeGreaterThanOrEqual(340)
+    await page.getByRole("button", { name: "Stop charging" }).click()
+    await expect(
+      page.getByText(/(Charging stopped — \d+ s delivered|Charged \d+ s at Charger D)/),
+    ).toBeVisible({ timeout: 180000 })
     const receipt = await page.locator("p.break-all.font-mono").textContent()
     expect(receipt).toMatch(/^EV-atomD-\d+s-[0-9A-F]{8}(-[A-Z]+)?$/)
     const delivered = Number(receipt!.match(/-(\d+)s-/)![1])

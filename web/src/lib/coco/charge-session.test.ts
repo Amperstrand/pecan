@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { kwsToCostCents, parseChargeReceipt, refundCents } from "./charge-session"
+import { kwsToCostCents, parseChargeReceipt, PRICE_PER_KWH, refundCents } from "./charge-session"
 
 describe("parseChargeReceipt", () => {
   it("parses a delivered session record", () => {
@@ -26,16 +26,19 @@ describe("parseChargeReceipt", () => {
   })
 })
 
-describe("kwsToCostCents (energy pricing, 100 units/kWh)", () => {
-  it("converts metered kW·s to cents (1 unit = 36 kW·s)", () => {
-    expect(kwsToCostCents(36)).toBe(100)
-    expect(kwsToCostCents(72)).toBe(200)
+describe(`kwsToCostCents (energy pricing, ${PRICE_PER_KWH} units/kWh)`, () => {
+  it("converts metered kW·s to cents (1 unit = 36/price kW·s)", () => {
+    // €0.50/kWh: 7200 kW·s per unit — a real short session bills cents.
+    expect(kwsToCostCents(7200)).toBe(100)
+    expect(kwsToCostCents(14400)).toBe(200)
     expect(kwsToCostCents(0)).toBe(0)
   })
 
   it("rounds to whole cents", () => {
-    expect(kwsToCostCents(2)).toBe(6) // 2 * 100/36 = 5.56
-    expect(kwsToCostCents(1)).toBe(3) // 2.78
+    expect(kwsToCostCents(72)).toBe(1) // 1.0 exactly
+    expect(kwsToCostCents(360)).toBe(5) // 5.0
+    expect(kwsToCostCents(36)).toBe(1) // 0.5 rounds up
+    expect(kwsToCostCents(35)).toBe(0) // 0.486 rounds down
   })
 
   it("honours alternative tariffs", () => {
@@ -45,19 +48,19 @@ describe("kwsToCostCents (energy pricing, 100 units/kWh)", () => {
 
 describe("refundCents", () => {
   it("refunds the unspent deposit: budget minus metered cost", () => {
-    expect(refundCents(5000, 22)).toBe(4939) // 5000 - round(22*100/36)
-    expect(refundCents(400, 2)).toBe(394)
-    expect(refundCents(100, 36)).toBe(0) // fully spent budget
+    expect(refundCents(5000, 340)).toBe(4995) // 5000 - round(340*0.5/36) = 5 cents
+    expect(refundCents(400, 72)).toBe(399)
+    expect(refundCents(100, 7200)).toBe(0) // fully spent budget
   })
 
   it("leaves sub-unit remainders unclaimed (mint-quote minimum)", () => {
-    expect(refundCents(150, 36)).toBe(0) // 150 - 100 = 50c < 1 unit
-    expect(refundCents(199, 36)).toBe(0)
-    expect(refundCents(200, 36)).toBe(100)
+    expect(refundCents(150, 7200)).toBe(0) // 150 - 100 = 50c < 1 unit
+    expect(refundCents(199, 7200)).toBe(0)
+    expect(refundCents(200, 7200)).toBe(100)
   })
 
   it("never refunds more than the deposit or below zero", () => {
-    expect(refundCents(500, 9999)).toBe(0)
+    expect(refundCents(500, 999999)).toBe(0)
     expect(refundCents(500, 0)).toBe(500)
   })
 })

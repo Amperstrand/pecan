@@ -33,6 +33,9 @@ done
 GREP="$([ "$SHORT" = "1" ] && echo "30 second cut" || echo "full lifecycle")"
 
 
+echo "==> preflight: realistic ramp stages (30s/30s)"
+scripts/virtual-charger.sh stages 30 30 >/dev/null 2>&1 && echo "    3 kW ×30s → 7 kW ×30s → 22 kW" || echo "    WARN: could not set stages"
+
 echo "==> preflight: EUR pair"
 curl -fsS -m 10 "$URL/eur/v1/keys" >/dev/null && echo "    mint keys ok"
 curl -fsS -m 10 "$URL/eur-console/healthz" >/dev/null && echo "    console health ok"

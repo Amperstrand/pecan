@@ -34,6 +34,17 @@ for arg in "$@"; do
   esac
 done
 
+# Charger specs run against the shared virtual charger: shrink its ramp
+# stages for the suite (the film lane wants the realistic 30s/30s) and
+# restore them on exit — best-effort; a failed ssh just leaves timing
+# realistic, never wrong.
+restore_stages() {
+  ../scripts/virtual-charger.sh stages 30 30 >/dev/null 2>&1 || true
+}
+if ../scripts/virtual-charger.sh stages 3 3 >/dev/null 2>&1; then
+  trap restore_stages EXIT
+fi
+
 if [ "$PREFLIGHT" -eq 1 ]; then
   # Read-only prod invariants first: a dead deployment must fail here in
   # ~30s instead of inside a browser test minutes later.

@@ -74,16 +74,13 @@ RAIL = "ev"
 # value on every pair) makes the denominator 9, so no exact .5 cases
 # exist and the wallet's JS Math.round agrees cent-for-cent.
 #
-# WHY 100 units/kWh AND NOT A REAL-WORLD 0.50: the mint enforces a
-# 1-unit minimum melt (100 cents) and the device gateway caps a
-# session budget at 3600 kW·s. At 0.50/kWh the cheapest legal melt
-# (1 unit = 2 kWh = 7200 kW·s) exceeds that cap — refused outright —
-# and would otherwise run 12-40 min at the fleet's 3-10 kW draw.
-# P=100 keeps 1 unit = 36 kW·s: a full atomV session lands in 3.6-12
-# wall seconds (demo-legible), the 3600 kW·s gateway cap equals the
-# adapter's --max-amount (100 units) exactly, and refunds stay above
-# the mint's 1-unit minimum mint quote. Reaching a real-world price
-# needs sub-unit melts/mints first (tracked on #30).
+# WHY 0.50 units/kWh (real-world AC tariff, 2026-09-17 round): the
+# gateway now treats a session budget as METERED kW·s (cap 10M), the
+# simulated car ramps 3->7->22 kW, and e2e lanes shrink the ramp
+# stages (virtual-charger.sh stages) plus STOP mid-session — so the
+# old blockers (3600-cap rejections, 12-40 min natural caps) are gone.
+# Refunds stay above the mint's 1-unit minimum for any deposit >= 2
+# units; a 1-unit melt spends at most cents on a stopped session.
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +97,10 @@ def bill_cents(kws: int, eur_per_kwh: float) -> int:
 
 # The device gateway refuses trigger budgets above this (its window
 # contract); refusing locally names the cause instead of a bare 400.
-GATEWAY_MAX_KWS = 3600
+# The gateway validates 1..10,000,000 kW·s (a metered-energy budget,
+# not wall time — realistic tariffs authorize thousands of kW·s per
+# unit; the meter caps delivery at the authorization).
+GATEWAY_MAX_KWS = 10_000_000
 
 
 class Console:

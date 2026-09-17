@@ -162,6 +162,28 @@ charger with no physical twin.
   drift turned 54:5x into 54:49 (#19 data point; single clock read
   now).
 
+## Realistic-tariff round 2026-09-17 (afternoon)
+
+€0.50/kWh with a staged car ramp (3 kW ×30s → 7 kW ×30s → 22 kW,
+deterministic — a real negotiation curve, not a walk). Enablers: the
+gateway and daemon treat the session budget as metered kW·s (the
+legacy 3600 wall-cap rejected every realistic budget — found twice,
+in the gateway AND the daemon's own mirror); wallet humanizes kWh at
+realistic scales; strip/pole graphs rescale to 25 kW with stage
+bands; specs stop mid-session (natural caps take minutes at the unit
+minimum — selftest covers the cap; sub-2-unit budgets strand
+refunds below the mint minimum, so charger specs budget 2). Film:
+250s narrated cut — ramp visible stage by stage, euros descending in
+cents, 0.23 kWh for €0.11 of a €50 authorization. Two incident
+classes hit during the round, both cross-session: the other session's
+deploys repeatedly clobbered the live bundle AND /opt/pecan-tools/
+ev-charge.py (stale wallet price constant → daemon refund mismatch →
+balance 0); and a sed that matched [A-Za-z0-9]* left a $EV_PASSWORD
+suffix glued to a unit password → 401 loop → login-throttle storm
+(throttle is per-processor per-IP-username; a crash-looping daemon
+self-sustains it). ev-charge-deploy.sh now refreshes unit passwords
+on every rewrite.
+
 ## Narrated-movie round 2026-09-17 (evening)
 
 The full cut now ships as alice-final.mp4 WITH VOICEOVER: the spec

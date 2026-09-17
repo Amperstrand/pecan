@@ -190,6 +190,12 @@ const WITHDRAW_OPTIONS = [
 
 type WithdrawRail = (typeof WITHDRAW_OPTIONS)[number]["id"]
 
+// kW·s for small budgets; kWh once amounts pass a kilowatt-hour —
+// realistic tariffs authorize tens of kWh and raw kW·s stops reading.
+function formatEnergy(kws: number): string {
+  return kws >= 3600 ? `${(kws / 3600).toFixed(2)} kWh` : `${kws} kW·s`
+}
+
 function QrCodeImg({ text, alt }: { text: string; alt: string }) {
   const [src, setSrc] = useState<string | null>(null)
   useEffect(() => {
@@ -1372,10 +1378,10 @@ export function WalletPage() {
                   ⚡ Charging at {withdrawState.label}
                 </p>
                 <p className="text-3xl font-bold tabular-nums">
-                  {withdrawState.delivered}
+                  {formatEnergy(withdrawState.delivered)}
                   <span className="text-base font-normal text-muted-foreground">
                     {" "}
-                    / {withdrawState.requested || withdrawState.budget} kW·s
+                    / {formatEnergy(withdrawState.requested || withdrawState.budget)}
                   </span>
                 </p>
                 <div

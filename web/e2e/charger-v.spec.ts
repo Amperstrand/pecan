@@ -8,15 +8,18 @@ import { readBalance } from "./helpers/wallet"
 // is what keeps demos (and the @smoke fleet check) green while the
 // physical boxes are down.
 //
-// Energy pricing (#30 layer B): a €1 melt buys 36 kW·s of METERED
-// budget at the deployment's €100.00/kWh tariff. The car draws 3-10 kW,
-// so the budget completes in roughly 3.6-12 wall seconds — visible by
-// design, and far faster than the 36 s a wall-clock contract would need
-// for the same energy, which is exactly what the elapsed-time assertion
-// below pins: under energy pricing the WALL TIME depends on the load,
-// not on the budget's numeric value.
-const BUDGET_EUR = 1
-const BUDGET_KWS = 36 // 100 cents * 36/100 at €100/kWh
+// Realistic tariff (#30 layer B, 2026-09-17 round): €0.50/kWh with a
+// staged ramp (3 kW -> 7 kW -> 22 kW). A €1 melt authorizes 7200 kW·s
+// (2 kWh); with the suite's fast stage timers the car reaches stage 3
+// within seconds and the test STOPS mid-session (how real sessions
+// end) asserting metered stop-billing: spent cents == delivered kW·s
+// at €0.50/kWh, the rest refunds. Natural-cap completion is covered by
+// virtual-charger.sh selftest (device-level).
+// Budget 2 units: after cents of charging the refund stays above the
+// mint's 1-unit minimum quote (a 1-unit budget strands its refund).
+const BUDGET_EUR = 2
+const BUDGET_KWS = 14400 // 200 cents * 36/0.5
+const STOP_AT = 340 // ~10 Wh: past all three ramp stages
 
 test("charger V: virtual device session end to end (no hardware) @smoke", async ({ page }) => {
   // Internal waits (charge receipt, refund) budget up to 180s; the
@@ -50,21 +53,28 @@ test("charger V: virtual device session end to end (no hardware) @smoke", async 
   await page.getByRole("button", { name: "Start charging" }).click()
 
   await expect(page.getByText("Charging at Sim Charger")).toBeVisible({ timeout: 60_000 })
-  await expect(page.getByText(/Charged \d+ s at Sim Charger/)).toBeVisible({
-    timeout: 180_000,
-  })
+  const progress = page.getByRole("progressbar")
+  await expect
+    .poll(async () => Number(await progress.getAttribute("aria-valuenow")), {
+      timeout: 120_000,
+      interval: 250,
+    })
+    .toBeGreaterThanOrEqual(STOP_AT)
+  await page.getByRole("button", { name: "Stop charging" }).click()
+  await expect(
+    page.getByText(/(Charging stopped — \d+ s delivered|Charged \d+ s at Sim Charger)/),
+  ).toBeVisible({ timeout: 180_000 })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
-  expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}/)
+  expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}(-[A-Z]+)?$/)
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
-  // Meter-capped at the full budget: the 36 kW·s the €1 bought.
-  expect(delivered).toBe(BUDGET_KWS)
-  // Metered proof: at the car's 3-10 kW draw the 36 kW·s budget burns
-  // in 3.6-12 wall seconds — 30 s here rules out the legacy constant-
-  // rate contract (which needs the budget's full 36 s of wall time).
-  expect(Date.now() - startedAt, "metered delivery beats wall-clock").toBeLessThan(30_000)
-
-  // The full budget was consumed: billed cents == melted cents, no
-  // refund leg. Balance drops by exactly the melt.
+  // Stopped past every ramp stage; far under the authorization.
+  expect(delivered).toBeGreaterThanOrEqual(STOP_AT)
+  expect(delivered).toBeLessThan(BUDGET_KWS / 10)
+  // Metered proof: 340+ kW·s in well under 340 s of wall time rules
+  // out any constant-rate contract at these amounts.
+  expect(Date.now() - startedAt, "metered delivery beats wall-clock").toBeLessThan(120_000)
+  // Stop-billing: spent = delivered kW·s at €0.50/kWh (cent-rounded),
+  // the unspent authorization refunds.
   await expect
     .poll(async () => readBalance(page), { timeout: 200_000 })
     .toBeCloseTo(before - kwsToCents(delivered) / 100, 2)

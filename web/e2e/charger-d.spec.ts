@@ -8,7 +8,8 @@ import { readBalance } from "./helpers/wallet"
 // atom-bridge → MQTT charger/atomD/* → ack → done → receipt EV-atomD-Ns-*.
 // Energy pricing: €1 buys 36 kW·s at €100/kWh; D is meterless (1 kW), so
 // the window runs the budget's full 36 wall seconds.
-const BUDGET_EUR = 1
+// 2 units keeps the refund above the mint's 1-unit minimum.
+const BUDGET_EUR = 2
 
 test("charger D deposit-pattern session end to end", async ({ page }) => {
   // The charge + refund legs alone budget 120s + 180s inside; the default
@@ -22,14 +23,19 @@ test("charger D deposit-pattern session end to end", async ({ page }) => {
   await page.getByRole("button", { name: "Start charging" }).click()
 
   await expect(page.getByText("⚡ Charging at Charger D")).toBeVisible({ timeout: 60_000 })
+  // Realistic tariff: natural caps take minutes at the unit minimum —
+  // stop mid-session instead (how real sessions end).
   await expect
     .poll(
       async () => Number(await page.getByRole("progressbar").getAttribute("aria-valuenow")),
-      { timeout: 120_000 },
+      { timeout: 120_000, interval: 250 },
     )
-    .toBeGreaterThanOrEqual(1)
+    .toBeGreaterThanOrEqual(340)
 
-  await expect(page.getByText(/Charged \d+ s at Charger D/)).toBeVisible({ timeout: 180_000 })
+  await page.getByRole("button", { name: "Stop charging" }).click()
+  await expect(
+    page.getByText(/(Charging stopped — \d+ s delivered|Charged \d+ s at Charger D)/),
+  ).toBeVisible({ timeout: 180_000 })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
   expect(receipt).toMatch(/^EV-atomD-\d+s-[0-9A-F]{8}(-[A-Z]+)?$/)
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])

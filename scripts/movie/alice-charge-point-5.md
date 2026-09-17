@@ -14,6 +14,19 @@ black. Poster stills land in e2e/.results-video/alice-stills/. The
 real firmware-display path (landscape + single-charger profiles) is
 tracked as #29.
 
+**v5 (realistic-session round, 2026-09-17):** the tariff is a
+real-world **€0.50/kWh** and the car **ramps like a real EV — 3 kW
+for the first 30 s, 7 kW for the next 30, then 22 kW** (no random
+walk; a deterministic negotiation curve). The €50 deposit authorizes
+100 kWh; a stopped session spends cents-to-a-euro and refunds the
+rest — real charger behavior. Enablers shipped this round: the
+gateway/daemon treat the session budget as metered kW·s (the legacy
+3600 wall-cap rejected realistic budgets); the wallet shows kWh at
+realistic scales; the strip/pole graphs scale 0-25 kW with stage
+bands at 3/7/22; specs stop mid-session (natural caps take minutes
+at the unit minimum — selftest covers the cap); e2e lanes shrink
+ramp stages and movie.sh pins the realistic 30/30.
+
 **v1 decisions resolved in review:** the charge point is the **Sim
 Charger** (atomV — the name says it: simulated, no hardware) · **EUR
 pair** on giftcard.cashu.exchange (reusing the proven deployment; no

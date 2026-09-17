@@ -8,7 +8,8 @@
 #   scripts/virtual-charger.sh install   # upload + systemd unit + enable --now
 #   scripts/virtual-charger.sh status    # service + retained atomV status
 #   scripts/virtual-charger.sh selftest  # trigger a session; assert the
-#                                        # variable load (3-10 kW) telemetry
+#                                        # staged ramp (3 kW entry) telemetry
+#   scripts/virtual-charger.sh stages 30 30   # set ramp stage lengths (s)
 #   scripts/virtual-charger.sh stop|start
 set -eu
 
@@ -43,6 +44,11 @@ EOF
   ;;
 selftest)
   ssh "$SERVER" "cd $BRIDGE_DIR && set -a && . ./.env && set +a && node ev-virtual-selftest.mjs"
+  ;;
+stages)
+  S1=${2:?stage1 seconds required}; S2=${3:?stage2 seconds required}
+  ssh "$SERVER" "mkdir -p /etc/systemd/system/ev-virtual-charger.service.d && printf '[Service]\nEnvironment=STAGE1_S=$S1 STAGE2_S=$S2\n' > /etc/systemd/system/ev-virtual-charger.service.d/stages.conf && systemctl daemon-reload && systemctl restart ev-virtual-charger && sleep 2 && systemctl is-active ev-virtual-charger"
+  echo "ramp stages set: ${S1}s @3kW -> ${S2}s @7kW -> 22kW"
   ;;
 start)
   ssh "$SERVER" "systemctl start ev-virtual-charger && echo started"
