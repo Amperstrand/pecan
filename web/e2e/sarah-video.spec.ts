@@ -34,7 +34,7 @@ const SAY: Record<string, string> = Object.fromEntries(
 )
 const VOICE_DUR: Record<string, number> = (() => {
   try {
-    return JSON.parse(fs.readFileSync("e2e/.results-video/sarah-voice/durations.json", "utf8"))
+    return JSON.parse(fs.readFileSync("e2e/sarah-voice/durations.json", "utf8"))
   } catch {
     return {}
   }
