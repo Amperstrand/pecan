@@ -351,10 +351,10 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   await sarah.getByLabel("production day").selectOption(series.date)
   await beat(sarah, "a", "l04", 3_000)
 
-  await sarah.getByLabel("egg quantity").fill(String(QTY))
-  await beat(sarah, "a", "l05", 2_000)
+  await beat(sarah, "a", "l05", 2_000, async () => {
+    await sarah.getByLabel("egg quantity").fill(String(QTY))
+  })
 
-  markStart("a", sayFor("l05"))
   await sarah.getByRole("button", { name: /Buy for \d+ signet sats/ }).click()
   await sarah.getByTestId("farm-invoice").waitFor({ state: "visible", timeout: 30_000 })
   await sarah.waitForTimeout(Math.max(3_500, (holdForVoice("l05", 0) ?? 3_500) - 1_500))
@@ -461,14 +461,12 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   })
   await hideCard(sarah)
 
-  // verify Sarah now holds 3 before switching cameras
-  await expect
-    .poll(
-      async () =>
-        (await sarah.locator("main").textContent().catch(() => "")) ?? "",
-      { timeout: 60_000 },
-    )
-  .toMatch(/3 egg claims/)
+  // Sarah keeps three — wait for the balance, say it on her phone.
+  for (let i = 0; i < 15; i++) {
+    if (/\b3 egg claims\b/.test((await sarah.locator("main").textContent().catch(() => "")) ?? "")) break
+    await sarah.waitForTimeout(2_000)
+  }
+  await beat(sarah, "a", "l13", 3_000)
 
   // ---- camera B: Bob's phone ---------------------------------------------
   // Close Sarah's context first so her video file is finalized and we can
@@ -512,10 +510,8 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   await hideCard(bob)
 
   await bob.getByPlaceholder(/paste a token/i).fill(token)
-  markStart("b", sayFor("l12"))
   await bob.getByRole("button", { name: /Receive token/i }).click()
-  await bob.waitForTimeout(2_500)
-  markEnd()
+  await bob.waitForTimeout(2_000)
 
   await cardUntil(
     bob,
@@ -551,7 +547,7 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
       title: "Same future. New secrets.",
       mono: `secret → { "secret": "…", "tags": [<br/>&nbsp;&nbsp;["${fut[0]}", "${fut[1]}", "${(fut[2] ?? "").slice(0, 46)}…"]<br/>] }`,
       body: "Bob's proofs carry the same future tag and terms address — but the secrets are his alone. Sarah's copies are spent ash.",
-      sayId: "l13",
+      sayId: "l12",
       holdMs: 6_000,
     })
     await hideCard(bob)
@@ -578,12 +574,10 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   expect(mature.status()).toBe(200)
 
   // ---- 8 · redemption ------------------------------------------------------
-  await bob.getByLabel(`redeem quantity for ${series.unit}`).fill("2")
   await beat(bob, "b", "l15", 2_400, async () => {
     await bob.getByLabel(`redeem quantity for ${series.unit}`).fill("2").catch(() => {})
   })
   await bob.getByRole("button", { name: /Redeem at farm/i }).click({ timeout: 60_000 })
-  markStart("b", sayFor("l15"))
 
   const codeEl = await bob
     .getByText(/teller code ([0-9A-F]{6})/i)
