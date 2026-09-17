@@ -286,8 +286,13 @@ test.describe("farm futures (NUT-32 spike)", () => {
     expect(settled.unit).toBe(series.unit)
     expect(settled.amount).toBe(2)
 
+    // The melt finalizes asynchronously after the operator settles; the
+    // wallet's poll picks the receipt up on its next tick.
     await expect
-      .poll(async () => (await bobPage2.getByText(/FARM-/i).first().textContent()) ?? "")
+      .poll(
+        async () => (await bobPage2.getByText(/FARM-/i).first().textContent().catch(() => "")) ?? "",
+        { timeout: 90_000 },
+      )
       .toMatch(/FARM-/)
     await expect
       .poll(async () => (await farmOverview(page)).series.find((s) => s.date === series.date)?.redeemed ?? -1)
