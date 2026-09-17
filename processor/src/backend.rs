@@ -519,9 +519,15 @@ impl MintPayment for BranchBackend {
                 }
                 // Future melts are farm redemptions: proof burn at the
                 // counter against physical handover (the only exit for a
-                // future — never sats).
+                // future — never sats). The UNIT routes them: the gRPC
+                // proto drops the method name (upstream PR #2275), and
+                // melts carry no rail extra, so `method`/extra checks
+                // alone miss — a future: unit is unambiguous.
+                let unit_routes_future =
+                    crate::farm::valid_future_unit(&unit.to_string());
                 if opts.method.trim() == "future"
                     || future_extra(opts.extra_json.as_deref())
+                    || unit_routes_future
                 {
                     let farm = self.farm.as_ref().ok_or_else(|| {
                         Error::Custom("farm rail is not enabled on this processor".into())
