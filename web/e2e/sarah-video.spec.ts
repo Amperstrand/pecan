@@ -300,17 +300,16 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   await sarah.getByRole("tab", { name: "FARM" }).click()
   await sarah.getByLabel("production day").waitFor({ timeout: 30_000 })
   await sarah.getByLabel("production day").selectOption(series.date)
-  await beat(sarah, "a", "l04", 4_500)
+  await beat(sarah, "a", "l04", 3_000)
 
   await sarah.getByLabel("egg quantity").fill(String(QTY))
-  await beat(sarah, "a", "l05", 2_400)
+  await beat(sarah, "a", "l05", 2_000)
 
-  await beat(sarah, "a", "l06", 3_000)
+  markStart("a", sayFor("l05"))
   await sarah.getByRole("button", { name: /Buy for \d+ signet sats/ }).click()
   await sarah.getByTestId("farm-invoice").waitFor({ state: "visible", timeout: 30_000 })
+  await sarah.waitForTimeout(Math.max(3_500, (holdForVoice("l05", 0) ?? 3_500) - 1_500))
   markEnd()
-  // extra dwell on the invoice: the l06 line covers it
-  await sarah.waitForTimeout(Math.max(3_000, (holdForVoice("l06") ?? 3_000) - 2_000))
 
   // pay it for real from a lab node (off-camera)
   const invoice = await sarah.getByTestId("farm-invoice").inputValue()
@@ -329,47 +328,20 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   }
   expect(paid, "the invoice was paid over signet Lightning").toBe(true)
 
-  // The panel's balance projection can lag the mint by a minute on a
-  // fresh context (the finalize watcher writes the proofs late) — wait
-  // for the REAL count, with one reload behind a card as the unblocker.
-  async function sarahOwns(n: number): Promise<boolean> {
-    const body = (await sarah.locator("main").textContent().catch(() => "")) ?? ""
-    return new RegExp(`^\\s*${n} egg claims`).test(body) || new RegExp(`\\b${n} egg claims`).test(body)
-  }
+  // Ownership is proven by the panel's own YOU-OWN banner (set the moment
+  // the mint op resolves) — the balance header can lag minutes on a fresh
+  // context and burned a 3.7-minute hole in the first cut. Hard 45 s cap.
   await cardUntil(
     sarah,
     "a",
-    { title: "Payment confirmed.", body: "Minting 5 Friday egg claims — locked to Sarah's wallet key.", done: "5 claims minted.", sayId: "l07" } as CardOpts & { done: string },
+    { title: "Payment confirmed.", body: "Minting 5 Friday egg claims — locked to Sarah's wallet key.", done: "5 claims minted.", sayId: "l06" } as CardOpts & { done: string },
     async () =>
-      (await sarah
-        .getByText(new RegExp(`^\\s*${QTY} egg claims`))
-        .first()
-        .isVisible()
-        .catch(() => false)) ||
-      (await sarah
-        .getByText(new RegExp(`\\b${QTY} egg claims\\b`))
-        .first()
-        .isVisible()
-        .catch(() => false)),
-    150_000,
+      /YOU OWN — Farm eggs/.test((await sarah.locator("main").textContent().catch(() => "")) ?? ""),
+    45_000,
   )
-  if (!(await sarahOwns(QTY))) {
-    await card(sarah, "a", {
-      title: "Syncing her wallet…",
-      body: "The claims are at the mint; the wallet picks them up on a fresh read.",
-      holdMs: 3_500,
-    })
-    await sarah.reload()
-    await installChrome(sarah)
-    await sarah.getByRole("tab", { name: "FARM" }).click()
-    await sarah.getByLabel("production day").waitFor({ timeout: 60_000 })
-    for (let i = 0; i < 20 && !(await sarahOwns(QTY)); i++) {
-      await sarah.waitForTimeout(3_000)
-    }
-  }
 
   // ---- 5 · ownership + details ------------------------------------------
-  await beat(sarah, "a", "l08", 4_500, async () => {
+  await beat(sarah, "a", "l07", 4_500, async () => {
     await sarah.getByRole("button", { name: /details/i }).first().click().catch(() => {})
   })
 
@@ -380,31 +352,55 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
     title: `Five of ${series.capacity}, ever.`,
     mono: `issued &nbsp;&nbsp;${oracleMid.issued} / capacity ${series.capacity}<br/>free &nbsp;&nbsp;&nbsp;&nbsp;${oracleMid.remaining_issuable}<br/>terms &nbsp;&nbsp;${series.terms_sha256.slice(0, 16)}…`,
     body: "The farm's ledger counts aggregates only — one claim beyond capacity mathematically cannot be minted.",
-    sayId: "l09",
+    sayId: "l08",
     holdMs: 6_000,
   })
 
-  // ---- 6 · send 2 to Bob -------------------------------------------------
+  // ---- 6 · the handover: Sarah GIVES Bob two of her notes ---------------
   await card(sarah, "a", {
-    title: "Sarah's plans change.",
-    body: "She sells two of her five claims to Bob — a normal Cashu split. The unit and the terms tag survive every swap; the farm learns nothing about who holds what.",
-    sayId: "l10",
-    holdMs: 6_000,
+    title: "A handover, not a payment.",
+    body: "Sarah gives Bob two of her notes — the way you hand someone banknotes.",
+    sayId: "l09",
+    holdMs: 5_000,
   })
   await hideCard(sarah)
 
   await sarah.getByLabel(`send quantity for ${series.unit}`).fill("2")
-  markStart("a", "Send two.")
-  await sarah.waitForTimeout(2_000)
-  markEnd()
-  markStart("a", sayFor("l11"))
   await sarah.getByRole("button", { name: /Send to Bob/i }).click({ timeout: 90_000 })
   await sarah.getByTestId("farm-token").waitFor({ state: "visible", timeout: 60_000 })
-  await sarah.waitForTimeout(Math.max(5_500, (holdForVoice("l11", 0) ?? 5_500) - 2_000))
-  markEnd()
+  await sarah.waitForTimeout(2_000)
 
   const token = await sarah.getByTestId("farm-token").inputValue()
   expect(token.length).toBeGreaterThan(50)
+
+  // ---- decode what Sarah hands Bob: the token IS her proofs ----------
+  const decoded = await sarah.evaluate(
+    async (tok) => {
+      const mod = await import("/src/lib/coco/farm.ts").catch(() => null)
+      void mod
+      const raw = tok.startsWith("cashuA") ? tok.slice(6) : tok.slice(6)
+      const b64 = raw.replace(/-/g, "+").replace(/_/g, "/")
+      const json = JSON.parse(
+        new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))),
+      )
+      const entry = json.token?.[0] ?? json
+      return {
+        mint: (entry.mint ?? json.mint ?? "").replace("https://", ""),
+        unit: entry.unit ?? json.unit ?? "?",
+        proofs: entry.proofs?.length ?? 0,
+        amounts: (entry.proofs ?? []).map((pr: { amount?: number }) => pr.amount).join("+"),
+      }
+    },
+    token,
+  )
+  await card(sarah, "a", {
+    title: "What Bob receives.",
+    mono: `mint &nbsp;&nbsp;${decoded.mint}<br/>unit &nbsp;&nbsp;${decoded.unit}<br/>proofs &nbsp;${decoded.proofs} (${decoded.amounts})<br/>&nbsp;<br/>these are SARAH's proofs<br/>— bearer notes`,
+    body: "The token is just Cashu proofs, base64. Whoever holds them can swap them — that's the handover.",
+    sayId: "l10",
+    holdMs: 6_000,
+  })
+  await hideCard(sarah)
 
   // verify Sarah now holds 3 before switching cameras
   await expect
@@ -450,14 +446,14 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
 
   await card(bob, "b", {
     title: "Bob's phone.",
-    body: "Bob pastes the token Sarah handed him. Receiving swaps the proofs into fresh ones — bound to Bob's wallet now.",
-    sayId: "l13",
-    holdMs: 5_500,
+    body: "Bob pastes the notes and swaps them at the mint.",
+    sayId: "l11",
+    holdMs: 5_000,
   })
   await hideCard(bob)
 
   await bob.getByPlaceholder(/paste a token/i).fill(token)
-  markStart("b", sayFor("l14"))
+  markStart("b", sayFor("l12"))
   await bob.getByRole("button", { name: /Receive token/i }).click()
   await bob.waitForTimeout(2_500)
   markEnd()
@@ -465,31 +461,48 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   await cardUntil(
     bob,
     "b",
-    { title: "Bob owns 2 Friday eggs.", body: "Sarah kept 3. Total supply is still 5 — the farm never recorded either of them.", done: "Bearer ownership, aggregate accounting.", sayId: undefined } as CardOpts & { done: string },
-    async () =>
-      (await bob
-        .getByText(/\b2 egg claims\b/)
-        .first()
-        .isVisible()
-        .catch(() => false)) ||
-      (await bob
-        .getByText(/\b2 claims\b/)
-        .first()
-        .isVisible()
-        .catch(() => false)),
-    150_000,
+    { title: "Swapped.", body: "Sarah's notes burned; fresh proofs of the same future issued to Bob.", done: "Bob owns 2 Friday eggs.", sayId: undefined } as CardOpts & { done: string },
+    async () => /2 egg claims|2 claims of/.test((await bob.locator("main").textContent().catch(() => "")) ?? ""),
+    60_000,
   )
-  // Give the balance header the same chance, off-card.
-  for (let i = 0; i < 10; i++) {
-    if (/\b2 egg claims\b/.test((await bob.locator("main").textContent().catch(() => "")) ?? "")) break
-    await bob.waitForTimeout(3_000)
+
+  // Decode one of BOB's proof secrets: same future tag, brand-new secret.
+  const bobSecret = await bob.evaluate(async (unit) => {
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open("giftcard-coco-wallet")
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error)
+    })
+    const rows = await new Promise((resolve) => {
+      const tx = db.transaction("coco_cashu_proofs", "readonly")
+      const req = tx.objectStore("coco_cashu_proofs").getAll()
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => resolve([])
+    })
+    const mine = rows.filter(
+      (r: { unit?: string; state?: string }) => r.unit === unit && r.state !== "spent",
+    )
+    if (mine.length === 0) return null
+    return String(mine[0]!.secret ?? (mine[0] as { proof?: { secret?: string } }).proof?.secret ?? "")
+  }, series.unit)
+  if (bobSecret) {
+    const bobTag = JSON.parse(bobSecret) as { tags?: string[][] }
+    const fut = bobTag.tags?.find((t) => t[0] === "future") ?? []
+    await card(bob, "b", {
+      title: "Same future. New secrets.",
+      mono: `secret → { "secret": "…", "tags": [<br/>&nbsp;&nbsp;["${fut[0]}", "${fut[1]}", "${(fut[2] ?? "").slice(0, 46)}…"]<br/>] }`,
+      body: "Bob's proofs carry the same future tag and terms address — but the secrets are his alone. Sarah's copies are spent ash.",
+      sayId: "l13",
+      holdMs: 6_000,
+    })
+    await hideCard(bob)
   }
 
   // ---- 7 · maturity -------------------------------------------------------
   await card(bob, "b", {
     title: "Friday, 16:00 UTC.",
     body: "The series matures. (For the film we advance the clock with the admin override — production code checks the real timestamp.)",
-    sayId: "l15",
+    sayId: "l14",
     holdMs: 5_500,
   })
   await hideCard(bob)
@@ -507,11 +520,11 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
 
   // ---- 8 · redemption ------------------------------------------------------
   await bob.getByLabel(`redeem quantity for ${series.unit}`).fill("2")
-  await beat(bob, "b", "l16", 2_400)
-  markStart("b", sayFor("l17"))
+  await beat(bob, "b", "l15", 2_400, async () => {
+    await bob.getByLabel(`redeem quantity for ${series.unit}`).fill("2").catch(() => {})
+  })
   await bob.getByRole("button", { name: /Redeem at farm/i }).click({ timeout: 60_000 })
-  await bob.waitForTimeout(2_400)
-  markEnd()
+  markStart("b", sayFor("l15"))
 
   const codeEl = await bob
     .getByText(/teller code ([0-9A-F]{6})/i)
@@ -523,7 +536,7 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   await card(bob, "b", {
     title: `Teller code ${tail}`,
     body: "The operator matches the code, hands over two physical eggs, and settles. Until the settle, nothing is consumed.",
-    sayId: "l18",
+    sayId: "l16",
     holdMs: 6_500,
   })
   await hideCard(bob)
@@ -552,22 +565,22 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   await cardUntil(
     bob,
     "b",
-    { title: "Redeemed.", mono: `receipt ${settled.receipt}`, body: "Two claims burned, two eggs delivered. The same proofs can never be spent again — double redemption dies on the mint's spent-state.", done: "Physical settlement complete.", sayId: "l19" } as CardOpts & { done: string },
+    { title: "Redeemed.", mono: `receipt ${settled.receipt}`, body: "Two claims burned, two eggs delivered. The same proofs can never be spent again — double redemption dies on the mint's spent-state.", done: "Physical settlement complete.", sayId: "l17" } as CardOpts & { done: string },
     async () => /FARM-/.test((await bob.locator("main").textContent().catch(() => "")) ?? ""),
-    120_000,
+    30_000,
   )
 
   // ---- 9 · outro -----------------------------------------------------------
   await card(bob, "b", {
     title: "What just happened.",
-    body: `Signet sats in → dated bearer claims out → hand-to-hand transfer → physical redemption. ${oracleMid.issued} of 10 issued, 2 redeemed, one receipt.`,
-    say: "Signet sats in. Dated bearer claims out. Hand to hand transfer. Physical redemption. Five of ten issued, two redeemed, one receipt.",
+    body: `Signet sats in → dated bearer claims out → given hand to hand → redeemed at maturity. ${oracleMid.issued} issued, 2 redeemed, one receipt.`,
+    sayId: "l18",
     holdMs: 6_500,
   })
   await card(bob, "b", {
     title: "NUT-32, draft one.",
     body: "Unit grammar, one future tag per secret, signed content-addressed terms, per-day capacity — all enforced by a modified mint and checked by automated tests on the live deployment.",
-    sayId: "l21",
+    sayId: "l19",
     holdMs: 7_000,
   })
 
