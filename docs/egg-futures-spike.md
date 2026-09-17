@@ -208,3 +208,138 @@ Shortfall demo (admin): `POST /farm-console/api/farm/series/<date>/production
   5000-sat payment, proof/tag/terms-digest assertions, Sarah→Bob bearer
   transfer, redemption + double-spend refusal), capacity, maturity
   refusal.
+
+## Final report (2026-09-17)
+
+### Deployed URLs
+- Wallet (Sarah UI): https://giftcard.cashu.exchange/wallet — **FARM** tab
+- Farm mint: https://giftcard.cashu.exchange/farm/v1/* (NUT-32 fork image `cashubtc/mintd:nut32`, inr2 :8100, prometheus :9102)
+- Farm console: https://giftcard.cashu.exchange/farm-console/*
+- Terms blobs: https://giftcard.cashu.exchange/farm-console/terms/<sha256>
+- Series oracle: https://giftcard.cashu.exchange/farm-console/api/farm/<date>
+
+### Actual hostname used
+`giftcard.cashu.exchange` (the task file's `giftcare` was the anticipated
+typo; the existing infrastructure was used, none created in parallel).
+
+### Branch/commits
+- pecan: branch `spike/nut32-egg-futures` (off `deployment` @ f785505).
+  Not pushed — the user pushes.
+- cdk fork: `~/src/cdk-nut32`, branch `pecan-nut32` (v0.18.0 + 5 spike
+  commits; image built by `scripts/build-mintd-nut32.sh`).
+- coco fork: `~/src/coco`, branch `nut32-futures` (1.0.18, vendored).
+
+### Pecan modifications
+`processor/src/farm.rs` (series/purchase/redemption ledger), `backend.rs`
+(future-rail routing — melt routes BY UNIT because the gRPC proto drops
+method names), `web.rs` (farm API + terms store + redemption gate in
+mark-paid), `payout.rs` (farm receipt), `main.rs`, `scripts/pairs.sh` +
+`deploy/docker-compose.farm.yml` + `scripts/build-mintd-nut32.sh`,
+api-smoke/reconcile/e2e wiring. Wallet: `web/src/lib/coco/farm.ts`,
+future-methods/mint-future-handler/melt-future-handler, the FARM tab
+(`farm-panel.tsx`), currency registry entry, coco fork 1.0.16–1.0.18.
+
+### CDK/mintd modifications (fork)
+NUT-06 `"32"` advert; `nut32` grammar/secret/canonical-JSON/signing module;
+dynamic series registration (per-series keyset, processor wiring for
+`(unit, future)`, NUT-04/05 settings, KV persistence); spend-time proof
+validation in `verify_inputs`; runtime-processor resolution in
+`check_mint_quote_paid`, `get_melt_custom_quote_impl`, the melt saga, and
+the start-up melt check; token-guarded admin routes
+(`/nut32/admin/{healthz,series,sign-terms}`) with BIP-340 terms signing
+under the mint identity key. **Amendment**: the fork also STOPPED
+lowercasing `future:` units — reconciled the other way in the end: the
+draft now lowercases the whole unit (cdk's established normalization), and
+NO cdk carve-out remains.
+
+### NUT-32 subset implemented
+Unit grammar (whole-unit lowercase), exactly-one `["future","1",uri]`
+secret tag, canonical terms JSON + `Cashu_NUT32_Terms_v1:` BIP-340
+signing, content-addressed blob, capability advert, per-series keysets,
+spend-time validation (swap+melt), unit preservation (cdk's own
+`UnitMismatch` on cross-unit swaps).
+
+### Deviations/extensions
+1. Physical settlement = spent proofs + FARM receipt (labeled
+   experimental). 2. Issuance-time secret validation is impossible for
+   blinded outputs — enforced at unit/quote level + every spend.
+3. Shortfall = issuer-default with refused over-redemption. 4. The draft
+   was AMENDED during the spike: unit grammar lowercases whole (aligning
+   with cdk's custom-unit normalization as established practice).
+
+### Key mechanisms
+- Mint identity signing: `POST /nut32/admin/sign-terms` inside mintd;
+  BIP-340 over SHA-256 of the domain-prefixed canonical payload; the key
+  never leaves mintd; verifiable against the NUT-06 `pubkey`
+  (`02aba29c5ad2705d…`).
+- Content addressing: blob bytes → SHA-256 → served at `/terms/<sha256>`;
+  double-writes of different bytes are refused; api-smoke pins
+  byte-stability.
+- Capacity ≤ 10/day: single-writer state lock — `issued + Σ(open|paid|
+  authorized reservations) ≤ capacity` checked atomically at insert;
+  unpaid quotes expire (TTL sweep), paid-but-unclaimed purchases release
+  after a 24 h claim window. Concurrent race: 12 parallel purchases
+  reserve exactly 10 (cargo test).
+- Signet confirmation: raw-sat bolt11 on the shared signet CLN; CLN
+  `listinvoices` polled → PAID; the e2e paid 5000 msat per run and CLN
+  reports the settled invoices independently.
+
+### The Sarah purchase tested (live)
+`FP-b8f2c4835fb5`, series 2026-09-19 (`future:farm-egg:20260919t160000z`),
+qty 5, 5000 sat (real lightning payment via cln-hub→cln-swap), mint quote
+`01a0ad60…`, proofs hold the exactly-one future tag with the series'
+terms URI; oracle: issued 5, redeemed 2, remaining 5. Sarah→Bob: bearer
+token (2 of 5), Bob owns 2; farm knows aggregates only. Redemption:
+mature-now (admin demo override) → Bob melts 2 → teller matches
+`MELT-01a0ad61` → receipt `FARM-260917-90E2A022`; a replayed token/melt
+dies on spent proofs. Evidence: `docker exec pecan-farm-pecan-1 cat
+/var/lib/cdk-branch-processor/farm.json` + the CLN invoice list (83 paid
+farm invoices, 295 000 sat across the whole debugging campaign).
+
+### Physical-settlement ambiguity handling
+The redemption gate (maturity + production cap) runs BEFORE the burn;
+redeemed counts are RE-DERIVED from the teller ticket store (the
+authoritative burn record) on boot and after every settle — a crash
+between handover and accounting self-heals on the next pass.
+
+### Charger refactor performed
+`payout::receipt_for_rail("farm")` beside the other rails; the
+lifecycle-mapping table above; the farm module deliberately reuses the
+ticket store, event channel, sweeper cadence, and snapshot lessons
+(price/terms frozen per purchase). Plus two ops repairs discovered by the
+spike: the server's `ev-charge.py` had drifted to a 36 s/€ tariff
+(charger-V smoke timeout) — deploy.sh now syncs it; and the ev-rail
+slider-text regex had been stale since the currency-agnostic copy change.
+
+### Automated tests and results
+- processor: **101 passed** (12 farm: grammar, capacity, races, expiry
+  release, payment-before-issuance, one-quote-per-purchase, maturity +
+  shortfall gating, aggregate-only privacy).
+- cdk fork: **7 nut32 tests** + 602 existing cashu tests compile/run.
+- web vitest: **83 passed** (incl. BIP-340 client-side verify pin).
+- e2e: **farm.spec.ts 3/3 green on prod** (sarah_buys_five_friday_eggs_
+  with_signet — 5000 real sats; capacity invariant; immature-redemption
+  refusal). Smoke suite **16/16**, ev-rail deposit pattern **green**,
+  charger-V **green**.
+- api-smoke: **PASS** (all four pairs + the NUT-32 section); reconcile
+  clean on all four pairs.
+
+### Remaining technical debt
+1. The generic coco receive pipeline wedges fresh contexts (Bob's
+   receive goes through our tagged-swap core instead).
+2. addMint crawls super-linearly on dozens of dated keysets — the horizon
+   is capped at 10 days; a keyset-pagination/lazy-fetch fix in coco is
+   the real repair.
+3. Terms-blob signing happens at bootstrap only; re-signing after a mintd
+   identity change is manual (re-wipe).
+4. The farm pair's mintd is a fork image — upstreaming NUT-32 (or a
+   plugin API) is the long-term home; the melt-method name over gRPC
+   (upstream PR #2275) still forces unit-based routing.
+5. Paid-claim-window releases capacity after 24 h with the sats kept — a
+   real deployment needs a refund rail.
+
+### Smallest next experiment
+Fix coco's addMint keyset handling (lazy per-unit fetch) and raise the
+horizon back to a month; then run a REAL seven-day maturity (no
+demo override) end-to-end with a daily faucet top-up, proving the
+timestamp path — everything else in the story is already live.
