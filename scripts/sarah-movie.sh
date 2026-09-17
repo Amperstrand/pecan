@@ -60,18 +60,43 @@ echo "==> fetch the farm admin password (redemption leg)"
 PW=$($SSH_BUILDER "$SERVER" 'cat /opt/pecan-farm-config/initial-admin-password.txt' 2>/dev/null | tail -1)
 [ -n "$PW" ] || { echo "!! no farm admin password on the server" >&2; exit 1; }
 
-echo "==> pass 2: camera ($MODE)"
-rm -rf web/e2e/.results-video/sarah-take web/e2e/.results-video/sarah-video-* 2>/dev/null || true
-cd web
-set +e
-PECAN_VIDEO=1 \
-PECAN_FARM_ADMIN_PASSWORD="$PW" \
-PECAN_HEADLESS="$([ "$MODE" = "headless" ] && echo 1 || echo 0)" \
-  npx playwright test sarah-video --config playwright.video.config.ts --reporter=line
-STATUS=$?
-set -e
-cd ..
-[ "$STATUS" = "0" ] || exit "$STATUS"
+# Pass 2 with self-healing: a concurrent deployer on the network
+# intermittently reverts the wallet to a farm-less bundle; the spec's
+# preflight fails fast when that happens — redeploy and retry the take
+# (up to 3 rounds) instead of losing the session.
+run_camera() {
+  rm -rf web/e2e/.results-video/sarah-take web/e2e/.results-video/sarah-video-* 2>/dev/null || true
+  cd web
+  set +e
+  PECAN_VIDEO=1 \
+  PECAN_FARM_ADMIN_PASSWORD="$PW" \
+  PECAN_HEADLESS="$([ "$MODE" = "headless" ] && echo 1 || echo 0)" \
+    npx playwright test sarah-video --config playwright.video.config.ts --reporter=line
+  local st=$?
+  set -e
+  cd ..
+  return $st
+}
+TAKE=0
+while :; do
+  TAKE=$((TAKE + 1))
+  echo "==> pass 2: camera ($MODE, take $TAKE)"
+  if run_camera; then
+    break
+  fi
+  if [ "$TAKE" -ge 3 ]; then
+    echo "!! three takes failed — giving up" >&2
+    exit 1
+  fi
+  echo "==> take $TAKE failed; checking whether a concurrent deploy reverted the wallet"
+  JS=$(curl -s -m 10 "$URL/wallet" | grep -oE 'assets/index-[^"]*\.js' | head -1)
+  if curl -s -m 10 "$URL/$JS" | grep -q FARM; then
+    echo "    wallet still farm-tabbed (crash failure, not a revert) — retrying anyway"
+  else
+    echo "    wallet reverted by a concurrent deploy — redeploying before the retry"
+    sh scripts/deploy.sh >/dev/null || { echo "!! redeploy failed" >&2; exit 1; }
+  fi
+done
 
 echo "==> pass 3: cut (builder)"
 $SSH_BUILDER "$BUILDER" 'rm -rf /tmp/sarah-film && mkdir -p /tmp/sarah-film' 2>/dev/null
