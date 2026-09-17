@@ -1,0 +1,27 @@
+{
+  "voice": "am_michael",
+  "speed": 0.94,
+  "lines": [
+    { "id": "l01", "text": "Sarah wants eggs next Friday. On signet, that's a futures contract — a Cashu future." },
+    { "id": "l02", "text": "Each production day is its own series. The unit names the farm, the commodity, and the maturity. Friday's eggs are not Saturday's eggs." },
+    { "id": "l03", "text": "The terms are a small signed document. Its SHA-256 digest is its address. Every proof's secret carries one tag pointing at it — future, version one, that address." },
+    { "id": "l04", "text": "Sarah opens the farm tab and picks a production day." },
+    { "id": "l05", "text": "Five eggs, at twenty-one sats each." },
+    { "id": "l06", "text": "One hundred and five sats. A real Lightning invoice on signet." },
+    { "id": "l07", "text": "Paid. The mint issues exactly five claims, locked to Sarah's wallet key." },
+    { "id": "l08", "text": "Five bearer claims, and the details show the unit, the terms digest, and the maturity." },
+    { "id": "l09", "text": "The farm's ledger counts totals only — five issued, capacity ten thousand. A claim beyond capacity simply cannot be minted." },
+    { "id": "l10", "text": "Plans change. Sarah sends two claims to Bob." },
+    { "id": "l11", "text": "The swap keeps the unit and the future tag, and mints fresh secrets. What leaves is a bearer token — the farm never learns who holds it." },
+    { "id": "l12", "text": "Sarah keeps three." },
+    { "id": "l13", "text": "Bob's phone. He pastes the token." },
+    { "id": "l14", "text": "Two claims, now Bob's. The farm's ledger never moved — total supply is still five." },
+    { "id": "l15", "text": "Friday, four p.m. — the series matures. For the film, we advance the clock with the admin override." },
+    { "id": "l16", "text": "Bob redeems two at the counter." },
+    { "id": "l17", "text": "The wallet burns the proofs and shows the teller a code." },
+    { "id": "l18", "text": "The operator matches the code, hands over two eggs, and settles. Until that moment, nothing is consumed." },
+    { "id": "l19", "text": "Redeemed. Two claims burned, two eggs delivered — and the spent proofs can never be spent again." },
+    { "id": "l20", "text": "Signet sats in. Dated bearer claims out. Hand to hand, no registry. Physical redemption at maturity." },
+    { "id": "l21", "text": "NUT-32, draft one — live on signet, enforced by the mint, and checked end to end by automated tests." }
+  ]
+}

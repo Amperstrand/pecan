@@ -27,8 +27,8 @@ services:
       # content-addressed terms via the mintd NUT-32 admin routes),
       # purchases + capacity, redemption gating.
       CDK_BRANCH_PROCESSOR_FARM: "true"
-      CDK_BRANCH_PROCESSOR_FARM_PRICE_SATS: "1000"
-      CDK_BRANCH_PROCESSOR_FARM_CAPACITY: "10"
+      CDK_BRANCH_PROCESSOR_FARM_PRICE_SATS: "21"
+      CDK_BRANCH_PROCESSOR_FARM_CAPACITY: "10000"
       CDK_BRANCH_PROCESSOR_FARM_HORIZON_DAYS: "10"
       CDK_BRANCH_PROCESSOR_FARM_MATURITY_HOUR_UTC: "16"
       CDK_BRANCH_PROCESSOR_FARM_PUBLIC_BASE_URL: "https://giftcard.cashu.exchange/farm-console"
