@@ -91,5 +91,14 @@ for pair in $PAIRS; do
   else
     echo "==> deployed $pair: $BUNDLE"
   fi
+  # Content check: the wallet must carry the farm currency and the NUT-32
+  # client. A builder-cache fluke once served a month-old farm-less bundle
+  # under a fresh tag — bundle-name equality cannot catch that.
+  JS=$(curl -s -m 10 "$URL/assets/$(basename "$BUNDLE")")
+  case "$pair" in
+    eur)
+      echo "$JS" | grep -q "FARM" || { echo "!! $pair bundle lacks the FARM wallet tab" >&2; fail=1; }
+      ;;
+  esac
 done
 exit $fail
