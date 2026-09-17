@@ -1,11 +1,12 @@
 # Pecan + EV rail — status, limitations, and where to go next
 
-Snapshot: 2026-09-15 (updated after the hygiene round — canonical pair
-manifest, NOK into backup/smoke/reconcile, one deploy image tag, ev on
-USD, fleet card; see the 2026-09-15 section). Live at
-https://giftcard.cashu.exchange. This is
-the honest map of what works, what is known-broken or limited, and the
-ranked backlog. Keep it current when the picture changes.
+Snapshot: 2026-09-17 (NUT-32 egg-futures spike landed — a fourth `farm`
+pair with dated `future:farm-egg:<maturity>` series, wallet-bound
+issuance against real signet payments, bearer transfer, teller
+redemption; see docs/egg-futures-spike.md). Live at
+https://giftcard.cashu.exchange. This is the honest map of what works,
+what is known-broken or limited, and the ranked backlog. Keep it current
+when the picture changes.
 
 ## Architecture snapshot
 
