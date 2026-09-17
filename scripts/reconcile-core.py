@@ -35,7 +35,13 @@ print(f"outgoing: {len(melt_tickets)} tickets vs {len(melt_quotes)} melt quotes"
 for qid, t in melt_tickets.items():
     q = melt_quotes.get(qid)
     if q is None:
-        flag(f"ticket {t['id']} ({t['status']}) has no melt quote — expired unfunded?")
+        if t['status'] == 'failed':
+            # The #13 daemon's terminal state: expired unfunded / rolled
+            # back (mark-failed + PaymentFailed) — the quote is gone on
+            # purpose and the ticket carries the audit note. Not drift.
+            print(f"  note: {t['id'][:13]}: failed, no melt quote (daemon-closed expiry)")
+        else:
+            flag(f"ticket {t['id']} ({t['status']}) has no melt quote — expired unfunded?")
         continue
     ticket_paid, quote_state = t['status'] == 'paid', q['state']
     proofs = db.execute(

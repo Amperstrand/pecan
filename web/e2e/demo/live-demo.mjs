@@ -9,7 +9,9 @@
 // Env:
 //   PECAN_DEMO_ADMIN_PASSWORD  required — scripts/demo.sh fetches it
 //   PECAN_DEMO_FUND     deposit amount in NOK        (default 25)
-//   PECAN_DEMO_BUDGET   charge budget in kW·s        (default 12)
+//   PECAN_DEMO_BUDGET   charge budget in NOK          (default 2 —
+//                       72 kW·s at the 100 kr/kWh energy tariff; D is
+//                       meterless so the window runs ~72 s, atomV 7-24 s)
 //   PECAN_DEMO_DEVICE   charger device id            (default atomD)
 //
 // The wallet profile persists in /tmp/pecan-demo-profile — balance carries
@@ -23,7 +25,10 @@ const CONSOLE = "/nok-console"
 const PROFILE_DIR = "/tmp/pecan-demo-profile"
 const SHOTS = "/tmp/pecan-demo"
 const FUND = Number(process.env.PECAN_DEMO_FUND ?? 25)
-const BUDGET = Number(process.env.PECAN_DEMO_BUDGET ?? 12)
+const BUDGET = Number(process.env.PECAN_DEMO_BUDGET ?? 2)
+// Energy pricing (100 NOK/kWh): metered kW·s to NOK cents, matching the
+// daemon's and wallet's arithmetic.
+const kwsToNok = (kws) => Math.round((kws * 100) / 36) / 100
 const DEVICE = process.env.PECAN_DEMO_DEVICE ?? "atomD"
 const CHARGER_TAB = {
   atomA: "Charger A",
@@ -195,7 +200,7 @@ async function main() {
     ok("balance sufficient — skipping top-up (set PECAN_DEMO_FUND to force one)")
   }
 
-  step(`charge: melt NOK ${BUDGET} to ${DEVICE} (${CHARGER_TAB})`)
+  step(`charge: melt NOK ${BUDGET} (${Math.round(BUDGET * 36)} kW·s at 100 kr/kWh) to ${DEVICE} (${CHARGER_TAB})`)
   await resetWithdrawForm(wallet)
   const balanceBeforeCharge = await readBalance(wallet)
   const meltRefs = []
@@ -260,22 +265,24 @@ async function main() {
   await shot(wallet, "7-receipt")
 
   const delivered = Number(receipt.match(/-(\d+)s-/)?.[1] ?? 0)
+  const spent = kwsToNok(delivered)
   const finalDeadline = Date.now() + 200_000
   for (;;) {
     balance = await readBalance(wallet)
-    // Deposit pattern: the whole budget melted up front, delivered kW·s
-    // consumed, the unspent part refunded — final = before − delivered.
-    if (Math.abs(balance - (balanceBeforeCharge - delivered)) < 0.02) break
+    // Deposit pattern: the whole budget melted up front, metered kW·s
+    // consumed at the kr/kWh tariff, the unspent part refunded —
+    // final = before − spent.
+    if (Math.abs(balance - (balanceBeforeCharge - spent)) < 0.02) break
     if (Date.now() > finalDeadline) break
     await sleep(1_000)
   }
-  if (Math.abs(balance - (balanceBeforeCharge - delivered)) >= 0.02) {
-    fail(`balance NOK ${balance.toFixed(2)} ≠ expected NOK ${(balanceBeforeCharge - delivered).toFixed(2)} (before ${balanceBeforeCharge} − delivered ${delivered})`)
+  if (Math.abs(balance - (balanceBeforeCharge - spent)) >= 0.02) {
+    fail(`balance NOK ${balance.toFixed(2)} ≠ expected NOK ${(balanceBeforeCharge - spent).toFixed(2)} (before ${balanceBeforeCharge} − spent ${spent} for ${delivered} kW·s)`)
   }
   const session = await sessionState()
   step("demo result")
   console.log(`  charger ${DEVICE}   : delivered ${delivered} kW·s (relay clicked, session ${session?.state ?? "closed"})`)
-  console.log(`  gateway accounting : delivered=${session?.delivered ?? delivered} remaining=${session?.remaining ?? 0} requested=${session?.requested ?? BUDGET}`)
+  console.log(`  gateway accounting : delivered=${session?.delivered ?? delivered} remaining=${session?.remaining ?? 0} requested=${session?.requested ?? Math.round(BUDGET * 36)}`)
   console.log(`  receipt            : ${receipt}`)
   console.log(`  wallet balance     : NOK ${balance.toFixed(2)}`)
   console.log(`  artifacts          : ${SHOTS}/`)

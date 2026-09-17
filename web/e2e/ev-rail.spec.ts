@@ -1,7 +1,7 @@
 import { execSync, spawn, type ChildProcess } from "node:child_process"
 import { test, expect, type Page } from "@playwright/test"
 import { apiLogin, matchAndSettle, readBalance, readTellerCode } from "./helpers/wallet"
-import { bootAndFund, chargeCOnly } from "./helpers/ev-rail"
+import { bootAndFund, chargeCOnly, kwsToCents } from "./helpers/ev-rail"
 
 // Firmware-button simulation: publishes the exact MQTT message the G39
 // press sends (charger/<device>/aborted {"delivered": k}) the moment the
@@ -117,8 +117,8 @@ test("ev rail: charger C (T-Display S3) — window runs to done, refund exact", 
   test.skip(!password, "admin password unavailable")
   test.skip(!deviceOnline(), "charger offline (no box online)")
 
-  await bootAndFund(page, "/eur-console", 4)
-  await chargeCOnly(page, 3)
+  await bootAndFund(page, "/eur-console", 2)
+  await chargeCOnly(page, 1)
 })
 
 test("ev rail: charger B serves the same contract (atomB window)", async ({ page }) => {
@@ -155,12 +155,12 @@ test("ev rail: charger B serves the same contract (atomB window)", async ({ page
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
-  expect(receipt).toMatch(/^EV-atomB-[1-3]s-[0-9A-F]{8}-STOPPED$/)
+  expect(receipt).toMatch(/^EV-atomB-\d+s-[0-9A-F]{8}-STOPPED$/)
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
 
   await expect
     .poll(async () => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(before - delivered, 2)
+    .toBeCloseTo(before - kwsToCents(delivered) / 100, 2)
 })
 
 test("ev rail: deposit pattern — slider, remote stop, refund of the unspent deposit", async ({ page }) => {
@@ -179,9 +179,11 @@ test("ev rail: deposit pattern — slider, remote stop, refund of the unspent de
   await page.getByPlaceholder("1.00").fill(String(budget))
   await page.getByRole("button", { name: "Start charging" }).click()
 
-  // The slider appears and tracks delivery against the 6 s window.
+  // The slider appears and tracks delivery against the metered budget
+  // (€6 = 216 kW·s at €100/kWh; the meterless window runs 216 s and the
+  // test stops it early).
   await expect(page.getByText("⚡ Charging at " + TAB)).toBeVisible({ timeout: 60_000 })
-  await expect(page.getByText(/€\d+\.00 of the deposit remaining/)).toBeVisible({
+  await expect(page.getByText(/€\d+\.\d{2} of the deposit remaining/)).toBeVisible({
     timeout: 30_000,
   })
   // Let a second deliver, then stop from the BROWSER — the stop must
@@ -200,17 +202,20 @@ test("ev rail: deposit pattern — slider, remote stop, refund of the unspent de
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
-  expect(receipt).toMatch(new RegExp(`^EV-${DEVICE}-[1-5]s-[0-9A-F]{8}-STOPPED$`))
+  expect(receipt).toMatch(new RegExp(`^EV-${DEVICE}-\\d+s-[0-9A-F]{8}-STOPPED$`))
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
+  const spentCents = kwsToCents(delivered)
 
   // THE deposit-pattern assertion: the un-spent euros came back as a
   // refund quote the daemon settled — balance is exact, not approximate.
   await expect
     .poll(async () => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(before - delivered, 2)
-  await expect(page.getByText(new RegExp(`€${delivered}\\.00 spent`))).toBeVisible()
+    .toBeCloseTo(before - spentCents / 100, 2)
+  await expect(page.getByText(`€${(spentCents / 100).toFixed(2)} spent`)).toBeVisible()
   await expect(
-    page.getByText(new RegExp(`€${budget - delivered}\\.00 refunded to your wallet`)),
+    page.getByText(
+      `€${((budget * 100 - spentCents) / 100).toFixed(2)} refunded to your wallet`,
+    ),
   ).toBeVisible()
 })
 
@@ -232,19 +237,20 @@ test("ev rail: device button abort meters actual delivery and refunds", async ({
   await page.getByPlaceholder("1.00").fill(String(budget))
   await page.getByRole("button", { name: "Start charging" }).click()
 
-  // The simulated G39 press aborts with 2 s delivered; the daemon
-  // settles the STOPPED receipt and the wallet claims the refund.
+  // The simulated G39 press aborts with 2 kW·s delivered; the daemon
+  // settles the STOPPED receipt (2 kW·s = 6 cents at €100/kWh) and the
+  // wallet claims the €3.94 remainder.
   await expect(page.getByText("Charging stopped — 2 s delivered")).toBeVisible({
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
   expect(receipt).toMatch(new RegExp(`^EV-${DEVICE}-2s-[0-9A-F]{8}-STOPPED$`))
-  await expect(page.getByText("€2.00 refunded to your wallet")).toBeVisible({
+  await expect(page.getByText("€3.94 refunded to your wallet")).toBeVisible({
     timeout: 120_000,
   })
   await expect
     .poll(async () => readBalance(page), { timeout: 120_000 })
-    .toBeCloseTo(before - 2, 2)
+    .toBeCloseTo(before - kwsToCents(2) / 100, 2)
 })
 
 test("ev rail: malformed charger envelope and over-budget are refused", async ({ page }) => {
@@ -283,8 +289,8 @@ test("ev rail: a mid-session reload resumes charging and still refunds", async (
   test.skip(!deviceOnline(), "charger offline (Atom unplugged/wedged)")
   await bootAndFund(page, consoleBase, 7)
 
-  // 15 s budget: the reload boot eats 5-8 s, and the Stop click needs
-  // the window still alive under it.
+  // €15 = 540 kW·s: a long window, so the reload boot (5-8 s) and the
+  // Stop click land well inside it under energy pricing.
   const budget = 15
   const before = await readBalance(page)
   await page.getByRole("tab", { name: TAB, exact: true }).click()
@@ -318,7 +324,7 @@ test("ev rail: a mid-session reload resumes charging and still refunds", async (
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
   await expect
     .poll(async () => readBalance(page), { timeout: 120_000 })
-    .toBeCloseTo(before - delivered, 2)
+    .toBeCloseTo(before - kwsToCents(delivered) / 100, 2)
 })
 
 test("ev rail: double-stop is idempotent — one settle, one refund, exact balance", async ({ page }) => {
@@ -336,7 +342,7 @@ test("ev rail: double-stop is idempotent — one settle, one refund, exact balan
   await page.getByRole("button", { name: "Start charging" }).click()
   await expect(page.getByText("⚡ Charging at " + TAB)).toBeVisible({ timeout: 60_000 })
   await expect(
-    page.getByText(/€\d+\.00 of the deposit remaining/),
+    page.getByText(/€\d+\.\d{2} of the deposit remaining/),
   ).toBeVisible({ timeout: 30_000 })
 
   // A double-click (or an impatient retry) must not double-settle or
@@ -352,7 +358,7 @@ test("ev rail: double-stop is idempotent — one settle, one refund, exact balan
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
   await expect
     .poll(async () => readBalance(page), { timeout: 120_000 })
-    .toBeCloseTo(before - delivered, 2)
+    .toBeCloseTo(before - kwsToCents(delivered) / 100, 2)
   // Exactly one refund line, one session record.
   await expect(page.getByText(/refunded to your wallet/)).toHaveCount(1)
 })

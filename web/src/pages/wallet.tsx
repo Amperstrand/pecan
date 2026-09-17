@@ -37,7 +37,12 @@ import {
   getRecentChargedSessionWithRetry,
   getRecentRefundedDeposit,
 } from "@/lib/coco/coco-wallet"
-import { parseChargeReceipt, refundEuros } from "@/lib/coco/charge-session"
+import {
+  kwsToCostCents,
+  parseChargeReceipt,
+  PRICE_PER_KWH,
+  refundCents,
+} from "@/lib/coco/charge-session"
 import { downloadWalletDump, exportWalletDump } from "@/lib/coco/wallet-backup"
 import { BackupCard } from "@/components/wallet/backup-card"
 import { ExpiryCountdown } from "@/components/wallet/expiry-countdown"
@@ -77,7 +82,7 @@ type WithdrawState =
   | { phase: "pending"; quoteId: string; tail: string; auto: boolean; label: string; lightning?: boolean }
   | { phase: "charging"; label: string; device: string; budget: number; delivered: number; requested: number; ref: string }
   | { phase: "done"; preimage: string }
-  | { phase: "charged"; label: string; seconds: number; spent: number; refunded: number; stopped: boolean; receipt: string | null }
+  | { phase: "charged"; label: string; seconds: number; spentCents: number; refundedCents: number; stopped: boolean; receipt: string | null }
   | { phase: "refunded"; amount: number; reason: string }
   | { phase: "error"; message: string }
 
@@ -86,7 +91,8 @@ type WithdrawState =
  * payout rails — the simulated rails settle automatically and hand back
  * the scheme's receipt as the payment proof; the demo EV chargers are
  * fixed-destination rails (the envelope is complete, no destination
- * input — the charger itself is the offramp, 1 € = 1 kW·s).
+ * input — the charger itself is the offramp, energy billed per kWh by
+ * the car's meter).
  */
 const WITHDRAW_OPTIONS = [
   {
@@ -150,35 +156,35 @@ const WITHDRAW_OPTIONS = [
     label: "Charger A",
     placeholder: null,
     fixed: "ev:atomA",
-    hint: "Demo EV charger — 1 unit = 1 kW·s of charging, fires on send.",
+    hint: "Demo EV charger — energy billed per kWh by the car's meter, fires on send.",
   },
   {
     id: "atomB",
     label: "Charger B",
     placeholder: null,
     fixed: "ev:atomB",
-    hint: "Demo EV charger — 1 unit = 1 kW·s of charging, fires on send.",
+    hint: "Demo EV charger — energy billed per kWh by the car's meter, fires on send.",
   },
   {
     id: "atomC",
     label: "Charger C",
     placeholder: null,
     fixed: "ev:atomC",
-    hint: "T-Display S3 charger — 1 unit = 1 kW·s; the big screen IS the charging indicator.",
+    hint: "T-Display S3 charger — €/kWh by the car's meter; the big screen IS the charging indicator.",
   },
   {
     id: "atomD",
     label: "Charger D",
     placeholder: null,
     fixed: "ev:atomD",
-    hint: "The t-relay lineage box — the fleet's ancestor hardware, real relay click. 1 unit = 1 kW·s.",
+    hint: "The t-relay lineage box — the fleet's ancestor hardware, real relay click. Energy billed per kWh.",
   },
   {
     id: "atomV",
     label: "Sim Charger",
     placeholder: null,
     fixed: "ev:atomV",
-    hint: "Simulated charge point — an API, no hardware. Always on, even with the fleet unplugged. 1 unit = 1 kW·s.",
+    hint: "Simulated charge point — an API, no hardware. Always on, even with the fleet unplugged. Energy billed per kWh.",
   },
 ] as const
 
@@ -457,8 +463,8 @@ export function WalletPage() {
         // Crash recovery for the deposit pattern: a reload mid-session
         // orphans the in-page refund claim. Re-claim from history; the
         // daemon's ledger makes this idempotent.
-        void claimOrphanedEvRefunds().then((euros) => {
-          if (euros >= 1) refresh()
+        void claimOrphanedEvRefunds().then((cents) => {
+          if (cents >= 100) refresh()
         })
 
         const pendingWithdraw = await getPendingWithdraw()
@@ -471,8 +477,8 @@ export function WalletPage() {
               phase: "charged",
               label: recent.label,
               seconds: recent.seconds,
-              spent: recent.seconds,
-              refunded: recent.refunded,
+              spentCents: recent.spentCents,
+              refundedCents: recent.refundedCents,
               stopped: recent.stopped,
               receipt: recent.receipt,
             })
@@ -534,8 +540,8 @@ export function WalletPage() {
                     phase: "charged",
                     label: recent.label,
                     seconds: recent.seconds,
-                    spent: recent.seconds,
-                    refunded: recent.refunded,
+                    spentCents: recent.spentCents,
+                    refundedCents: recent.refundedCents,
                     stopped: recent.stopped,
                     receipt: recent.receipt,
                   })
@@ -543,8 +549,8 @@ export function WalletPage() {
                   // The refund claim lived in the reloaded page's
                   // promise chain — the boot scan ran before this melt
                   // finalized, so claim HERE (idempotent server-side).
-                  void claimOrphanedEvRefunds().then((euros) => {
-                    if (euros >= 1) refresh()
+                  void claimOrphanedEvRefunds().then((cents) => {
+                    if (cents >= 100) refresh()
                   })
                   return
                 }
@@ -645,15 +651,16 @@ export function WalletPage() {
   }
 
   // Streaming charge sessions (design A in docs/payout-modules.md): the
-  // wallet melts one €1 chunk (= one tariffed second) at a time and only
-  // melts the next after the current one settles. Stop = don't melt the
-  // next chunk — the un-melted budget never left the wallet, so partial
-  // sessions need no refund path at all.
+  // wallet melts one budget chunk at a time and only melts the next
+  // after the current one settles. Stop = don't melt the next chunk —
+  // the un-melted budget never left the wallet, so partial sessions
+  // need no refund path at all.
   // Deposit-pattern charge sessions (docs/partial-delivery.md § deposit):
   // ONE melt for the whole budget is the deposit; the charger meters
-  // actual delivery; the wallet's Stop (or the device's button) ends the
-  // session; the daemon settles the melt at full and the wallet claims
-  // the un-consumed remainder as a refund mint quote the daemon settles.
+  // actual delivery (kW·s billed at the €/kWh tariff); the wallet's
+  // Stop (or the device's button) ends the session; the daemon settles
+  // the melt at full and the wallet claims the un-consumed remainder
+  // as a refund mint quote the daemon settles.
   // The slider polls the gateway's public session endpoint — the melt
   // quote id is the capability — so no operator secret ships in the
   // browser bundle.
@@ -764,18 +771,19 @@ export function WalletPage() {
     const parsed = parseChargeReceipt(receipt)
     const delivered = parsed?.deliveredSeconds ?? budget
     const stopped = parsed?.stopped ?? false
-    const spent = Math.min(budget, delivered)
-    const claimable = refundEuros(budget, delivered)
+    const budgetCents = Math.round(budget * 100)
+    const spentCents = Math.min(budgetCents, kwsToCostCents(delivered))
+    const claimable = refundCents(budgetCents, delivered)
 
-    let refunded = 0
-    if (claimable >= 1) {
+    let refundedCents = 0
+    if (claimable >= 100) {
       try {
         // The refund is a fresh locked mint quote the daemon settles
         // against its delivery ledger (one per melt, capped at the
         // un-consumed amount); the existing deposit machinery claims it.
         const centsBeforeClaim = await getBalanceCents(currency)
         const refundQuote = await createDepositQuote(
-          claimable,
+          claimable / 100,
           "branch",
           currency,
           `refund:${ref}`,
@@ -789,8 +797,8 @@ export function WalletPage() {
         // the refund with the balance before telling the user it landed
         // (a failed claim surfaces as a pending deposit card instead).
         const centsAfterClaim = await getBalanceCents(currency)
-        if (centsAfterClaim - centsBeforeClaim >= claimable * 100 - 1) {
-          refunded = claimable
+        if (centsAfterClaim - centsBeforeClaim >= claimable - 1) {
+          refundedCents = claimable
         }
       } catch (e) {
         // Claim failures surface as an unsettled deposit card — the
@@ -803,8 +811,8 @@ export function WalletPage() {
       phase: "charged",
       label: option.label,
       seconds: delivered,
-      spent,
-      refunded,
+      spentCents,
+      refundedCents,
       stopped,
       receipt,
     })
@@ -834,10 +842,11 @@ export function WalletPage() {
       return
     }
     const amount = parseFloat(withdrawAmount)
-    // Charger rails stream: the amount is the budget, melted a second at
-    // a time so a stop never strands prepaid energy.
+    // Charger rails: the amount is the energy budget (cents buy metered
+    // kW·s at the €/kWh tariff) — kept at cent resolution so a stop
+    // never strands prepaid energy.
     if (option?.fixed?.startsWith("ev:")) {
-      await startCharging(option, Math.round(amount))
+      await startCharging(option, Math.round(amount * 100) / 100)
       return
     }
     // Input rails ride the payout envelope: rail:destination.
@@ -1391,14 +1400,18 @@ export function WalletPage() {
                 <p className="text-sm text-muted-foreground">
                   {`≈ ${Math.max(
                     0,
-                    withdrawState.budget - withdrawState.delivered,
+                    withdrawState.budget -
+                      kwsToCostCents(withdrawState.delivered) / 100,
                   ).toFixed(2)} ${CURRENCIES[currency].symbol} of the deposit remaining`}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   Deposit {withdrawState.budget.toFixed(2)}{" "}
-                  {CURRENCIES[currency].symbol} · 1 {CURRENCIES[currency].label} = 1
-                  kW·s, billed by the car's meter — the unspent part
-                  refunds automatically when the session ends.
+                  {CURRENCIES[currency].symbol} ·{" "}
+                  {`${CURRENCIES[currency].symbol}${PRICE_PER_KWH.toFixed(
+                    2,
+                  )}/kWh, billed by the car's meter`}{" "}
+                  — the unspent part refunds automatically when the session
+                  ends.
                 </p>
                 <Button
                   variant="outline"
@@ -1436,9 +1449,12 @@ export function WalletPage() {
                     : `Charged ${withdrawState.seconds} s at ${withdrawState.label}`}
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  €{withdrawState.spent}.00 spent
-                  {withdrawState.refunded >= 1
-                    ? ` · €${withdrawState.refunded}.00 refunded to your wallet`
+                  {(withdrawState.spentCents / 100).toFixed(2)}{" "}
+                  {CURRENCIES[currency].symbol} spent
+                  {withdrawState.refundedCents >= 100
+                    ? ` · ${(withdrawState.refundedCents / 100).toFixed(
+                        2,
+                      )} ${CURRENCIES[currency].symbol} refunded to your wallet`
                     : withdrawState.stopped
                       ? " — the unspent deposit refunded automatically"
                       : ""}

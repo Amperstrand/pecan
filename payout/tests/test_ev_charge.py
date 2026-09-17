@@ -43,9 +43,9 @@ class FakeConsole:
         return {}
 
 
-def daemon(secs_per_eur=1.0, open_tickets=None):
+def daemon(eur_per_kwh=100.0, open_tickets=None):
     console = FakeConsole(open_tickets)
-    a = SimpleNamespace(secs_per_eur=secs_per_eur,
+    a = SimpleNamespace(eur_per_kwh=eur_per_kwh,
                         settle_grace=0.0, state_file="")
     a._tariffs = {}
     return a, console
@@ -200,7 +200,7 @@ class ResolveExpiredTicketTests(unittest.TestCase):
     double-pay through, and warn operators OFF manual payback."""
 
     def _daemon(self, tmpdir):
-        a = SimpleNamespace(secs_per_eur=1.0, settle_grace=0.0,
+        a = SimpleNamespace(eur_per_kwh=100.0, settle_grace=0.0,
                             state_file=tmpdir + "/state.json")
         a._tariffs = {}
         return a
@@ -295,50 +295,77 @@ class FakeGateway:
 
 
 class DeliverEnergyTests(unittest.TestCase):
-    def _args(self, secs_per_eur=1.0):
-        a, console = daemon(secs_per_eur)
-        a._tariffs["t-1"] = secs_per_eur
+    def _args(self, eur_per_kwh=100.0):
+        a, console = daemon(eur_per_kwh)
+        a._tariffs["t-1"] = eur_per_kwh
         # deliver_energy marks paid through the module-global console.
         ev_charge.console = console
         self.addCleanup(lambda: setattr(ev_charge, "console", None))
         return a, console
 
+    def test_energy_pricing_budget_round_trips(self):
+        # #30 layer B: cents buy kW·s and metered kW·s bills back to the
+        # same cents at the demo tariff (1 unit = 36 kW·s at 100/kWh).
+        for cents in (100, 150, 600, 5000, 10000):
+            kws = ev_charge.budget_kws(cents, 100.0)
+            self.assertEqual(ev_charge.bill_cents(kws, 100.0), cents)
+        self.assertEqual(ev_charge.budget_kws(100, 100.0), 36)
+        # Delivered energy below one cent still bills a cent (floor).
+        self.assertEqual(ev_charge.bill_cents(1, 100.0), 3)
+
+    def test_budget_over_gateway_cap_refused_before_trigger(self):
+        # A real-world 0.50/kWh price makes even the minimum 1-unit melt
+        # (7200 kW·s) exceed the gateway's 3600 kW·s window — refuse
+        # locally with a reason instead of a bare gateway 400.
+        a, console = self._args(eur_per_kwh=0.5)
+        gw = FakeGateway([])
+        code, result = ev_charge.deliver_energy(
+            a, gw, "t-1", 100, "atomA", {})
+        self.assertEqual(code, 2)
+        self.assertEqual(gw.triggers, [])
+        self.assertIn("3600", result["reason"])
+
     def test_stopped_session_bills_delivered_and_marks_metadata(self):
+        # 600 cents at 100/kWh authorize 216 kW·s; a stop after 2 kW·s
+        # bills round(2 * 100/36) = 6 cents.
         a, console = self._args()
         gw = FakeGateway([{"state": "done", "seconds": 2, "stopped": True}])
         code, result = ev_charge.deliver_energy(
             a, gw, "t-1", 600, "atomA", {}, session_ref="q-1")
         self.assertEqual(code, 0)
-        self.assertEqual(result["delivered_cents"], 200)
+        self.assertEqual(result["delivered_cents"], 6)
         self.assertTrue(result["stopped"])
         self.assertTrue(result["receipt"].endswith("-STOPPED"))
         payload = console.posts[0][1]
-        self.assertEqual(payload["delivered"], 200)
+        self.assertEqual(payload["delivered"], 6)
 
     def test_metering_loss_settles_granted_window_with_timeout_receipt(self):
         # The old policy left these open — they burned at expiry with no
-        # accounting (the 2026-09-03 drift). The granted window settles.
+        # accounting (the 2026-09-03 drift). The granted window settles
+        # at its full price. Small amount (6 cents -> 2 kW·s) keeps the
+        # awaited window short; the trigger budget is asserted too.
         a, console = self._args()  # default tariff; status never reports done
         gw = FakeGateway([])
         gw.status = lambda device: {"state": "running", "seconds": 5}
         code, result = ev_charge.deliver_energy(
-            a, gw, "t-1", 600, "atomA", {})
+            a, gw, "t-1", 6, "atomA", {})
         self.assertEqual(code, 6)
         self.assertEqual(result["result"], "device-timeout-settled")
         self.assertTrue(result["receipt"].endswith("-TIMEOUT"))
+        self.assertEqual(gw.triggers[0][1], 2)  # budget: round(6 * 36/100)
         payload = console.posts[0][1]
-        self.assertEqual(payload["delivered"], 600)
+        self.assertEqual(payload["delivered"], 6)
 
     def test_tariff_snapshot_used_not_current_flag(self):
-        # The ticket was priced at 5 s/€; the daemon now runs 1 s/€.
-        # Billing must use the SNAPSHOT (600 cents at 5 s/€ over 2
-        # delivered seconds = 40 cents), not the current flag (200).
-        a, console = self._args(secs_per_eur=1.0)
-        a._tariffs["t-1"] = 5.0
+        # The ticket was priced at 90/kWh; the daemon now runs 100/kWh.
+        # Billing must use the SNAPSHOT (2 delivered kW·s at 90/kWh
+        # = 5 cents), not the current flag (6 cents).
+        a, console = self._args(eur_per_kwh=100.0)
+        a._tariffs["t-1"] = 90.0
         gw = FakeGateway([{"state": "done", "seconds": 2, "stopped": True}])
         _, result = ev_charge.deliver_energy(
             a, gw, "t-1", 600, "atomA", {})
-        self.assertEqual(result["delivered_cents"], 40)
+        self.assertEqual(result["delivered_cents"], 5)
 
     def test_device_refusal_exits_without_settling(self):
         a, console = self._args()
@@ -370,8 +397,8 @@ class CanonicalEventTests(unittest.TestCase):
         return a, console, tmpdir + "/events.jsonl"
 
     def _base_args(self):
-        a, console = daemon(1.0)
-        a._tariffs["t-1"] = 1.0
+        a, console = daemon(100.0)
+        a._tariffs["t-1"] = 100.0
         ev_charge.console = console
         self.addCleanup(lambda: setattr(ev_charge, "console", None))
         return a, console
@@ -404,7 +431,8 @@ class CanonicalEventTests(unittest.TestCase):
             self.assertEqual(term["nonce"], "t-1")
             self.assertTrue(term["receipt"].endswith("-STOPPED"))
             settle = [e for e in ev if e["type"] == "settle"][0]
-            self.assertEqual(settle["amount_millis"], 2000)
+            # 2 kW·s at 100/kWh = 6 cents = 60 milli-units.
+            self.assertEqual(settle["amount_millis"], 60)
 
     def test_full_window_is_cap_seconds(self):
         import tempfile
@@ -422,7 +450,7 @@ class CanonicalEventTests(unittest.TestCase):
             a, console, path = self._args_with_journal(d)
             gw = FakeGateway([])
             gw.status = lambda device: {"state": "running", "seconds": 5}
-            ev_charge.deliver_energy(a, gw, "t-1", 600, "atomA", {})
+            ev_charge.deliver_energy(a, gw, "t-1", 6, "atomA", {})
             term = [e for e in self._events(path)
                     if e["type"] == "terminal"][0]
             self.assertEqual(term["kind"], "lease_expired")

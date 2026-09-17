@@ -139,7 +139,7 @@ the charger still idle.
 
 ## SCENE 6 — CHARGE (~35 s)
 
-**Action:** budget **NOK 20** ("1 kr = 1 kW·s") → **Start charging**.
+**Action:** budget **NOK 20** (720 kW·s at 100 kr/kWh — billed by the car's meter) → **Start charging**.
 
 **Visual:** "⚡ Charging at Charger 5" · slider counts delivered
 kW·s · **the PiP comes alive — the charge point's own display runs
@@ -153,7 +153,7 @@ spends."
 The charger display winds down; receipt appears:
 `EV-atomV-12s-XXXXXXXX`.
 
-**Tech:** the virtual charger delivers at 1 kW·s/s (real cadence);
+**Tech:** the virtual charger walks the draw 3-10 kW (real cadence); energy is billed per kWh by the meter,
 remote Stop = the deployed gateway path; the PiP mirrors the same
 MQTT stream the pole would show.
 

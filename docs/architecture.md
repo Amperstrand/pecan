@@ -91,9 +91,11 @@ flowchart LR
 | payout rails (`sim,sepa,swish,…,ev`) | — | `rail:destination` melts route to adapters |
 
 The `ev` rail is the charger story: ONE melt is the deposit, the charger
-meters delivery (1 unit = 1 kW·s), the daemon settles at full and the
-wallet claims the unspent remainder as a refund — final balance =
-before − delivered, exactly. Session refs are the melt quote ids; the
+meters delivery and the daemon bills the metered kW·s at the energy
+tariff (`--eur-per-kwh 100` on all pairs: 1 unit = 36 kW·s — demo
+scale, see #30 for why not real-world 0.50), settles the melt at full,
+and the wallet claims the unspent remainder as a refund — final balance
+= before − metered cost, exactly. Session refs are the melt quote ids; the
 gateway's status/stop endpoints are public-by-capability.
 
 ## Machines

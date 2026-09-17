@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { parseChargeReceipt, refundEuros } from "./charge-session"
+import { kwsToCostCents, parseChargeReceipt, refundCents } from "./charge-session"
 
 describe("parseChargeReceipt", () => {
   it("parses a delivered session record", () => {
@@ -26,25 +26,38 @@ describe("parseChargeReceipt", () => {
   })
 })
 
-describe("refundEuros", () => {
-  it("refunds the unspent deposit at the 1 s/€ demo tariff", () => {
-    expect(refundEuros(50, 50)).toBe(0)
-    expect(refundEuros(50, 12)).toBe(38)
-    expect(refundEuros(3, 1)).toBe(2)
+describe("kwsToCostCents (energy pricing, 100 units/kWh)", () => {
+  it("converts metered kW·s to cents (1 unit = 36 kW·s)", () => {
+    expect(kwsToCostCents(36)).toBe(100)
+    expect(kwsToCostCents(72)).toBe(200)
+    expect(kwsToCostCents(0)).toBe(0)
   })
 
-  it("floors sub-euro remainders (mint-quote minimum)", () => {
-    expect(refundEuros(3, 2)).toBe(1)
-    expect(refundEuros(1, 0)).toBe(1)
-    expect(refundEuros(2, 2)).toBe(0)
-  })
-
-  it("never refunds more than the deposit or below zero", () => {
-    expect(refundEuros(5, 99)).toBe(0)
-    expect(refundEuros(5, 0)).toBe(5)
+  it("rounds to whole cents", () => {
+    expect(kwsToCostCents(2)).toBe(6) // 2 * 100/36 = 5.56
+    expect(kwsToCostCents(1)).toBe(3) // 2.78
   })
 
   it("honours alternative tariffs", () => {
-    expect(refundEuros(10, 10, 5)).toBe(8)
+    expect(kwsToCostCents(36, 50)).toBe(50)
+  })
+})
+
+describe("refundCents", () => {
+  it("refunds the unspent deposit: budget minus metered cost", () => {
+    expect(refundCents(5000, 22)).toBe(4939) // 5000 - round(22*100/36)
+    expect(refundCents(400, 2)).toBe(394)
+    expect(refundCents(100, 36)).toBe(0) // fully spent budget
+  })
+
+  it("leaves sub-unit remainders unclaimed (mint-quote minimum)", () => {
+    expect(refundCents(150, 36)).toBe(0) // 150 - 100 = 50c < 1 unit
+    expect(refundCents(199, 36)).toBe(0)
+    expect(refundCents(200, 36)).toBe(100)
+  })
+
+  it("never refunds more than the deposit or below zero", () => {
+    expect(refundCents(500, 9999)).toBe(0)
+    expect(refundCents(500, 0)).toBe(500)
   })
 })

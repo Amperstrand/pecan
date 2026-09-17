@@ -1,9 +1,17 @@
 import { expect, type Page } from "@playwright/test"
 import { apiLogin, matchAndSettle, readBalance, readTellerCode } from "./wallet"
+import { kwsToCostCents, PRICE_PER_KWH } from "../../src/lib/coco/charge-session"
 
 /// The charger-C e2e flow, shared by the standard suite (ev-rail.spec)
 /// and the instrumented video run (ev-rail-video.spec) — one source of
 /// truth for the wallet↔gateway↔charger contract walk.
+
+/// Energy pricing (#30 layer B): the tariff lives in the daemons'
+/// --eur-per-kwh ExecStart on inr2 and is mirrored by the wallet's
+/// charge-session constant (imported above). Specs compute expected
+/// billing through kwsToCents so a future price change is a constant,
+/// not a spec rewrite. 100 units/kWh → 1 unit = 36 kW·s.
+export { kwsToCostCents as kwsToCents, PRICE_PER_KWH }
 
 export async function bootAndFund(page: Page, consoleBase: string, minBalance: number) {
   await page.addInitScript(() => {
@@ -25,7 +33,7 @@ export async function bootAndFund(page: Page, consoleBase: string, minBalance: n
   }
 }
 
-export async function chargeCOnly(page: Page, budget = 3) {
+export async function chargeCOnly(page: Page, budget = 1) {
   const consoleBase = "/eur-console"
   const before = await readBalance(page)
   await page.getByRole("tab", { name: "Charger C", exact: true }).click()
@@ -50,10 +58,10 @@ export async function chargeCOnly(page: Page, budget = 3) {
 
   await expect
     .poll(async () => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(before - delivered, 2)
+    .toBeCloseTo(before - kwsToCostCents(delivered) / 100, 2)
 }
 
-export async function chargerCWindow(page: Page, budget = 3) {
+export async function chargerCWindow(page: Page, budget = 1) {
   await bootAndFund(page, "/eur-console", budget + 1)
   await chargeCOnly(page, budget)
 }

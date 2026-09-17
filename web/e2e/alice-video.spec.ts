@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process"
 import { test, expect, type Page } from "@playwright/test"
 import { readBalance } from "./helpers/wallet"
+import { kwsToCents } from "./helpers/ev-rail"
 
 // ALICE AT THE CHARGE POINT — the movie. One continuous phone-viewport
 // recording of the full lifecycle: a Lightning invoice paid, ecash
@@ -333,16 +334,17 @@ async function mountCompanion(page: Page) {
     const eur = el.querySelector("#cp-eur") as HTMLElement
     const moneySub = el.querySelector("#cp-money-sub") as HTMLElement
     const sub = el.querySelector("#cp-sub") as HTMLElement
-    const BUDGET = 50
+    // Energy pricing: €100/kWh — the € column converts metered kW·s
+    // to the remaining deposit in cents (matches the wallet's math).
+    const BUDGET_CENTS = 5000
+    const PRICE_PER_KWH = 100
+    const kwsToCents = (kws: number) => Math.round((kws * PRICE_PER_KWH) / 36)
     const tick = () => {
       const bar = document.querySelector('[role="progressbar"]')
       const body = document.body.innerText || ""
       let delivered: number | null = null
-      let remaining: number | null = null
       if (bar) {
         delivered = Number(bar.getAttribute("aria-valuenow") ?? 0)
-        const max = Number(bar.getAttribute("aria-valuemax") ?? BUDGET)
-        remaining = Math.max(0, max - delivered)
         strip.classList.add("live")
         sub.textContent = "delivering energy"
       } else {
@@ -351,19 +353,19 @@ async function mountCompanion(page: Page) {
           body.match(/Charged (\d+) s at/)
         if (m) {
           delivered = Number(m[1])
-          remaining = BUDGET - delivered
           strip.classList.remove("live")
           sub.textContent = "session complete"
         } else {
           strip.classList.remove("live")
           sub.textContent = "charge point · online"
-          eur.textContent = `€${BUDGET.toFixed(2)}`
+          eur.textContent = `€${(BUDGET_CENTS / 100).toFixed(2)}`
           moneySub.textContent = "ready"
           return
         }
       }
-      eur.textContent = `€${(remaining ?? 0).toFixed(2)}`
-      moneySub.textContent = remaining && remaining > 0 ? "still hers" : "settled"
+      const remainingCents = Math.max(0, BUDGET_CENTS - kwsToCents(delivered ?? 0))
+      eur.textContent = `€${(remainingCents / 100).toFixed(2)}`
+      moneySub.textContent = remainingCents > 0 ? "still hers" : "settled"
     }
     tick()
     window.setInterval(tick, 400)
@@ -571,10 +573,11 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await hideCard(page)
   await page.waitForTimeout(1_000)
 
-  // SCENE 6 — charge, at the car's pace: metered truth (#30) means a
-  // €50 budget burns in ~5-16 WALL seconds at a 3-10 kW draw — so the
-  // card plays BEFORE Start, the burn itself stays uncovered (slider +
-  // strip live), and Alice stops early to keep most of her deposit.
+  // SCENE 6 — charge, at the car's pace: metered truth (#30) + energy
+  // pricing mean €100/kWh buys 1800 kW·s — several minutes at a 3-10 kW
+  // draw — so the card plays BEFORE Start, the burn itself stays
+  // uncovered (slider + strip live), and Alice stops early (~22 kW·s
+  // ≈ €0.61) to keep most of her deposit.
   await card(page, {
     title: `€${DEPOSIT_EUR} of energy, authorized.`,
     body: "Her car draws between 3 and 10 kW — no two seconds alike — and the bill follows the meter, not the clock.",
@@ -588,8 +591,8 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await page.waitForTimeout(2_200)
   await still(page, "06-charging-early")
   const progress = page.getByRole("progressbar")
-  // Tight poll: the meter climbs ~6 units/second, the cap is 50 — stop
-  // the moment ~18 kW·s shows to leave most of the deposit unspent.
+  // Tight poll: the meter climbs ~3-10 kW/s, the budget is 1800 kW·s —
+  // stop the moment ~22 kW·s shows to leave most of the deposit unspent.
   await expect
     .poll(async () => Number(await progress.getAttribute("aria-valuenow")), {
       timeout: 60_000,
@@ -627,12 +630,13 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   await still(page, "075-public-pole")
 
   // SCENE 7 — receipt & close: the unspent euros come back
+  const spentEur = kwsToCents(delivered) / 100
   await expect
     .poll(() => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(DEPOSIT_EUR - delivered, 1)
+    .toBeCloseTo(DEPOSIT_EUR - spentEur, 1)
   await card(page, {
     title: `Alice paid for ${delivered} kilowatt-seconds.`,
-    body: `The other €${DEPOSIT_EUR - delivered} came back — automatically.`,
+    body: `The other €${(DEPOSIT_EUR - spentEur).toFixed(2)} came back — automatically.`,
     holdMs: undefined,
   })
   await card(page, {
@@ -741,11 +745,12 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
   expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}/)
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
 
+  const spentEur = kwsToCents(delivered) / 100
   await expect
     .poll(() => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(DEPOSIT_EUR - delivered, 1)
+    .toBeCloseTo(DEPOSIT_EUR - spentEur, 1)
   await card(page, {
-    title: `\${delivered} kW·s used. €${DEPOSIT_EUR - delivered} came back.`,
+    title: `${delivered} kW·s used. €${(DEPOSIT_EUR - spentEur).toFixed(2)} came back.`,
     body: "No app. No card. No history. Ecash is cash.",
     holdMs: undefined,
   })

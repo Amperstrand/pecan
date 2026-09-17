@@ -8,6 +8,7 @@ import {
   sendOnchainFromExternal,
 } from "./helpers/wallet"
 import { defineWalletSuite, type SuiteContext } from "./helpers/wallet-suite"
+import { kwsToCents } from "./helpers/ev-rail"
 
 // USD twin (issue #4): the shared per-currency suite plus the switcher
 // checks. e2e.sh fetches both admin passwords.
@@ -61,13 +62,14 @@ function registerUsdExtras(ctx: SuiteContext): void {
   // the enabled rail, the second daemon instance, and the shared
   // gateway fleet end to end. Self-funds via the teller when short:
   // standalone greps start a fresh wallet and the onchain leg can be
-  // payer-dry.
+  // payer-dry. Energy pricing: $1 = 36 kW·s at $100/kWh; the $1 budget
+  // runs a 36 s meterless window on atomD.
   test("charger session: melt to ev:atomD settles with a receipt (USD)", async () => {
     test.setTimeout(240_000)
     const page = ctx.page()
     const password =
       process.env.PECAN_USD_ADMIN_PASSWORD ?? process.env.PECAN_ADMIN_PASSWORD ?? ""
-    const budget = 4
+    const budget = 1
 
     let before = await readBalance(page)
     if (before < budget) {
@@ -97,7 +99,7 @@ function registerUsdExtras(ctx: SuiteContext): void {
     const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
     await expect
       .poll(async () => readBalance(page), { timeout: 200000 })
-      .toBeCloseTo(before - delivered, 2)
+      .toBeCloseTo(before - kwsToCents(delivered) / 100, 2)
     expectNoWalletErrors(ctx.walletErrors())
   })
 

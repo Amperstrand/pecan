@@ -82,5 +82,5 @@ test("charger C with live display mirror", async ({ page }) => {
   test.setTimeout(300_000)
   await bootAndFund(page, "/eur-console", 4)
   await mountSimPip(page)
-  await chargeCOnly(page, 3)
+  await chargeCOnly(page, 1)
 })

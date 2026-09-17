@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """ev-charge — the EV charging payout-rail adapter.
 
-A melt destination written as `ev:<device-slug>` buys a charge window on
+A melt destination written as `ev:<device-slug>` buys metered energy on
 that charger: the ecash is locked (burned inputs, held by the mint) before
-any energy flows, the charger runs a tariff-derived window, and the
-settled ticket's receipt is the session record — the OCPP analogue is
-exact (StartTransaction's meterStart → MeterValues → StopTransaction's
-meterStop; here the window IS the metered energy on the demo fleet).
+any energy flows, the charger runs a tariff-derived energy budget
+(--eur-per-kwh: the melt's cents become a kW·s budget), and the settled
+ticket's receipt is the session record — the OCPP analogue is exact
+(StartTransaction's meterStart → MeterValues → StopTransaction's
+meterStop; the device meter IS the billed quantity, #30 layer A+B).
 
 Two modes:
 
@@ -26,19 +27,21 @@ Two modes:
     sessions are never auto-refunded.
 
 Device gateway contract (any backend may implement it; evmap's
-atom-gateway implements it over HiveMQ, ev-device-fake.py for tests):
+atom-gateway implements it over HiveMQ, ev-device-fake.py for tests).
+The trigger's `seconds` field is the session's REQUESTED BUDGET in kW·s
+(metered devices cap at it; meterless ones run it as a 1 kW window):
 
   POST /device/{id}/trigger  {"seconds": N}   X-API-Key: <key>
        -> 200 {"triggered": true, "session": "<id>"}   energy starts
        -> 4xx {"triggered": false, "reason": "..."}    device refused
   GET  /device/{id}/status
        -> 200 {"state": "idle"|"running"|"done", "session": "<id>",
-               "seconds": N}
+               "seconds": N}   (delivered kW·s once done)
 
 Usage:
   python3 ev-charge.py --base https://host/eur-console \
       --password "$PW" --code ABC123 \
-      --gateway http://127.0.0.1:8899 --secs-per-eur 1
+      --gateway http://127.0.0.1:8899 --eur-per-kwh 100
 
 Exit codes (single-shot): 0 settled · 2 policy refusal · 3 fund-lock
 timeout · 4 API error · 5 wrong rail · 6 device timeout (ticket left
@@ -59,6 +62,45 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import canonical_events
 
 RAIL = "ev"
+
+# ---------------------------------------------------------------------------
+# Energy pricing (#30 layer B): the tariff is CURRENCY UNITS PER kWh and
+# the billed quantity is the METERED kW·s (1 kWh = 3600 kW·s).
+#
+#   budget_kws(cents, P) = cents * 36 / P        (what a melt buys)
+#   bill_cents(kws, P)   = kws   * P / 36        (what delivery costs)
+#
+# Both directions round-half-away-from-zero in Python; P=100 (the demo
+# value on every pair) makes the denominator 9, so no exact .5 cases
+# exist and the wallet's JS Math.round agrees cent-for-cent.
+#
+# WHY 100 units/kWh AND NOT A REAL-WORLD 0.50: the mint enforces a
+# 1-unit minimum melt (100 cents) and the device gateway caps a
+# session budget at 3600 kW·s. At 0.50/kWh the cheapest legal melt
+# (1 unit = 2 kWh = 7200 kW·s) exceeds that cap — refused outright —
+# and would otherwise run 12-40 min at the fleet's 3-10 kW draw.
+# P=100 keeps 1 unit = 36 kW·s: a full atomV session lands in 3.6-12
+# wall seconds (demo-legible), the 3600 kW·s gateway cap equals the
+# adapter's --max-amount (100 units) exactly, and refunds stay above
+# the mint's 1-unit minimum mint quote. Reaching a real-world price
+# needs sub-unit melts/mints first (tracked on #30).
+# ---------------------------------------------------------------------------
+
+
+def budget_kws(amount_cents: int, eur_per_kwh: float) -> int:
+    """Metered-energy budget (kW·s) a melted amount buys."""
+    return max(1, round(amount_cents * 36.0 / eur_per_kwh))
+
+
+def bill_cents(kws: int, eur_per_kwh: float) -> int:
+    """Cost in cents of delivered metered kW·s (>= 1 cent once energy
+    flowed — the daemon's accounting floor)."""
+    return max(1, round(kws * eur_per_kwh / 36.0))
+
+
+# The device gateway refuses trigger budgets above this (its window
+# contract); refusing locally names the cause instead of a bare 400.
+GATEWAY_MAX_KWS = 3600
 
 
 class Console:
@@ -163,7 +205,15 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     that; single-shot runs once by construction).
     """
     device = device_map.get(slug, slug)
-    seconds = max(1, round(amount / 100.0 * a.secs_per_eur))
+    seconds = budget_kws(amount, a.eur_per_kwh)
+    if seconds > GATEWAY_MAX_KWS:
+        _canonical(a).terminal(tid, "failed", 0, 0, 0, receipt="",
+                               legacy="budget-over-gateway-cap")
+        return 2, {"result": "refused", "id": tid, "destination": slug,
+                   "device": device, "seconds": seconds,
+                   "reason": f"budget {seconds} kW·s exceeds the device "
+                             f"gateway's {GATEWAY_MAX_KWS} kW·s window — "
+                             f"lower the amount or the tariff"}
     try:
         trig = gateway.trigger(device, seconds, session_ref=session_ref)
     except urllib.error.HTTPError as e:
@@ -190,10 +240,10 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
 
     # Tariff snapshot: bill at the rate the session was priced at, not
     # whatever the daemon currently runs with (a restart with a changed
-    # --secs-per-eur mid-session must not reprice delivered energy).
+    # --eur-per-kwh mid-session must not reprice delivered energy).
     # Looked up BEFORE any settle path — the timeout receipt needs it
     # too (an unbound-variable crash here was caught by unit test).
-    tariff = getattr(a, "_tariffs", {}).get(tid, a.secs_per_eur)
+    tariff = getattr(a, "_tariffs", {}).get(tid, a.eur_per_kwh)
 
     started = time.time()
     done_by = started + seconds + a.settle_grace
@@ -207,7 +257,7 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
             break
         elapsed = min(int(time.time() - started), seconds)
         _canonical(a).progress(
-            tid, 0, elapsed, int(elapsed * 1000.0 / tariff))
+            tid, 0, elapsed, bill_cents(elapsed, tariff) * 10)
         time.sleep(1.0)
     if not (state and state.get("state") == "done"):
         # Metering lost: the window was granted (the relay was commanded
@@ -219,7 +269,7 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
         # can refund against this audit trail.
         receipt = "EV-{}-{}s-{}-TIMEOUT".format(
             device, seconds, secrets.token_hex(4).upper())
-        cents = max(1, round(seconds * 100.0 / tariff))
+        cents = bill_cents(seconds, tariff)
         _canonical(a).terminal(tid, "lease_expired", 0, seconds,
                                seconds * 1000, receipt=receipt,
                                legacy="device-timeout-settled")
@@ -247,7 +297,7 @@ def deliver_energy(a, gateway: Gateway, tid: str, amount: int,
     suffix = "-STOPPED" if was_stopped else ""
     receipt = "EV-{}-{}s-{}{}".format(device, delivered,
                                       secrets.token_hex(4).upper(), suffix)
-    cents = max(1, round(delivered * 100.0 / tariff))
+    cents = bill_cents(delivered, tariff)
     _canonical(a).terminal(
         tid, "completed" if was_stopped else "cap_seconds", 0, delivered,
         delivered * 1000, receipt=receipt,
@@ -506,10 +556,10 @@ def watch(a, console, gateway, device_map):
             # snapshotted into the record — settle bills at the priced
             # rate even if the daemon restarts with a different flag.
             state[tid] = {"status": "triggered", "at": int(time.time()),
-                          "secs_per_eur": a.secs_per_eur}
+                          "tariff_eur_per_kwh": a.eur_per_kwh}
             if not hasattr(a, "_tariffs"):
                 a._tariffs = {}
-            a._tariffs[tid] = a.secs_per_eur
+            a._tariffs[tid] = a.eur_per_kwh
             save_state(a.state_file, state)
             quote_id = t.get("quote_id")
             code, result = deliver_energy(
@@ -552,10 +602,11 @@ def main() -> int:
     p.add_argument("--device-map", default="{}",
                    help="JSON (or @file) mapping ticket destination slug -> "
                         "gateway device id; unmapped slugs pass through as-is")
-    p.add_argument("--secs-per-eur", type=float, default=1.0,
-                   help="tariff: seconds of charge per euro. The demo fleet "
-                        "delivers 1 kW, so 1 s/EUR is the 1 €/kW · 1 kW/s "
-                        "demo pricing")
+    p.add_argument("--eur-per-kwh", type=float, default=100.0,
+                   help="tariff: currency units per kWh of METERED energy "
+                        "(the pair's unit — €, $, kr). 100 units/kWh is the "
+                        "demo value: 1 unit = 36 kW·s. A real-world price "
+                        "(~0.50) needs sub-unit melts first — see #30")
     p.add_argument("--max-amount", type=int, default=10000,
                    help="cents; above this the adapter abstains so a human settles")
     p.add_argument("--timeout", type=float, default=90.0,
@@ -629,7 +680,7 @@ def main() -> int:
 
     if not hasattr(a, "_tariffs"):
         a._tariffs = {}
-    a._tariffs[tid] = a.secs_per_eur
+    a._tariffs[tid] = a.eur_per_kwh
     code, result = deliver_energy(a, gateway, tid, amount, slug or "",
                                   device_map)
     log(result)

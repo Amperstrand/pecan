@@ -1,12 +1,15 @@
 import { test, expect } from "@playwright/test"
+import { kwsToCents } from "./helpers/ev-rail"
 import { readBalance, payLightningInvoice } from "./helpers/wallet"
 
 // The FULL NOK demo, end to end: Lightning deposit (real signet bolt11 paid
 // by cln-hub-signet) → NOK ecash minted at giftcard-nok → Charger D melt →
 // ev-charge-nok daemon → atom-bridge → the physical m5core-demo box →
 // receipt + refund. Simulated money (signet + NOK), real relay click.
+// Energy pricing: 1 kr buys 36 kW·s at 100 kr/kWh; D is meterless (1 kW)
+// so the 2 kr budget runs a 72 s window before completing.
 const DEPOSIT = 6
-const BUDGET = 4
+const BUDGET = 2
 
 test("NOK: lightning deposit then charger D session end to end", async ({ page }) => {
   // Internal waits (invoice, charge receipt, refund) budget up to 180s;
@@ -52,5 +55,5 @@ test("NOK: lightning deposit then charger D session end to end", async ({ page }
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
   await expect
     .poll(async () => readBalance(page), { timeout: 200000 })
-    .toBeCloseTo(before - delivered, 2)
+    .toBeCloseTo(before - kwsToCents(delivered) / 100, 2)
 })

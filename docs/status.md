@@ -207,6 +207,26 @@ the 30-second short cut (scripts/movie.sh --remote --short) and the
 full cut both ride the self-pay rail; companion strip resets its graph
 per session; the public pole page appears live in the film.
 
+## Energy-pricing round 2026-09-17
+
+#30 layer B shipped: the tariff is now CURRENCY PER kWh end to end —
+daemon flag `--eur-per-kwh` (100 on every pair; 1 unit = 36 kW·s),
+wallet copy "€100.00/kWh, billed by the car's meter", cents-accurate
+spent/refund accounting (`charge-session.ts` mirrors the daemon's
+arithmetic), and every charger spec recomputed via the shared
+`kwsToCents` helper. Deployed by `scripts/ev-charge-deploy.sh` (new:
+ships /opt/pecan-tools + rewrites the three units' ExecStart — the
+procedure used to be untracked). WHY 100 AND NOT REAL-WORLD 0.50: the
+mint's 1-unit minimum melt and the gateway's 3600 kW·s session cap
+make 0.50/kWh unservable (the cheapest legal melt = 2 kWh exceeds the
+cap; visible 5-15 s sessions cost fractions of a cent) — sub-unit
+melts/mints are the blocker, tracked on #30. charger-v's @smoke
+elapsed assertion now pins the ENERGY contract: a €1 budget (36 kW·s)
+completes in 3.6-12 wall seconds at the car's 3-10 kW draw. Also
+fixed here: reconcile no longer flags the #13 daemon's terminal
+failed-and-rolled-back melts as drift (the class that had api-smoke
+red on the morning of 2026-09-17).
+
 ## Metered-truth round 2026-09-16 (evening)
 
 #30 layer A + #31 shipped: the gateway is repo-tracked
@@ -220,9 +240,7 @@ path it replaced once billed 3 for a metered 18: caught in movie
 frame review). charger-v @smoke pins elapsed-vs-budget (a constant-
 rate contract cannot pass it). Public live pole:
 https://giftcard.cashu.exchange/chargepoint.html (CORS-open
-/atom-gateway/public/{id}). Remaining for #30: €/kWh pricing (layer
-B — wallet copy, e2e budgets, daemon tariff). Wallet copy now reads
-"1 € = 1 kW·s, billed by the car's meter".
+/atom-gateway/public/{id}).
 
 ## Alice movie round 2026-09-16
 
@@ -292,9 +310,9 @@ green). Lessons banked:
 
 Audited the charger surface and fixed, all verified by tests:
 
-- **Tariff snapshot**: the daemon records `secs_per_eur` per ticket at
-  trigger time — a restart with a changed flag can no longer reprice
-  delivered energy.
+- **Tariff snapshot**: the daemon records `tariff_eur_per_kwh` per
+  ticket at trigger time — a restart with a changed flag can no longer
+  reprice delivered energy.
 - **Expired-untriggered deposits** now auto-`mark-failed` with a
   refund-due note (full deposit owed back, operator payback) instead of
   lingering as reconcile DRIFT.
@@ -455,7 +473,7 @@ the physical box.
    at finer tariffs, batch or accumulate refunds.
 7. **Tariff is daemon-global and read at settle time** — RESOLVED
    2026-09-03 (stale entry, removed from the backlog 2026-09-15): the
-   daemon snapshots `secs_per_eur` per ticket at trigger time
+   daemon snapshots the per-kWh tariff per ticket at trigger time
    (`payout/ev-charge.py`, unit-pinned) and settles from the snapshot.
 8. **Ambient gRPC churn.** `Error adding payment event to stream:
    channel closed` appears 1–6/min under load, present in passing runs

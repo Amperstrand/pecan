@@ -136,9 +136,10 @@ Pieces:
   autosim can never fake-settle energy.
 - **Adapter** (`payout/ev-charge.py`): payout-sim's loop (login → match →
   fund-lock wait) with the energy step in the middle: tariff
-  `--secs-per-eur` converts melted cents into a window, the device
-  gateway is triggered, `done` is awaited, then `mark-paid` with the
-  session receipt. Device refusals exit 2 (human may settle); a window
+  `--eur-per-kwh` converts melted cents into a metered kW·s budget
+  (100/kWh on every pair — 1 unit = 36 kW·s), the device gateway is
+  triggered, `done` is awaited, then `mark-paid` with the session
+  receipt billing the delivered kW·s. Device refusals exit 2 (human may settle); a window
   that ran but never confirmed exits 6 with the ticket left open — never
   auto-settle on doubt.
 - **Device gateway contract** (any backend may implement it):

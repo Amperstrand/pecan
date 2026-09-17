@@ -18,7 +18,7 @@ import {
 import type { CoreEvents } from "@cashu/coco-core"
 import { subscribeWalletLogging, walletLog } from "./wallet-log"
 import { raceTimeout } from "./timeout"
-import { parseChargeReceipt, refundEuros } from "./charge-session"
+import { parseChargeReceipt, refundCents } from "./charge-session"
 import { migrateLegacyMintUrls } from "./wallet-migration"
 
 export type { DepositMethod }
@@ -450,7 +450,8 @@ export async function getRecentChargedSession(
 ): Promise<{
   label: string
   seconds: number
-  refunded: number
+  spentCents: number
+  refundedCents: number
   stopped: boolean
   receipt: string
 } | null> {
@@ -478,12 +479,13 @@ export async function getRecentChargedSession(
     if (!preimage) continue
     const parsed = parseChargeReceipt(preimage)
     if (!parsed) continue
-    const budgetEuros = Number(op.amount.toBigInt()) / 100
-    const claimable = refundEuros(budgetEuros, parsed.deliveredSeconds)
+    const budgetCents = Number(op.amount.toBigInt())
+    const claimable = refundCents(budgetCents, parsed.deliveredSeconds)
     return {
       label: `Charger ${parsed.device === "atomB" ? "B" : "A"}`,
       seconds: parsed.deliveredSeconds,
-      refunded: claimable,
+      spentCents: budgetCents - claimable,
+      refundedCents: claimable,
       stopped: parsed.stopped,
       receipt: preimage,
     }
@@ -536,12 +538,12 @@ export async function claimOrphanedEvRefunds(
     if (!preimage) continue
     const parsed = parseChargeReceipt(preimage)
     if (!parsed) continue
-    const budgetEuros = Number(op.amount.toBigInt()) / 100
-    const claimable = refundEuros(budgetEuros, parsed.deliveredSeconds)
-    if (claimable < 1) continue
+    const budgetCents = Number(op.amount.toBigInt())
+    const claimable = refundCents(budgetCents, parsed.deliveredSeconds)
+    if (claimable < 100) continue
     try {
       const refundQuote = await createDepositQuote(
-        claimable,
+        claimable / 100,
         "branch",
         currency,
         `refund:${entry.quoteId}`,
