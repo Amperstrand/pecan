@@ -26,6 +26,23 @@ test.skip(!process.env.PECAN_VIDEO, "movie run only (run scripts/sarah-movie.sh)
 // present, every beat holds at least its line's real audio length + slack
 // — the cut is sized to the voice, never rate-clamped.
 // ---------------------------------------------------------------------------
+async function sarah_probe_bundle(browser: import("@playwright/test").Browser) {
+  const ctx = await browser.newContext()
+  const page = await ctx.newPage()
+  await page.goto(WALLET, { waitUntil: "domcontentloaded" })
+  const name =
+    (await page
+      .locator('script[src*="assets/index-"]')
+      .first()
+      .getAttribute("src")
+      .catch(() => "")) ?? ""
+  const js = name
+    ? await page.evaluate(async (src) => (await fetch(src).catch(() => "")).text(), name)
+    : ""
+  await ctx.close()
+  return { name: name.split("/").pop() ?? "?", hasFarm: js.includes("FARM") }
+}
+
 const MANUSCRIPT = JSON.parse(fs.readFileSync("e2e/sarah-manuscript.json", "utf8")) as {
   lines: Array<{ id: string; text: string }>
 }
@@ -246,6 +263,18 @@ async function hideCard(page: Page) {
 
 test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) => {
   test.setTimeout(1_500_000)
+
+  // A concurrent deployer on the network twice flipped the wallet to a
+  // farm-less bundle mid-take; fail in SECONDS with the cause instead of
+  // a 25-minute hang on the missing FARM tab.
+  {
+    const bundle = await sarah_probe_bundle(browser)
+    if (!bundle.hasFarm) {
+      throw new Error(
+        `the live /wallet bundle (${bundle.name}) lacks the FARM tab — a concurrent deploy reverted it; rerun scripts/deploy.sh before filming`,
+      )
+    }
+  }
 
   // ---- preflight data (outside the recording's critical path) ----------
   const overview = await fetch(`${WALLET.replace("/wallet", "")}/farm-console/api/farm`).then(
