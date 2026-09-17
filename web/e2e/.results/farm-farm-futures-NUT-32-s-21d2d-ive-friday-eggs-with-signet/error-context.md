@@ -12,7 +12,7 @@
 # Error details
 
 ```
-Error: Timeout 10000ms exceeded while waiting on the predicate
+Error: Timeout 90000ms exceeded while waiting on the predicate
 ```
 
 # Page snapshot
@@ -35,18 +35,18 @@ Error: Timeout 10000ms exceeded while waiting on the predicate
       - generic [ref=e19]:
         - generic [ref=e20]:
           - generic [ref=e21]:
-            - generic [ref=e22]: Farm — Sunday, Sep 20 eggs
+            - generic [ref=e22]: Farm — Tuesday, Sep 22 eggs
             - generic [ref=e23]: ·
             - generic [ref=e24]: "3"
             - button "details" [ref=e25] [cursor=pointer]
           - generic [ref=e26]:
-            - textbox "send quantity for future:farm-egg:20260920t160000z" [ref=e27]: "2"
+            - textbox "send quantity for future:farm-egg:20260922t160000z" [ref=e27]: "2"
             - button "Send to Bob (token)" [ref=e28] [cursor=pointer]
-            - textbox "redeem quantity for future:farm-egg:20260920t160000z" [ref=e29]: "2"
+            - textbox "redeem quantity for future:farm-egg:20260922t160000z" [ref=e29]: "2"
             - button "Redeem at farm" [ref=e30] [cursor=pointer]
         - generic [ref=e31]:
           - generic [ref=e32]: "Token to hand Bob (2 eggs) — normal Cashu bearer transfer:"
-          - textbox [ref=e33]: cashuBo2FteCRodHRwczovL2dpZnRjYXJkLmNhc2h1LmV4Y2hhbmdlL2Zhcm1hdXggZnV0dXJlOmZhcm0tZWdnOjIwMjYwOTIwdDE2MDAwMHphdIGiYWlIADDmUWfVfzdhcIGkYWECYXN423sic2VjcmV0IjoiNmMxYzc2Mjc0ZTY2MWM4MjA4ODVhNTE2YjA2YmNmODVkZmJjZTBjMGYwNThmYWE0ODgyNzc5YjA5NjA4YmQyNiIsInRhZ3MiOltbImZ1dHVyZSIsIjEiLCJodHRwczovL2dpZnRjYXJkLmNhc2h1LmV4Y2hhbmdlL2Zhcm0tY29uc29sZS90ZXJtcy9lYzFjOTNmYzE3OWJlMDY4MzQyYzY3NzAxYTFiNGUzMDk2ZWQ4YjAwM2I0MTZkMzdmYjEyOTFlYWZhYTY1MjYwIl1dfWFjWCEDlLr2amaxNPJfFtQci8xjfNM1WrWhjlWB1nEqnrTkvI5hZKNhZVgg34QitSxsl3l9oMZr7gUJcuoWeMHZVyGdG3wUeY21x5hhc1ggUoQJraV6OgwyDbOQhJyuXmvi2nzg9okElx7PFYDjouZhclggNonbmt4SiUvSMaditvHBxZA8gVmukyHxbv-NECvNaik
+          - textbox [ref=e33]: cashuBo2FteCRodHRwczovL2dpZnRjYXJkLmNhc2h1LmV4Y2hhbmdlL2Zhcm1hdXggZnV0dXJlOmZhcm0tZWdnOjIwMjYwOTIydDE2MDAwMHphdIGiYWlIAMHtUhDnzn9hcIGkYWECYXN423sic2VjcmV0IjoiMTJkYjc0NmEyMTZhNTZlMDU2MzA4OTVkZTNhNzQ3ODVlNjI5YWRjMmFkOTE0ZDEwM2Y1YzE2MzdiZTlmNjJhZCIsInRhZ3MiOltbImZ1dHVyZSIsIjEiLCJodHRwczovL2dpZnRjYXJkLmNhc2h1LmV4Y2hhbmdlL2Zhcm0tY29uc29sZS90ZXJtcy9lMWVhMjg2MWVkMGIwNzIyOTM2NTRiOThiMDliNDY0MmIzYTNmZTY3MTkwYjVhMmY4OTRiYjE2MDgyOTJkNzZmIl1dfWFjWCEDa8ZL4kTdRUlhQ36q2dDrrqS9otAG248DEXL0zane0dZhZKNhZVgg2288Gzf3GVp6uH8ecuKQMrmWfFjQRusLx4YzUdIV-dthc1ggJZUisvbLSa8UyQarAYNn8kgwFfiCYY99-2PXY8bn_0VhclggIRYuR4wR1nPrplDOfxsbbBudOhJvwfO8znQd9y98Y3g
     - generic [ref=e35]:
       - textbox "paste a token to receive eggs" [ref=e36]
       - button "Receive token" [ref=e37] [cursor=pointer]
@@ -58,9 +58,9 @@ Error: Timeout 10000ms exceeded while waiting on the predicate
             - option "Thursday, Sep 17 · 5 of 10 free · matured"
             - option "Friday, Sep 18 · 5 of 10 free · matured"
             - option "Saturday, Sep 19 · 5 of 10 free · matured"
-            - option "Sunday, Sep 20 · 5 of 10 free" [selected]
-            - option "Monday, Sep 21 · 10 of 10 free"
-            - option "Tuesday, Sep 22 · 10 of 10 free"
+            - option "Sunday, Sep 20 · 5 of 10 free · matured"
+            - option "Monday, Sep 21 · 5 of 10 free · matured"
+            - option "Tuesday, Sep 22 · 5 of 10 free · matured" [selected]
             - option "Wednesday, Sep 23 · 10 of 10 free"
             - option "Thursday, Sep 24 · 10 of 10 free"
             - option "Friday, Sep 25 · 10 of 10 free"
@@ -74,8 +74,8 @@ Error: Timeout 10000ms exceeded while waiting on the predicate
           - generic [ref=e48]:
             - generic [ref=e49]: 5 eggs
             - generic [ref=e50]: 5000 signet sats
-            - generic [ref=e51]: "Production: Sunday, Sep 20Available for pickup: Sun, 20 Sep 2026 16:00:00 UTC"
-        - generic [ref=e52]: YOU OWN — Farm eggs · 5 claims of future:farm-egg:20260920t160000z
+            - generic [ref=e51]: "Production: Tuesday, Sep 22Available for pickup: Tue, 22 Sep 2026 16:00:00 UTC"
+        - generic [ref=e52]: YOU OWN — Farm eggs · 5 claims of future:farm-egg:20260922t160000z
         - button "verify terms" [ref=e54] [cursor=pointer]
         - group [ref=e55]:
           - generic "all series (10)" [ref=e56] [cursor=pointer]
@@ -93,11 +93,6 @@ Error: Timeout 10000ms exceeded while waiting on the predicate
 # Test source
 
 ```ts
-  191 |     expect(digest).toBe(series.terms_sha256)
-  192 |     const envelope = JSON.parse(blob) as { mint: string; signature: string; terms: { unit: string } }
-  193 |     expect(envelope.terms.unit).toBe(series.unit)
-  194 |     expect(envelope.signature).toMatch(/^[0-9a-f]{128}$/)
-  195 |     expect(envelope.mint).toContain("/farm")
   196 | 
   197 |     // The mint advertises NUT-32.
   198 |     const info = await page.request.get("/farm/v1/info").then((r) => r.json())
@@ -191,80 +186,85 @@ Error: Timeout 10000ms exceeded while waiting on the predicate
   286 |     expect(settled.unit).toBe(series.unit)
   287 |     expect(settled.amount).toBe(2)
   288 | 
-  289 |     await expect
-  290 |       .poll(async () => (await bobPage2.getByText(/FARM-/i).first().textContent()) ?? "")
-> 291 |       .toMatch(/FARM-/)
-      |        ^ Error: Timeout 10000ms exceeded while waiting on the predicate
-  292 |     await expect
-  293 |       .poll(async () => (await farmOverview(page)).series.find((s) => s.date === series.date)?.redeemed ?? -1)
-  294 |       .toBe(series.redeemed + 2)
-  295 | 
-  296 |     // Double redemption dies on spent proofs: Bob's own wallet no longer
-  297 |     // shows the claims, so the melt cannot even lock inputs.
-  298 |     const bobLeft = (await readFutureProofs(bobPage2)).filter(
-  299 |       (p) => p.unit === series.unit && p.state !== "spent",
-  300 |     )
-  301 |     expect(bobLeft.reduce((sum, p) => sum + p.amount, 0)).toBe(0)
-  302 |     await bobContext.close()
-  303 |   })
-  304 | 
-  305 |   test("capacity invariant: unpaid purchases reserve and expire", async ({ page }) => {
-  306 |     test.setTimeout(120_000)
-  307 |     const series = await firstOpenSeries(page)
-  308 | 
-  309 |     // An 11-egg claim cannot exist: the API refuses beyond capacity.
-  310 |     const tooMany = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
-  311 |       data: {
-  312 |         production_date: series.date,
-  313 |         quantity: series.capacity + 1,
-  314 |         pubkey: "02" + "cd".repeat(32),
-  315 |       },
-  316 |     })
-  317 |     expect(tooMany.status()).toBeGreaterThanOrEqual(400)
-  318 | 
-  319 |     // Purchase everything that is left — the next one must fail.
-  320 |     if (series.available > 0) {
-  321 |       const grab = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
-  322 |         data: {
-  323 |           production_date: series.date,
-  324 |           quantity: series.available,
-  325 |           pubkey: "02" + "ef".repeat(32),
-  326 |         },
-  327 |       })
-  328 |       expect(grab.status()).toBe(200)
-  329 |       const none = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
-  330 |         data: {
-  331 |           production_date: series.date,
-  332 |           quantity: 1,
-  333 |           pubkey: "02" + "ef".repeat(32),
-  334 |         },
-  335 |       })
-  336 |       expect(none.status()).toBeGreaterThanOrEqual(400)
-  337 |       expect((await none.json()).error).toContain("capacity")
-  338 |     }
-  339 |   })
-  340 | 
-  341 |   test("redemption before maturity is refused", async ({ page }) => {
-  342 |     const series = (await farmOverview(page)).series.find((s) => !s.matured)
-  343 |     if (!series) {
-  344 |       test.skip(true, "no immature series left")
-  345 |       return
-  346 |     }
-  347 |     const r = await page.request.post("/farm/v1/melt/quote/future", {
-  348 |       data: {
-  349 |         method: "future",
-  350 |         request: "farm redemption",
-  351 |         unit: series.unit,
-  352 |         amount: 1,
-  353 |       },
-  354 |     })
-  355 |     // Refused at some layer (mint unit gate or the farm's maturity gate —
-  356 |     // the message depends on which check fires first); the invariant is
-  357 |     // that an immature redemption never creates a quote.
-  358 |     expect(r.status()).toBeGreaterThanOrEqual(400)
-  359 |     const body = await r.text()
-  360 |     expect(body.toLowerCase()).toMatch(/matur|unsupported|refus|invalid/)
-  361 |   })
-  362 | })
-  363 | 
+  289 |     // The melt finalizes asynchronously after the operator settles; the
+  290 |     // wallet's poll picks the receipt up on its next tick.
+  291 |     await expect
+  292 |       .poll(
+  293 |         async () => (await bobPage2.getByText(/FARM-/i).first().textContent().catch(() => "")) ?? "",
+  294 |         { timeout: 90_000 },
+  295 |       )
+> 296 |       .toMatch(/FARM-/)
+      |        ^ Error: Timeout 90000ms exceeded while waiting on the predicate
+  297 |     await expect
+  298 |       .poll(async () => (await farmOverview(page)).series.find((s) => s.date === series.date)?.redeemed ?? -1)
+  299 |       .toBe(series.redeemed + 2)
+  300 | 
+  301 |     // Double redemption dies on spent proofs: Bob's own wallet no longer
+  302 |     // shows the claims, so the melt cannot even lock inputs.
+  303 |     const bobLeft = (await readFutureProofs(bobPage2)).filter(
+  304 |       (p) => p.unit === series.unit && p.state !== "spent",
+  305 |     )
+  306 |     expect(bobLeft.reduce((sum, p) => sum + p.amount, 0)).toBe(0)
+  307 |     await bobContext.close()
+  308 |   })
+  309 | 
+  310 |   test("capacity invariant: unpaid purchases reserve and expire", async ({ page }) => {
+  311 |     test.setTimeout(120_000)
+  312 |     const series = await firstOpenSeries(page)
+  313 | 
+  314 |     // An 11-egg claim cannot exist: the API refuses beyond capacity.
+  315 |     const tooMany = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
+  316 |       data: {
+  317 |         production_date: series.date,
+  318 |         quantity: series.capacity + 1,
+  319 |         pubkey: "02" + "cd".repeat(32),
+  320 |       },
+  321 |     })
+  322 |     expect(tooMany.status()).toBeGreaterThanOrEqual(400)
+  323 | 
+  324 |     // Purchase everything that is left — the next one must fail.
+  325 |     if (series.available > 0) {
+  326 |       const grab = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
+  327 |         data: {
+  328 |           production_date: series.date,
+  329 |           quantity: series.available,
+  330 |           pubkey: "02" + "ef".repeat(32),
+  331 |         },
+  332 |       })
+  333 |       expect(grab.status()).toBe(200)
+  334 |       const none = await page.request.post(`${FARM_BASE}/api/farm/futures/quote`, {
+  335 |         data: {
+  336 |           production_date: series.date,
+  337 |           quantity: 1,
+  338 |           pubkey: "02" + "ef".repeat(32),
+  339 |         },
+  340 |       })
+  341 |       expect(none.status()).toBeGreaterThanOrEqual(400)
+  342 |       expect((await none.json()).error).toContain("capacity")
+  343 |     }
+  344 |   })
+  345 | 
+  346 |   test("redemption before maturity is refused", async ({ page }) => {
+  347 |     const series = (await farmOverview(page)).series.find((s) => !s.matured)
+  348 |     if (!series) {
+  349 |       test.skip(true, "no immature series left")
+  350 |       return
+  351 |     }
+  352 |     const r = await page.request.post("/farm/v1/melt/quote/future", {
+  353 |       data: {
+  354 |         method: "future",
+  355 |         request: "farm redemption",
+  356 |         unit: series.unit,
+  357 |         amount: 1,
+  358 |       },
+  359 |     })
+  360 |     // Refused at some layer (mint unit gate or the farm's maturity gate —
+  361 |     // the message depends on which check fires first); the invariant is
+  362 |     // that an immature redemption never creates a quote.
+  363 |     expect(r.status()).toBeGreaterThanOrEqual(400)
+  364 |     const body = await r.text()
+  365 |     expect(body.toLowerCase()).toMatch(/matur|unsupported|refus|invalid/)
+  366 |   })
+  367 | })
+  368 | 
 ```

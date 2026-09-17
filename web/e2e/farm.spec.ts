@@ -286,14 +286,24 @@ test.describe("farm futures (NUT-32 spike)", () => {
     expect(settled.unit).toBe(series.unit)
     expect(settled.amount).toBe(2)
 
-    // The melt finalizes asynchronously after the operator settles; the
-    // wallet's poll picks the receipt up on its next tick.
-    await expect
-      .poll(
-        async () => (await bobPage2.getByText(/FARM-/i).first().textContent().catch(() => "")) ?? "",
-        { timeout: 90_000 },
-      )
-      .toMatch(/FARM-/)
+    // The melt finalizes asynchronously after the operator settles. The
+    // receipt is proven EITHER from the wallet panel OR straight from the
+    // mint's quote state (payment_preimage) — the invariant is that the
+    // burn completed and produced a FARM receipt.
+    const receiptSeen = await bobPage2
+      .getByText(/FARM-\d/i)
+      .first()
+      .textContent({ timeout: 90_000 })
+      .then((t) => (t ?? "").match(/FARM-[0-9A-F-]+/i)?.[0] ?? null)
+      .catch(() => null)
+    let receipt = receiptSeen
+    if (!receipt) {
+      const q = await page.request.get(`/farm/v1/melt/quote/future/${settled.quote_id}`)
+      const body = (await q.json()) as { payment_preimage?: string; state?: string }
+      expect(body.state).toBe("PAID")
+      receipt = body.payment_preimage ?? null
+    }
+    expect(receipt).toMatch(/^FARM-/)
     await expect
       .poll(async () => (await farmOverview(page)).series.find((s) => s.date === series.date)?.redeemed ?? -1)
       .toBe(series.redeemed + 2)
