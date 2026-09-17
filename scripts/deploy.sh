@@ -26,6 +26,20 @@ rsync -az --exclude node_modules --exclude target --exclude .git --exclude dist 
 echo "==> build image on $BUILDER (32GB RAM)"
 ssh "$BUILDER" "cd $REMOTE_DIR && DOCKER_BUILDKIT=1 docker build -t $IMAGE . 2>&1 | tail -3"
 
+# Builder-side content gate: a build-cache ghost twice shipped a wallet
+# bundle without the farm currency under a fresh tag. The image must
+# carry the farm tab BEFORE it is allowed near the server.
+BUNDLE_IN_IMAGE=$(ssh "$BUILDER" "docker run --rm --entrypoint sh $IMAGE -c 'ls /usr/local/share/pecan/web/assets | grep "^index-.*\\.js\$" | head -1'")
+if [ -z "$BUNDLE_IN_IMAGE" ]; then
+  echo "!! built image has no wallet bundle — aborting" >&2
+  exit 1
+fi
+ssh "$BUILDER" "docker run --rm --entrypoint sh $IMAGE -c 'grep -q FARM /usr/local/share/pecan/web/assets/$BUNDLE_IN_IMAGE'" || {
+  echo "!! built image's wallet bundle ($BUNDLE_IN_IMAGE) lacks the farm tab — aborting before ship" >&2
+  exit 1
+}
+echo "    bundle $BUNDLE_IN_IMAGE carries the farm tab"
+
 echo "==> ship image to server"
 ssh "$BUILDER" "docker save $IMAGE | gzip > $REMOTE_DIR/pecan-image.tar.gz"
 scp -q "$BUILDER:$REMOTE_DIR/pecan-image.tar.gz" /tmp/pecan-image.tar.gz
