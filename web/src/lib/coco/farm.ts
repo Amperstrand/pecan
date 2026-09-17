@@ -291,7 +291,9 @@ async function farmKeysetIds(): Promise<string[]> {
 }
 
 export async function receiveFutureToken(token: string): Promise<number> {
+  console.warn("[bob] begin")
   const coco = await getCoco()
+  console.warn("[bob] coco ready")
   // The generic receive pipeline crashes fresh contexts on this stack;
   // receive = swap the token's proofs into fresh tagged proofs of ours.
   // Keyset ids let the decoder resolve proof keysets it has not seen.
