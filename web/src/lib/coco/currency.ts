@@ -94,9 +94,8 @@ export const CURRENCIES: Record<Currency, CurrencyConfig> = {
     // The NUT-32 egg-futures pair (spike): the mint's units are per-day
     // future:farm-egg:<maturity> series, NOT a base "farm" currency —
     // balances render through the farm panel, not the fiat forms.
-    // nut17:false — the wallet blackholes the WS and polls; 43 dated
-    // keysets made the ws-hybrid addMint path crawl, and the farm flow
-    // is fully poll-driven anyway.
+    // nut17:true — the ws-hybrid transport needs a real socket; the
+    // blackhole variant sent some receive paths into a spin.
     mintUrl: "",
     mintPath: "/farm",
     consolePath: "/farm-console",
@@ -105,7 +104,7 @@ export const CURRENCIES: Record<Currency, CurrencyConfig> = {
     scale: 1,
     step: "1",
     hasRails: false,
-    nut17: false,
+    nut17: true,
   },
 }
 
