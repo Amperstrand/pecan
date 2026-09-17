@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process"
 import fs from "node:fs"
 import { test, expect, type Page } from "@playwright/test"
+import { getDecodedToken } from "@cashu/cashu-ts"
 
 // SARAH BUYS EGG FUTURES — the movie. One phone-shaped recording of the
 // full NUT-32 draft story on the deployed farm pair of
@@ -436,25 +437,21 @@ test("Sarah buys egg futures — the NUT-32 draft story", async ({ browser }) =>
   expect(token.length).toBeGreaterThan(50)
 
   // ---- decode what Sarah hands Bob: the token IS her proofs ----------
-  const decoded = await sarah.evaluate(
-    async (tok) => {
-      const mod = await import("/src/lib/coco/farm.ts").catch(() => null)
-      void mod
-      const raw = tok.startsWith("cashuA") ? tok.slice(6) : tok.slice(6)
-      const b64 = raw.replace(/-/g, "+").replace(/_/g, "/")
-      const json = JSON.parse(
-        new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))),
-      )
-      const entry = json.token?.[0] ?? json
-      return {
-        mint: (entry.mint ?? json.mint ?? "").replace("https://", ""),
-        unit: entry.unit ?? json.unit ?? "?",
-        proofs: entry.proofs?.length ?? 0,
-        amounts: (entry.proofs ?? []).map((pr: { amount?: number }) => pr.amount).join("+"),
-      }
-    },
-    token,
-  )
+  // V3 tokens are binary CBOR (cashuB…) — decode on the test side with
+  // cashu-ts (needs the mint's keyset ids for V3 resolution).
+  const keysetIds = await sarah
+    .request.get(`${WALLET.replace("/wallet", "")}/farm/v1/keysets`)
+    .then(async (r) => {
+      const j = (await r.json()) as { keysets?: Array<{ id?: string }> }
+      return (j.keysets ?? []).map((k) => k.id).filter((id): id is string => !!id)
+    })
+  const decodedTok = getDecodedToken(token, keysetIds)
+  const decoded = {
+    mint: (decodedTok.mint ?? "").replace("https://", ""),
+    unit: decodedTok.unit ?? "?",
+    proofs: decodedTok.proofs?.length ?? 0,
+    amounts: (decodedTok.proofs ?? []).map((pr) => Number(pr.amount)).join("+"),
+  }
   await card(sarah, "a", {
     title: "What Bob receives.",
     mono: `mint &nbsp;&nbsp;${decoded.mint}<br/>unit &nbsp;&nbsp;${decoded.unit}<br/>proofs &nbsp;${decoded.proofs} (${decoded.amounts})<br/>&nbsp;<br/>these are SARAH's proofs<br/>— bearer notes`,
