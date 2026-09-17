@@ -182,7 +182,6 @@ export function getCoco(): Promise<Manager> {
       console.warn("[coco-boot] migrate begin")
       await migrateLegacyMintUrls(window.location.origin, mintUrl("eur"))
       console.warn("[coco-boot] migrate done")
-      const repo = new IndexedDbRepositories({ name: "giftcard-coco-wallet" })
       const noWsHosts = new Set(
         (Object.keys(CURRENCIES) as Currency[])
           .filter((c) => !CURRENCIES[c].nut17)
