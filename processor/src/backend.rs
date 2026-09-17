@@ -656,9 +656,12 @@ impl MintPayment for BranchBackend {
                     return Err(Error::UnsupportedPaymentOption);
                 }
                 // Future melts (farm redemptions) carry their own unit;
-                // the base-unit check below does not apply to them.
+                // the base-unit check below does not apply to them. The
+                // UNIT routes: the melt proto drops the method tag (same
+                // PR #2275 gap) and melts carry no rail extra.
                 let future = opts.method.trim() == "future"
-                    || future_extra(opts.extra_json.as_deref());
+                    || future_extra(opts.extra_json.as_deref())
+                    || crate::farm::valid_future_unit(&unit.to_string());
                 if !future {
                     self.check_unit(unit)?;
                 }
