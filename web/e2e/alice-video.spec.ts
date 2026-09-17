@@ -109,6 +109,17 @@ const CHROME_CSS = `
     color: #e6edf3; font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 600;
     text-shadow: 0 1px 2px rgba(0,0,0,.6);
   }
+  #movie-lower {
+    position: fixed; left: 12px; right: 12px; bottom: 128px; z-index: 2147483645;
+    pointer-events: none; box-sizing: border-box; padding: 12px 16px;
+    background: rgba(5,8,16,.88); border: 1px solid rgba(56,189,248,.4);
+    border-radius: 12px; color: #e6edf3;
+    font-family: Inter, system-ui, sans-serif; text-align: center;
+    opacity: 0; transition: opacity .4s ease;
+  }
+  #movie-lower.show { opacity: 1; }
+  #movie-lower .t { font-size: 15px; font-weight: 600; line-height: 1.3; }
+  #movie-lower .b { font-size: 12.5px; color: #9fb0c3; margin-top: 3px; line-height: 1.35; }
   #stage-banner {
     position: fixed; top: 30px; left: 50%; transform: translateX(-50%);
     z-index: 2147483644; pointer-events: none;
@@ -262,6 +273,39 @@ async function payWithRetry(invoice: string, attempts = 5, gapMs = 8_000) {
       await new Promise(resolve => setTimeout(resolve, gapMs))
     }
   }
+}
+
+// A lower-third caption: the words without covering the live UI.
+async function lowerThird(
+  page: Page,
+  opts: { title: string; body?: string; say?: string; holdMs: number },
+) {
+  await page.evaluate(
+    ({ title, body }) => {
+      document.getElementById("movie-lower")?.remove()
+      const el = document.createElement("div")
+      el.id = "movie-lower"
+      el.innerHTML = `<div class="t">${title}</div>${body ? `<div class="b">${body}</div>` : ""}`
+      document.body.appendChild(el)
+      requestAnimationFrame(() => el.classList.add("show"))
+    },
+    { title: opts.title, body: opts.body },
+  )
+  markStart(opts.say ?? opts.title)
+  await page.waitForTimeout(opts.holdMs ?? holdFor(opts.title, opts.body) * 0.7)
+  markEnd()
+  await page.evaluate(
+    () =>
+      new Promise<void>(resolve => {
+        const el = document.getElementById("movie-lower")
+        if (!el) return resolve()
+        el.classList.remove("show")
+        setTimeout(() => {
+          el.remove()
+          resolve()
+        }, 430)
+      }),
+  )
 }
 
 async function hideCard(page: Page) {
@@ -660,26 +704,23 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     "aria-selected",
     "true",
   )
-  await card(page, {
+  await lowerThird(page, {
     title: "The QR is just a link.",
-    body: "It hands the wallet the charge point. Nothing else leaves Alice's phone.",
-    holdMs: undefined,
+    body: "It hands the wallet the charge point — nothing else leaves Alice's phone.",
     say: "The QR is just a link. It hands the wallet the charge point, and nothing else leaves her phone.",
   })
-  await hideCard(page)
   await page.waitForTimeout(1_000)
 
   // SCENE 6 — charge, at the car's pace: metered truth (#30) means a
   // €50 budget burns in ~5-16 WALL seconds at a 3-10 kW draw — so the
   // card plays BEFORE Start, the burn itself stays uncovered (slider +
   // strip live), and Alice stops early to keep most of her deposit.
-  await card(page, {
-    title: `€${DEPOSIT_EUR} of energy, authorized.`,
-    body: "Her car negotiates power like a real one: 3 kW to start, then 7, then 22 — and at €0.50 per kWh, the bill follows the meter.",
+  await lowerThird(page, {
+    title: `€${DEPOSIT_EUR} authorized at €0.50/kWh`,
+    body: "The car will negotiate: 3 kW → 7 kW → 22 kW. The bill follows the meter.",
     say: "Fifty euro of energy, authorized. Her car negotiates power like a real one: three kilowatts to start, then seven, then twenty two. And at fifty cents per kilowatt hour, the bill follows the meter.",
-    holdMs: 7_000,
+    holdMs: 9_000,
   })
-  await hideCard(page)
   await page.getByPlaceholder("1.00").fill(String(DEPOSIT_EUR))
   await page.getByRole("button", { name: "Start charging" }).click()
   await expect(page.getByText("Charging at Sim Charger")).toBeVisible({ timeout: 60_000 })
