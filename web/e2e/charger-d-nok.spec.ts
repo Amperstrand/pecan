@@ -60,7 +60,7 @@ test("NOK: lightning deposit then charger D session end to end", async ({ page }
     .toBeGreaterThanOrEqual(340)
   await page.getByRole("button", { name: "Stop charging" }).click()
   await expect(
-    page.getByText(/(Charging stopped — \d+ s delivered|Charged \d+ s at Charger D)/),
+    page.getByText(/(Charging stopped — [\d.]+ (?:kW·s|kWh) delivered|Charged \d+ s at Charger D)/),
   ).toBeVisible({ timeout: 180000 })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
   expect(receipt).toMatch(/^EV-atomD-\d+s-[0-9A-F]{8}(-[A-Z]+)?$/)

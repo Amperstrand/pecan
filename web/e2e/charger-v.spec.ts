@@ -62,7 +62,7 @@ test("charger V: virtual device session end to end (no hardware) @smoke", async 
     .toBeGreaterThanOrEqual(STOP_AT)
   await page.getByRole("button", { name: "Stop charging" }).click()
   await expect(
-    page.getByText(/(Charging stopped — \d+ s delivered|Charged \d+ s at Sim Charger)/),
+    page.getByText(/(Charging stopped — [\d.]+ (?:kW·s|kWh) delivered|Charged \d+ s at Sim Charger)/),
   ).toBeVisible({ timeout: 180_000 })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
   expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}(-[A-Z]+)?$/)

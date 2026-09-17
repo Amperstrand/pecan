@@ -151,7 +151,7 @@ test("ev rail: charger B serves the same contract (atomB window)", async ({ page
     .toBeGreaterThanOrEqual(1)
   await page.getByRole("button", { name: "Stop charging" }).click()
 
-  await expect(page.getByText(/Charging stopped — \d+ s delivered/)).toBeVisible({
+  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh) delivered/)).toBeVisible({
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
@@ -198,7 +198,7 @@ test("ev rail: deposit pattern — slider, remote stop, refund of the unspent de
   await page.getByRole("button", { name: "Stop charging" }).click()
 
   // Stopped summary with actual consumption from the device-side abort.
-  await expect(page.getByText(/Charging stopped — \d+ s delivered/)).toBeVisible({
+  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh) delivered/)).toBeVisible({
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
@@ -240,7 +240,7 @@ test("ev rail: device button abort meters actual delivery and refunds", async ({
   // The simulated G39 press aborts with 2 kW·s delivered; the daemon
   // settles the STOPPED receipt (2 kW·s = 6 cents at €100/kWh) and the
   // wallet claims the €3.94 remainder.
-  await expect(page.getByText("Charging stopped — 2 s delivered")).toBeVisible({
+  await expect(page.getByText("Charging stopped — 2 kW·s delivered")).toBeVisible({
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
@@ -305,7 +305,7 @@ test("ev rail: a mid-session reload resumes charging and still refunds", async (
   await page.reload()
   await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
   const charging = page.getByText("⚡ Charging at " + TAB)
-  const summary = page.getByText(/Charged? \d+ s|Charging stopped — \d+ s/)
+  const summary = page.getByText(/Charged? [\d.]+ (?:s|kW·s|kWh)|Charging stopped — [\d.]+/)
   await Promise.race([
     charging.waitFor({ state: "visible", timeout: 120_000 }),
     summary.waitFor({ state: "visible", timeout: 120_000 }),
@@ -351,7 +351,7 @@ test("ev rail: double-stop is idempotent — one settle, one refund, exact balan
   const stop = page.getByRole("button", { name: "Stop charging" })
   await Promise.all([stop.click(), stop.click().catch(() => undefined)])
 
-  await expect(page.getByText(/Charging stopped — \d+ s delivered/)).toBeVisible({
+  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh) delivered/)).toBeVisible({
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()

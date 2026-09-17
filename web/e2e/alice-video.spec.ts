@@ -74,7 +74,7 @@ const CHROME_CSS = `
   #companion.live .bolt { animation: movie-bolt 1.1s ease-in-out infinite; }
   @keyframes movie-bolt { 0%,100%{opacity:1} 50%{opacity:.25} }
   #pole-panel {
-    position: fixed; top: 64px; right: 10px; width: 105px; height: 208px; z-index: 2147483644;
+    position: fixed; top: 292px; left: 8px; width: 78px; height: 112px; z-index: 2147483644;
     pointer-events: none; box-sizing: border-box; padding: 10px 8px;
     background: linear-gradient(180deg, #060a12, #03050a);
     border: 3px solid #38bdf8; border-radius: 10px;
@@ -88,14 +88,14 @@ const CHROME_CSS = `
     position: absolute; inset: 0; pointer-events: none;
     background: repeating-linear-gradient(0deg, rgba(126,240,193,.05) 0 1px, transparent 1px 3px);
   }
-  #pole-panel .fw { font-size: 8px; letter-spacing: .12em; color: #4e6a5e; }
+  #pole-panel .fw { font-size: 7px; letter-spacing: .12em; color: #4e6a5e; }
   #pole-panel .led { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
     background: #233; margin: 6px 0 2px; }
   #pole-panel.on .led { background: #34d399; box-shadow: 0 0 8px #34d399; animation: pole-bolt 1.1s infinite; }
-  #pole-panel .kw { font-size: 26px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  #pole-panel .kw { font-size: 18px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
   #pole-panel .kw small { font-size: 10px; }
-  #pole-panel .kws { font-size: 13px; color: #9fb0c3; margin-top: 4px; font-variant-numeric: tabular-nums; }
-  #pole-panel .relay { margin-top: 7px; font-size: 9px; letter-spacing: .18em; color: #34d399; }
+  #pole-panel .kws { font-size: 11px; color: #9fb0c3; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  #pole-panel .relay { margin-top: 4px; font-size: 8px; letter-spacing: .18em; color: #34d399; }
   @keyframes pole-bolt { 50% { opacity: .3; } }
   #movie-frame {
     position: fixed; inset: 0; z-index: 2147483643; pointer-events: none;
@@ -109,6 +109,15 @@ const CHROME_CSS = `
     color: #e6edf3; font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 600;
     text-shadow: 0 1px 2px rgba(0,0,0,.6);
   }
+  #stage-banner {
+    position: fixed; top: 30px; left: 50%; transform: translateX(-50%);
+    z-index: 2147483644; pointer-events: none;
+    background: rgba(7,12,22,.9); border: 1px solid rgba(56,189,248,.45);
+    border-radius: 999px; padding: 6px 16px;
+    color: #e6edf3; font-family: Inter, system-ui, sans-serif; font-size: 13px;
+    opacity: 0; transition: opacity .4s ease;
+  }
+  #stage-banner.show { opacity: 1; }
   #movie-fade { position: fixed; inset: 0; z-index: 2147483647; background: #000;
     opacity: 0; transition: opacity 1.4s ease; pointer-events: none; }
 `
@@ -222,7 +231,7 @@ async function cardUntil(
       el.querySelector(".body")!.textContent = done
     }
   }, opts.done)
-  await page.waitForTimeout(2_200)
+  await page.waitForTimeout(3_500)
   markEnd()
 }
 
@@ -314,8 +323,8 @@ async function mountCompanion(page: Page) {
         <canvas id="cp-graph" width="196" height="46"></canvas>
       </div>
       <div class="money">
-        <span class="eur" id="cp-eur">€50.00</span>
-        <span class="sub" id="cp-money-sub">authorized</span>
+        <span class="eur" id="cp-eur">€0.00</span>
+        <span class="sub" id="cp-money-sub">spent</span>
       </div>`
     document.body.appendChild(el)
     const kwEl = el.querySelector("#cp-kw") as HTMLElement
@@ -361,6 +370,12 @@ async function mountCompanion(page: Page) {
       })
       c.on("connect", () => c.subscribe("charger/atomV/meter"))
       let lastWh = -1
+      let lastKw: number | null = null
+      const stageNames: Record<number, string> = {
+        3: "3 kW — pilot handshake",
+        7: "7 kW — negotiated step-up",
+        22: "22 kW — full power",
+      }
       c.on("message", (_t: unknown, payload: Uint8Array) => {
         try {
           const m = JSON.parse(new TextDecoder().decode(payload))
@@ -370,6 +385,21 @@ async function mountCompanion(page: Page) {
           lastWh = m.wh
           kwEl.textContent = m.kw === null ? "—" : String(m.kw)
           whEl.textContent = String(m.wh)
+          if (m.kw !== null && m.kw !== lastKw) {
+            const name = stageNames[m.kw]
+            if (name) {
+              const b = document.getElementById("stage-banner") ?? (() => {
+                const el = document.createElement("div")
+                el.id = "stage-banner"
+                document.body.appendChild(el)
+                return el
+              })()
+              b.textContent = name
+              b.classList.add("show")
+              setTimeout(() => b.classList.remove("show"), 2600)
+            }
+          }
+          lastKw = m.kw
           draw(m.kw)
         } catch {}
       })
@@ -392,18 +422,18 @@ async function mountCompanion(page: Page) {
         sub.textContent = "delivering energy"
       } else {
         const m =
-          body.match(/Charging stopped — (\d+) s delivered/) ??
+          body.match(/Charging stopped — ([\d.]+) (?:kW·s|kWh) delivered/) ??
           body.match(/Charged (\d+) s at/)
         if (m) {
-          delivered = Number(m[1])
+          delivered = m[1].includes(".") ? Number(m[1]) * 3600 : Number(m[1])
           remaining = BUDGET - delivered
           strip.classList.remove("live")
           sub.textContent = "session complete"
         } else {
           strip.classList.remove("live")
           sub.textContent = "charge point · online"
-          eur.textContent = `€${BUDGET.toFixed(2)}`
-          moneySub.textContent = "ready"
+          eur.textContent = "€0.00"
+          moneySub.textContent = "spent"
           return
         }
       }
@@ -411,7 +441,7 @@ async function mountCompanion(page: Page) {
       // the deposit minus the METERED cost, never a 1:1 kW·s mirror.
       const spentEur = (delivered ?? 0) / 7200
       eur.textContent = `€${(BUDGET - spentEur).toFixed(2)}`
-      moneySub.textContent = spentEur > 0 ? "still hers" : "authorized"
+      moneySub.textContent = `of €${BUDGET.toFixed(0)} left`
     }
     tick()
     window.setInterval(tick, 400)
@@ -669,10 +699,12 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
     .toBeGreaterThanOrEqual(STOP_AT_KWS)
   await still(page, "06-charging-live")
   await page.getByRole("button", { name: "Stop charging" }).click()
-  // Remote-stop summary reads "Charging stopped — N s delivered"; a
+  // Stop summary reads "Charging stopped — 0.21 kWh delivered"; a
   // natural full-budget completion reads "Charged N s at …". Accept both.
   await expect(
-    page.getByText(/(Charging stopped — \d+ s delivered|Charged \d+ s at Sim Charger)/),
+    page.getByText(
+      /(Charging stopped — [\d.]+ (?:kW·s|kWh) delivered|Charged [\d.]+ (?:kW·s|kWh) at Sim Charger)/,
+    ),
   ).toBeVisible({ timeout: 180_000 })
   const receipt = await page.locator("p.break-all.font-mono").first().textContent()
   expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}/)
@@ -722,9 +754,9 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   })
   await card(page, {
     title: "Pay for energy the way you pay for anything else.",
-    body: "Lightning in. Kilowatt-seconds out.",
+    body: "Lightning in. Kilowatt-hours out.",
     holdMs: undefined,
-    say: "Pay for energy the way you pay for anything else. Lightning in. Kilowatt seconds out.",
+    say: "Pay for energy the way you pay for anything else. Lightning in. Kilowatt hours out.",
   })
   await hideCompanion(page)
   await card(page, {
@@ -819,7 +851,9 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
     .toBeGreaterThanOrEqual(STOP_AT_KWS)
   await page.getByRole("button", { name: "Stop charging" }).click()
   await expect(
-    page.getByText(/(Charging stopped — \d+ s delivered|Charged \d+ s at Sim Charger)/),
+    page.getByText(
+      /(Charging stopped — [\d.]+ (?:kW·s|kWh) delivered|Charged [\d.]+ (?:kW·s|kWh) at Sim Charger)/,
+    ),
   ).toBeVisible({ timeout: 180_000 })
   const receipt = await page.locator("p.break-all.font-mono").first().textContent()
   expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}/)

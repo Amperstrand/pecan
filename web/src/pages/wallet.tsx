@@ -1378,10 +1378,13 @@ export function WalletPage() {
                   ⚡ Charging at {withdrawState.label}
                 </p>
                 <p className="text-3xl font-bold tabular-nums">
-                  {formatEnergy(withdrawState.delivered)}
+                  {(withdrawState.requested || withdrawState.budget) >= 3600
+                    ? `${(withdrawState.delivered / 3600).toFixed(3)} kWh`
+                    : formatEnergy(withdrawState.delivered)}
                   <span className="text-base font-normal text-muted-foreground">
                     {" "}
-                    / {formatEnergy(withdrawState.requested || withdrawState.budget)}
+                    /{" "}
+                    {formatEnergy(withdrawState.requested || withdrawState.budget)}
                   </span>
                 </p>
                 <div
@@ -1404,11 +1407,10 @@ export function WalletPage() {
                   />
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  {`≈ ${Math.max(
+                  {`€${(kwsToCostCents(withdrawState.delivered) / 100).toFixed(2)} spent · €${Math.max(
                     0,
-                    withdrawState.budget -
-                      kwsToCostCents(withdrawState.delivered) / 100,
-                  ).toFixed(2)} ${CURRENCIES[currency].symbol} of the deposit remaining`}
+                    withdrawState.budget - kwsToCostCents(withdrawState.delivered) / 100,
+                  ).toFixed(2)} of the deposit left`}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   Deposit {withdrawState.budget.toFixed(2)}{" "}
@@ -1451,8 +1453,8 @@ export function WalletPage() {
               <div className="grid gap-2 rounded-md border p-3 text-center">
                 <p className="font-medium">
                   {withdrawState.stopped
-                    ? `Charging stopped — ${withdrawState.seconds} s delivered`
-                    : `Charged ${withdrawState.seconds} s at ${withdrawState.label}`}
+                    ? `Charging stopped — ${formatEnergy(withdrawState.seconds)} delivered`
+                    : `Charged ${formatEnergy(withdrawState.seconds)} at ${withdrawState.label}`}
                 </p>
                 <p className="text-sm text-muted-foreground">
                   {(withdrawState.spentCents / 100).toFixed(2)}{" "}
