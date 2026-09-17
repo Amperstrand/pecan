@@ -99,7 +99,7 @@ while :; do
 done
 
 echo "==> pass 3: cut (builder)"
-$SSH_BUILDER "$BUILDER" 'rm -rf /tmp/sarah-film && mkdir -p /tmp/sarah-film' 2>/dev/null
+$SSH_BUILDER "$BUILDER" 'rm -rf /tmp/sarah-film && mkdir -p /tmp/sarah-film && cp /home/ubuntu/sarah-assemble.py /tmp/sarah-film/' 2>/dev/null
 rsync -q web/e2e/.results-video/sarah-parts.json "$BUILDER":/tmp/sarah-film/
 rsync -q web/e2e/.results-video/sarah-timeline.json "$BUILDER":/tmp/sarah-film/
 rsync -r web/e2e/.results-video/sarah-take/ "$BUILDER":/tmp/sarah-film/take/
