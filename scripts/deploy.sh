@@ -44,7 +44,7 @@ done
 # Server-side tooling rides the same lane: reconcile-server.sh + core +
 # the pair manifest it now sources. A manually-copied /opt/pecan-tools
 # copy once lagged the repo (no NOK pair in reconcile for a day).
-rsync -az scripts/pairs.sh scripts/reconcile-server.sh scripts/reconcile-core.py "$SERVER:/opt/pecan-tools/"
+rsync -az scripts/pairs.sh scripts/reconcile-server.sh scripts/reconcile-core.py payout/ev-charge.py "$SERVER:/opt/pecan-tools/"
 
 echo "==> recreate containers (no build on server)"
 # Without the force-recreate a twin keeps serving the previous bundle
