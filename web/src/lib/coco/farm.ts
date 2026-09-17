@@ -291,21 +291,15 @@ async function farmKeysetIds(): Promise<string[]> {
 }
 
 export async function receiveFutureToken(token: string): Promise<number> {
-  console.warn("[bob] begin")
   const coco = await getCoco()
-  console.warn("[bob] coco ready")
-  // The generic receive pipeline crashes fresh contexts on this stack;
-  // receive = swap the token's proofs into fresh tagged proofs of ours.
-  // Keyset ids let the decoder resolve proof keysets it has not seen.
-  const decoded = getDecodedToken(
-    token,
-    [...new Set([...token.matchAll(/"id":"([0-9a-f]{16})"/g)].map((m) => m[1]!))],
-  )
+  // V3 binary tokens resolve their proof keysets against the supplied id
+  // list; the farm mint's live keysets cover every series.
+  const keysetIds = await farmKeysetIds()
+  const decoded = getDecodedToken(token, keysetIds)
   if (!decoded.mint || !decoded.unit) {
     throw new Error("token is missing its mint or unit")
   }
-  const mintUrlOfToken = normalizeMintUrl(decoded.mint)
-  if (mintUrlOfToken !== farmMintUrl()) {
+  if (normalizeMintUrl(decoded.mint) !== farmMintUrl()) {
     throw new Error(`token is from ${decoded.mint}, not the farm mint`)
   }
   const unit: string = decoded.unit
@@ -316,11 +310,14 @@ export async function receiveFutureToken(token: string): Promise<number> {
   if (!termsUri) {
     throw new Error(`no terms known for ${unit} — refresh the farm tab first`)
   }
-  // BISECT SHIM (coco 1.0.17 build): receive via generic wallet.receive.
-  await coco.wallet.receive(token)
+  // Bypasses the generic receive pipeline (it wedges fresh contexts on
+  // this stack): receive = swap the token's proofs into fresh tagged
+  // proofs bound to this wallet.
+  await coco.receiveFutureUnits(farmMintUrl(), unit, [["future", "1", termsUri]], decoded.proofs)
   const balances = await futureBalances()
   return balances.reduce((sum, b) => sum + b.amount, 0)
 }
+
 
 export interface RedemptionStart {
   quoteId: string
