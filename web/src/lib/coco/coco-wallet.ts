@@ -175,10 +175,13 @@ export function ensureWalletSeed(): string {
 export function getCoco(): Promise<Manager> {
   if (cocoInstance === null) {
     cocoInstance = (async () => {
+      console.warn("[coco-boot] start")
       // Pre-{currency}/v1 wallets keep every row keyed to the origin root,
       // which now 404s — re-key to the active currency's mint before coco
       // opens the database.
+      console.warn("[coco-boot] migrate begin")
       await migrateLegacyMintUrls(window.location.origin, mintUrl("eur"))
+      console.warn("[coco-boot] migrate done")
       const repo = new IndexedDbRepositories({ name: "giftcard-coco-wallet" })
       const noWsHosts = new Set(
         (Object.keys(CURRENCIES) as Currency[])
@@ -192,6 +195,9 @@ export function getCoco(): Promise<Manager> {
           })
           .filter((h): h is string => h !== null),
       )
+      console.warn("[coco-boot] repo constructing")
+      const repo = new IndexedDbRepositories({ name: "giftcard-coco-wallet" })
+      console.warn("[coco-boot] initializeCoco begin")
       const coco = await initializeCoco({
         repo,
         seedGetter: () => Promise.resolve(loadSeed()),
@@ -204,6 +210,7 @@ export function getCoco(): Promise<Manager> {
             }
           : {}),
       })
+      console.warn("[coco-boot] initializeCoco done")
       coco.registerMeltMethod("branch", new MeltBranchHandler())
       coco.registerMintMethod("branch", new MintBranchHandler("branch", coco.keyRingService))
       coco.registerMintMethod("ln", new MintBranchHandler("ln", coco.keyRingService))
@@ -220,11 +227,14 @@ export function getCoco(): Promise<Manager> {
         ),
       )
       subscribeWalletLogging(coco)
+      console.warn("[coco-boot] methods registered; adding mints")
       for (const currency of Object.keys(CURRENCIES) as Currency[]) {
         // Best-effort: an unreachable external mint (sat) must not brick
         // boot for the same-origin pairs — its ops fail per-use instead.
+        console.warn(`[coco-boot] addMint ${currency}…`)
         await coco.mint
           .addMint(mintUrl(currency), { trusted: true })
+          .then(() => console.warn(`[coco-boot] addMint ${currency} ok`))
           .catch((err: unknown) => {
             console.warn(`addMint ${currency} failed:`, err)
           })
