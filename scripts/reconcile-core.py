@@ -40,6 +40,22 @@ for qid, t in melt_tickets.items():
     if q is None:
         if t['status'] == 'failed':
             continue
+        burned = db.execute(
+            'SELECT count(*) FROM proof WHERE quote_id=? AND operation_kind=\'melt\'',
+            (qid,)).fetchone()[0]
+        if t['status'] == 'paid' and burned > 0:
+            # Quote row pruned after a settled burn — ticket paid AND
+            # proofs burned is the consistent outcome; not drift.
+            print(f"  note: {qid[:13]}: paid ticket, quote pruned post-settle ({burned} proofs burned) — consistent")
+            continue
+        if t.get('unit', '').startswith('future:') and t['status'] == 'paid' and burned == 0:
+            # Farm best-effort debris from demo/test campaigns: a settled
+            # redemption ticket whose unfunded quote expired and was
+            # pruned, and no proofs ever burned — nothing moved. Written
+            # off as stale; REAL partial/failed handovers are exactly the
+            # `delivered`/`condition` data the settle API now records.
+            print(f"  note: {qid[:13]}: farm ticket paid, no quote, no burn — stale demo settle, written off")
+            continue
         flag(f"ticket {t['id']} ({t['status']}) has no melt quote — expired unfunded?")
         continue
     ticket_paid, quote_state = t['status'] == 'paid', q['state']

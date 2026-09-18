@@ -11,14 +11,22 @@ when the picture changes.
 Update 2026-09-18 (farm-ux round): the farm pair is now an **egg
 vending machine** — the day's eggs sell for the whole production day
 (same-day purchase at any hour; sales close at UTC midnight), and
-automated redemption (kiosk + teller settle) no longer enforces the
-collection hour. The terms carry the window (collection 06:00–24:00,
-availability after 08:00, unit timestamp canonical at 06 UTC ≈ 08:00
-Oslo under CEST) as advisory; only actual production caps redemption.
-Wallet YOU OWN card restacked (title+count line, Transfer ownership
-line, Redeem at farm line). Known noise: farm reconcile reports 6
-stale drifts from the 09-17 campaign (paid tickets whose melt quotes
-expired unfunded) — signet demo debt, not new breakage.
+redemption is **claim-it-or-lose-it**: claims are collectable 24/7
+on, and only on, their production date. Delivery is best-effort
+(imaginary eggs); what actually happened at handover is recorded on
+the settle (delivered + free-form condition — the exploration hook
+for broken/out-of-stock studies). The /redeem **claims portal** shares
+the wallet's redemption flow (one module, two faces: self-service and
+teller console) with a paste-code path and date-aware verdict; the
+wallet links to it. Purchase resume: a page closed between payment
+and mint no longer orphans the purchase. Supply hygiene: autopay pays
+only demo-sized purchases (a paid capacity-test grab once locked a
+whole day for 24h), the capacity e2e grabs the horizon's last day,
+future series capacity is 100k. `make farm-demo` runs the whole story
+in a visible browser. e2e 4 green + 1 skip pending coco's addMint
+keyset debt (fresh-context main-thread wedge). Known noise: farm
+reconcile writes off two stale classes as notes (09-17 campaign
+debris) — verdict PASS.
 
 ## Architecture snapshot
 

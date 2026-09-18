@@ -52,9 +52,9 @@ pub struct FarmConfig {
     /// mintd admin surface (…:8100) with the NUT-32 fork routes.
     pub mintd_admin_url: String,
     pub mintd_admin_token: String,
-    /// Hour of day (UTC) the terms say the day's eggs become collectable
-    /// (06 UTC ≈ 08:00 Oslo under CEST; informational only — the
-    /// automated redemption path does not enforce it).
+    /// Hour embedded in the unit string (NUT-32 grammar requires one).
+    /// Purely structural: delivery is best-effort with no promised
+    /// times — nothing in the rails or the terms schedules on it.
     pub maturity_hour_utc: u32,
     pub base: String,
     pub quote: String,
@@ -525,20 +525,36 @@ impl FarmState {
         }
     }
 
-    /// Settle-time gate for a redemption: within the actual production
+    /// Settle-time gate for a redemption. Two enforced invariants: the
+    /// DAY window — claims are collectable 24/7 on, and only on, their
+    /// production date (claim-it-or-lose-it; a date's eggs neither
+    /// redeem early nor after the day ends) — and actual production
     /// (shortfall claims are explicitly refused, never silently
-    /// settled). The collection hour is NOT enforced — the automated
-    /// redemption paths (kiosk, teller settle) act as an egg vending
-    /// machine: a valid claim redeems whenever the farm can hand eggs
-    /// over; the terms' availability window is advisory.
+    /// settled). No hour within the day is enforced.
     pub async fn redemption_gate(&self, unit: &str, quantity: u64) -> Result<FarmSeries> {
-        let guard = self.inner.state.read().await;
-        let series = guard
-            .series
-            .values()
-            .find(|s| s.unit == unit)
-            .ok_or_else(|| anyhow!("unknown future series {unit}"))?
-            .clone();
+        let series = {
+            let guard = self.inner.state.read().await;
+            guard
+                .series
+                .values()
+                .find(|s| s.unit == unit)
+                .ok_or_else(|| anyhow!("unknown future series {unit}"))?
+                .clone()
+        };
+        let now = unix_now();
+        if now < maturity_unix(&series.date, 0)? {
+            bail!(
+                "claim-it-or-lose-it: {unit} redeems only on {} — come back on the day",
+                series.date
+            );
+        }
+        if now >= maturity_unix(&series.date, 24)? {
+            bail!(
+                "claim-it-or-lose-it: {} eggs could only be redeemed on {}; the claim is lost",
+                series.date,
+                series.date
+            );
+        }
         if series.redeemed + quantity > series.redeemable_cap() {
             bail!(
                 "issuer default: {} claim(s) exceed actual production {} \
@@ -605,11 +621,13 @@ impl FarmState {
             "purchase_currency": "signet-sat",
             "reference_price_sats": price.to_string(),
             "shortfall_policy": "issuer-default",
-            "collection_window": "06:00-24:00 on the production day",
-            "availability": "claims are collectable any time after 08:00 on \
-                the production day (the unit timestamp is canonical); \
-                automated redemption does not enforce this window — only \
-                actual production caps redemption"
+            "collection": "claims are collectable 24/7 during their \
+                production date (UTC) — claim-it-or-lose-it: unclaimed \
+                eggs expire when the date ends",
+            "delivery": "best-effort — imaginary eggs are delivered on a \
+                best-effort basis; what actually happened at handover is \
+                recorded on the redemption ticket (delivered, condition) \
+                for later analysis"
         });
         let mint_admin = MintAdminClient::new(
             config.mintd_admin_url.clone(),
@@ -1447,13 +1465,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn redemption_gate_enforces_shortfall_only() {
+    async fn redemption_gate_enforces_day_window_and_shortfall() {
         let farm = fresh_farm().await;
-        let series = seeded_series_matured(&farm, "2026-09-18", true).await;
-        assert!(farm.redemption_gate(&series.unit, 2).await.is_ok());
+        // Today's series with the unit hour long past: redeemable at ANY
+        // hour of the production day.
+        let today = date_offset(0);
+        let series = seeded_series(&farm, &today).await;
+        farm.inner
+            .state
+            .write()
+            .await
+            .series
+            .get_mut(&today)
+            .unwrap()
+            .maturity = unix_now() - 3600;
+        farm.redemption_gate(&series.unit, 2)
+            .await
+            .expect("any hour of the production day redeems");
 
-        // shortfall: 7 eggs actually produced
-        farm.set_actual_production("2026-09-18", Some(7)).await.unwrap();
+        // Tomorrow's series: not yet claimable.
+        let tomorrow = date_offset(1);
+        let mut s2 = series.clone();
+        s2.date = tomorrow.clone();
+        s2.unit = FarmState::unit_for_date(farm.config(), &tomorrow);
+        farm.inner
+            .state
+            .write()
+            .await
+            .series
+            .insert(tomorrow, s2.clone());
+        let err = farm.redemption_gate(&s2.unit, 1).await.unwrap_err();
+        assert!(err.to_string().contains("come back on the day"), "{err}");
+
+        // Yesterday's series: the claim is lost.
+        let (y, m, d) = civil_from_unix(unix_now() - 86_400);
+        let yesterday = format!("{y:04}-{m:02}-{d:02}");
+        let mut s3 = series.clone();
+        s3.date = yesterday.clone();
+        s3.unit = FarmState::unit_for_date(farm.config(), &yesterday);
+        farm.inner
+            .state
+            .write()
+            .await
+            .series
+            .insert(yesterday, s3.clone());
+        let err = farm.redemption_gate(&s3.unit, 1).await.unwrap_err();
+        assert!(err.to_string().contains("claim is lost"), "{err}");
+
+        // Within the day, shortfall is still enforced: 7 eggs actually
+        // produced, 6 already redeemed.
+        farm.set_actual_production(&today, Some(7)).await.unwrap();
         farm.recount_redeemed(&[(series.unit.clone(), 6)]).await;
         assert!(farm.redemption_gate(&series.unit, 1).await.is_ok());
         let err = farm
@@ -1461,23 +1522,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("issuer default"), "{err}");
-
-        // Egg vending machine: an immature series redeems all the same —
-        // the availability window is advisory, only production caps it.
-        let mut s2 = series.clone();
-        s2.date = "2026-09-19".into();
-        s2.unit = "future:farm-egg:20260919t160000z".into();
-        s2.matured_override = false;
-        s2.maturity = unix_now() + 86_400;
-        farm.inner
-            .state
-            .write()
-            .await
-            .series
-            .insert("2026-09-19".into(), s2.clone());
-        farm.redemption_gate(&s2.unit, 1)
-            .await
-            .expect("immature redemption is accepted");
     }
 
     #[tokio::test]

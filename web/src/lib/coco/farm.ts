@@ -161,6 +161,17 @@ export function purchaseLockFor(purchaseId: string): string | null {
   }
 }
 
+/** Purchase ids this wallet ever locked — the resume probe walks the
+ * most recent ones and re-drives any still in flight. */
+export function rememberedPurchaseIds(): string[] {
+  try {
+    const map = JSON.parse(window.localStorage.getItem(PURCHASE_LOCK_MAP_KEY) ?? "{}") as Record<string, string>
+    return Object.keys(map).slice(-8)
+  } catch {
+    return []
+  }
+}
+
 export async function getFarmPurchase(id: string): Promise<FarmPurchaseInfo> {
   const r = await farmFetch(`/api/farm/futures/purchase/${id}`)
   return await r.json()

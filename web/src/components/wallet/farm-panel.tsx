@@ -23,11 +23,11 @@ import {
   futureBalances,
   getFarmPurchase,
   mintFuture,
-  pollRedemption,
   receiveFutureToken,
+  rememberedPurchaseIds,
   sendFuture,
-  startRedemption,
 } from "@/lib/coco/farm"
+import { runFarmRedemption } from "@/lib/coco/farm-redemption"
 import { futureTagOfSecret } from "@/lib/coco/future-methods"
 import { AnimatedQr } from "@/components/wallet/animated-qr"
 
@@ -42,10 +42,6 @@ function fmtDate(date: string): string {
   const [y, m, d] = date.split("-")
   const dt = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)))
   return dt.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" })
-}
-
-function fmtMaturity(unix: number): string {
-  return new Date(unix * 1000).toUTCString().replace(" GMT", " UTC")
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -126,6 +122,71 @@ export function FarmPanel() {
     return sellable[0] ?? overview.series[0] ?? null
   }, [overview, selectedDate])
 
+  /** Carry a purchase to minting: show the invoice while open, poll
+   * until the farm reports payment, then mint and flip to owned. */
+  const drivePurchase = useCallback(
+    (purchase: FarmPurchaseInfo) => {
+      const beginMinting = async (current: FarmPurchaseInfo) => {
+        setPhase({ kind: "minting", purchase: current })
+        try {
+          await mintFuture(current)
+          await refresh()
+          setPhase({ kind: "owned", unit: current.unit, quantity: current.quantity })
+        } catch (e) {
+          const message = `minting failed: ${e instanceof Error ? e.message : String(e)}`
+          setError(message)
+          setPhase({ kind: "idle" })
+          console.error("[farm]", message)
+        }
+      }
+      if (purchase.state === "paid" || purchase.state === "authorized") {
+        void beginMinting(purchase)
+        return
+      }
+      setPhase({
+        kind: "awaiting-payment",
+        purchase: purchase as FarmPurchaseInfo & { payment: { bolt11: string } },
+      })
+      if (pollRef.current) window.clearInterval(pollRef.current)
+      pollRef.current = window.setInterval(async () => {
+        const current = await getFarmPurchase(purchase.purchase_id).catch(() => null)
+        if (!current) return
+        if (current.state === "paid" || current.state === "authorized") {
+          if (pollRef.current) window.clearInterval(pollRef.current)
+          pollRef.current = null
+          void beginMinting(current)
+        } else if (current.state === "expired" || current.state === "failed") {
+          if (pollRef.current) window.clearInterval(pollRef.current)
+          pollRef.current = null
+          setError(`purchase ${current.state}`)
+          setPhase({ kind: "idle" })
+        }
+      }, 3000)
+    },
+    [refresh],
+  )
+
+  useEffect(() => {
+    // A page closed between payment and mint orphans the purchase — the
+    // farm keeps the sats reserved for the claim window but nothing
+    // drives issuance. Probe this wallet's remembered purchases and
+    // re-drive any still in flight.
+    void (async () => {
+      for (const id of [...rememberedPurchaseIds()].reverse()) {
+        const purchase = await getFarmPurchase(id).catch(() => null)
+        if (!purchase) continue
+        if (purchase.state === "open" && purchase.payment?.bolt11) {
+          drivePurchase(purchase)
+          return
+        }
+        if (purchase.state === "paid") {
+          drivePurchase(purchase)
+          return
+        }
+      }
+    })()
+  }, [drivePurchase])
+
   const buy = useCallback(
     async (series: FarmSeriesInfo) => {
       const qty = Number(quantity)
@@ -137,32 +198,7 @@ export function FarmPanel() {
       setError(null)
       setPhase({ kind: "invoicing", date: series.date, quantity: qty })
       try {
-        const purchase = await createFarmPurchase(series.date, qty)
-        setPhase({ kind: "awaiting-payment", purchase })
-        pollRef.current = window.setInterval(async () => {
-          const current = await getFarmPurchase(purchase.purchase_id).catch(() => null)
-          if (!current) return
-          if (current.state === "paid" || current.state === "authorized") {
-            if (pollRef.current) window.clearInterval(pollRef.current)
-            pollRef.current = null
-            setPhase({ kind: "minting", purchase: current })
-            try {
-              await mintFuture(current)
-              await refresh()
-              setPhase({ kind: "owned", unit: current.unit, quantity: qty })
-            } catch (e) {
-              const message = `minting failed: ${e instanceof Error ? e.message : String(e)}`
-              setError(message)
-              setPhase({ kind: "idle" })
-              console.error("[farm]", message)
-            }
-          } else if (current.state === "expired" || current.state === "failed") {
-            if (pollRef.current) window.clearInterval(pollRef.current)
-            pollRef.current = null
-            setError(`purchase ${current.state}`)
-            setPhase({ kind: "idle" })
-          }
-        }, 3000)
+        drivePurchase(await createFarmPurchase(series.date, qty))
       } catch (e) {
         setError(String(e instanceof Error ? e.message : e))
         setPhase({ kind: "idle" })
@@ -170,7 +206,7 @@ export function FarmPanel() {
         setBusy(false)
       }
     },
-    [quantity, refresh],
+    [quantity, drivePurchase],
   )
 
   const verifyTerms = useCallback(async (series: FarmSeriesInfo) => {
@@ -249,28 +285,16 @@ export function FarmPanel() {
       setError(null)
       setReceipt(null)
       try {
-        const start = await startRedemption(unit, qty)
-        setReceipt(`waiting — teller code ${start.tail}`)
-        const deadline = Date.now() + 10 * 60_000
-        const t = window.setInterval(async () => {
-          const result = await pollRedemption(start.quoteId).catch(() => null)
-          if (result === "FAILED") {
-            window.clearInterval(t)
-            setReceipt("redemption failed — proofs restored")
-            setBusy(false)
-          } else if (result) {
-            window.clearInterval(t)
-            setReceipt(result)
-            setBusy(false)
-            await refresh()
-          } else if (Date.now() > deadline) {
-            window.clearInterval(t)
-            setReceipt("still waiting for the operator to confirm handover")
-            setBusy(false)
-          }
-        }, 2500)
+        const outcome = await runFarmRedemption(unit, qty, (update) => {
+          if (update.kind === "waiting") setReceipt(`waiting — teller code ${update.tail}`)
+          else if (update.kind === "receipt") setReceipt(update.receipt)
+          else if (update.kind === "failed") setReceipt("redemption failed — proofs restored")
+          else setReceipt("still waiting for the operator to confirm handover")
+        })
+        if (outcome === "receipt") await refresh()
       } catch (e) {
         setError(String(e instanceof Error ? e.message : e))
+      } finally {
         setBusy(false)
       }
     },
@@ -363,6 +387,14 @@ export function FarmPanel() {
                 {receipt && (
                   <div className="rounded bg-muted p-2 text-xs font-mono break-all">{receipt}</div>
                 )}
+                <a
+                  href="/redeem"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                >
+                  Claims portal ↗ — hand a code to the egg kiosk instead
+                </a>
               </div>
             ))}
             {tokenOut && (
@@ -418,7 +450,6 @@ export function FarmPanel() {
                 {overview?.series.map((s) => (
                   <option key={s.date} value={s.date}>
                     {fmtDate(s.date)} · {s.available} of {s.capacity} free
-                    {s.matured ? " · collectable now" : ""}
                   </option>
                 ))}
               </select>
@@ -452,7 +483,7 @@ export function FarmPanel() {
                   <div className="text-xs text-muted-foreground">
                     Production: {fmtDate(nextSeries.date)}
                     <br />
-                    Available for pickup: {fmtMaturity(nextSeries.maturity)}
+                    Delivery: best effort — imaginary eggs, no promised times
                   </div>
                 </div>
               </div>

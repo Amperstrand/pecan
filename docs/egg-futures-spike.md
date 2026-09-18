@@ -378,3 +378,60 @@ rails (what the money enforces). Verification: 102 processor tests
 ("redemption before maturity is accepted"), the Sarah e2e now buys
 TODAY's series every run, and a live same-day buy+redeem path was
 exercised on prod the same afternoon.
+
+## Claim-it-or-lose-it round (2026-09-18 evening, branch `farm-ux`)
+
+The same evening tightened the machine into its final shape:
+
+1. **Day-window redemption**: claims are collectable 24/7 on — and
+   only on — their production date (UTC). `redemption_gate` enforces
+   the day window at melt-quote creation AND teller settle: a future
+   date refuses with "come back on the day", a past date refuses with
+   "the claim is lost". The unit's embedded hour is purely structural
+   (the NUT-32 grammar requires one); no hour within the day is
+   enforced. `redemption_gate_enforces_day_window_and_shortfall`
+   pins it; e2e pins both legs (future refused, today accepted at any
+   hour). The `mature-now` admin override flips an informational flag
+   only — the Sarah e2e no longer calls it.
+2. **Best-effort delivery, on the record**: terms say "imaginary eggs
+   are delivered on a best-effort basis". What actually happened at
+   handover is now a first-class **delivery line** on the settle:
+   `delivered` (units handed over) + free-form `condition` ("broken
+   in the carton", "out-of-stock", …) — persisted on the ticket,
+   echoed in the API, never a gate. This is the hook for exploring
+   short/partial deliveries later (ecash melts are still all-or-nothing;
+   the data is the point).
+3. **Claims portal (the kiosk is a claims portal)**: `/redeem` is the
+   self-service face of the same teller ticket — the redemption flow
+   (`runFarmRedemption`) is ONE shared module used by both the wallet
+   FARM panel and the kiosk; the teller console stays the operator
+   face. The kiosk gained a paste-code path (next to the camera
+   scan) and a date-aware verdict (today → Redeem; future → come back
+   on the date; past → claim lost). The wallet's YOU OWN card links
+   to the portal. The egg animation stays.
+4. **Supply hygiene** (today "sold out" twice from test debris):
+   the capacity e2e now grabs the horizon's LAST day, never today;
+   **autopay only pays demo-sized purchases** (≤ FARM_AUTOPAY_MAX_EGGS,
+   default 20) so a test grab can no longer be paid into the 24h
+   paid-claim window that locks a whole day; compose capacity raised
+   to 100 000 for future series. Four already-paid mega-holds were
+   written off server-side (signet self-pays, nothing real lost).
+5. **Purchase resume**: a page closed between payment and mint used
+   to orphan the purchase (sats reserved, nothing issued — hit live:
+   autopay had paid, the wallet tab wasn't there to mint). The panel
+   now probes remembered purchases on load and re-drives any
+   open/paid one to minting. e2e: "closing the page no longer
+   orphans a paid purchase". The purchase API exposes the unpaid
+   invoice again for exactly this.
+6. **One-command demo**: `make farm-demo` — preflight, buy today's
+   eggs (autopay settles), redeem at the counter, settle with a
+   delivery line, receipt. Screenshots in /tmp/pecan-farm-demo.
+
+Verification: 102 processor tests, e2e 4 green + 1 honest skip (the
+kiosk e2e is skipped pending coco's addMint keyset debt — traces show
+a fresh wallet context's main thread can wedge for minutes mid-boot;
+`make farm-demo` exercises that flow live instead). KNOWN operational
+notes: reconcile now writes off two stale classes as notes (farm
+paid-no-quote-no-burn demo settles; paid tickets whose quote was
+pruned post-burn), and the wallet-side receipt poll can lag on a
+wedge-prone page — the demo script says so instead of failing.

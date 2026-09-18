@@ -500,6 +500,10 @@ struct ApiTicket {
     payout_rail: Option<String>,
     /// Settlement receipt from the payout rail — the payment proof.
     receipt: Option<String>,
+    /// Delivery line for best-effort rails: what was actually handed
+    /// over, and in what condition — analysis data, never a gate.
+    delivered: Option<u64>,
+    condition: Option<String>,
     notes: Option<String>,
     settled_by: Option<String>,
     voided_by: Option<String>,
@@ -697,6 +701,8 @@ impl ApiTicket {
             description: ticket.description.clone(),
             payout_rail: ticket.payout_rail.clone(),
             receipt: ticket.receipt.clone(),
+            delivered: ticket.delivered,
+            condition: ticket.condition.clone(),
             notes: ticket.notes.clone(),
             settled_by: ticket.settled_by.clone(),
             voided_by: ticket.voided_by.clone(),
@@ -1116,7 +1122,7 @@ async fn api_mark_paid(
         Ok(authed) => authed,
         Err(r) => return r,
     };
-    match mark_paid_inner(&state, &id, form.notes, form.receipt, form.delivered, &authed.username).await {
+    match mark_paid_inner(&state, &id, form.notes, form.receipt, form.delivered, form.condition, &authed.username).await {
         Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -1174,10 +1180,20 @@ struct ApiFarmPurchase {
     future_issuance: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     mint_quote: Option<String>,
+    /// The unpaid invoice (Open purchases) — lets a reloaded wallet
+    /// resume an in-flight purchase instead of orphaning it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payment: Option<ApiFarmPayment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     expires_at: u64,
     created_at: u64,
+}
+
+#[derive(Serialize)]
+struct ApiFarmPayment {
+    bolt11: String,
+    payment_hash: String,
 }
 
 fn farm_series_api(
@@ -1365,6 +1381,10 @@ fn farm_purchase_api(p: &crate::farm::FarmPurchase) -> ApiFarmPurchase {
         capacity_reservation: reservation.into(),
         future_issuance: issuance.into(),
         mint_quote: p.quote_id.clone(),
+        payment: (p.state == PurchaseState::Open).then(|| ApiFarmPayment {
+            bolt11: p.bolt11.clone(),
+            payment_hash: p.payment_hash.clone(),
+        }),
         error: p.error.clone(),
         expires_at: p.invoice_expires_at,
         created_at: p.created_at,
@@ -1939,6 +1959,8 @@ struct NotesForm {
     receipt: String,
     #[serde(default)]
     delivered: Option<u64>,
+    #[serde(default)]
+    condition: Option<String>,
 }
 
 fn clean_notes(notes: String) -> Option<String> {
@@ -1956,8 +1978,10 @@ async fn mark_paid_inner(
     notes: String,
     receipt: String,
     delivered: Option<u64>,
+    condition: Option<String>,
     settled_by: &str,
 ) -> Result<Ticket, String> {
+    let condition = condition.filter(|c| !c.trim().is_empty());
     let ticket = state
         .branch
         .get_ticket(id)
@@ -1993,6 +2017,7 @@ async fn mark_paid_inner(
             clean_notes(notes),
             clean_notes(receipt),
             delivered,
+            condition,
             settled_by,
         )
         .await

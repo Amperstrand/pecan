@@ -1,52 +1,38 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Loader2 } from "lucide-react"
 
 import {
   fetchFarmOverview,
   receiveFutureToken,
-  startRedemption,
-  pollRedemption,
   type FarmOverview,
 } from "@/lib/coco/farm"
+import { runFarmRedemption } from "@/lib/coco/farm-redemption"
 import { decodeQrFrames } from "@/components/wallet/animated-qr"
 import { CameraScanner } from "@/components/teller/camera-scanner"
 import { Button } from "@/components/ui/button"
 
-// The Egg Redemption Kiosk — a phone-first page for people holding egg
-// futures: scan the animated transfer QR, see the claim validated (or a
-// countdown to delivery), and redeem with one tap. The scanned token is
-// a bearer Cashu token: importing it here IS taking ownership, exactly
-// like handing over the eggs.
-//
-// Served at /{pair}-console/redeem (works for any pair hosting the farm
-// rail; the farm mint is the same regardless).
+// The claims portal (Egg Redemption Kiosk) — a phone-first page for
+// people holding egg futures: scan the animated transfer QR (or paste
+// the code), see the claim validated against its production date, and
+// redeem with one tap. The scanned token is a bearer Cashu token:
+// importing it here IS taking ownership, exactly like handing over the
+// eggs. The redemption logic is the same runFarmRedemption flow the
+// wallet's FARM tab uses — this page is its self-service face, the
+// teller console its operator face.
 
 type Phase =
   | { kind: "scanning" }
   | { kind: "importing" }
   | { kind: "verdict"; unit: string; qty: number; series: FarmOverview["series"][number] }
-  | { kind: "redeeming"; tail: string; quoteId: string }
+  | { kind: "redeeming"; tail: string }
   | { kind: "done"; receipt: string }
   | { kind: "error"; message: string }
 
-function fmtWhen(unix: number): string {
-  const d = new Date(unix * 1000)
-  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
-}
-
-function timeLeft(unix: number): string {
-  const s = Math.max(0, unix - Date.now() / 1000)
-  const d = Math.floor(s / 86400)
-  const h = Math.floor((s % 86400) / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  if (d > 0) return `${d}d ${h}h`
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
-}
 
 export function RedeemPage() {
   const [phase, setPhase] = useState<Phase>({ kind: "scanning" })
   const [overview, setOverview] = useState<FarmOverview | null>(null)
+  const [pasted, setPasted] = useState("")
   const frames = useRef<Set<string>>(new Set())
 
   useEffect(() => {
@@ -94,24 +80,18 @@ export function RedeemPage() {
   }, [overview])
 
   const doRedeem = useCallback(async (unit: string, qty: number) => {
-    setPhase(p => (p.kind === "verdict" ? { ...p } : p))
     try {
-      const start = await startRedemption(unit, qty)
-      setPhase({ kind: "redeeming", tail: start.tail, quoteId: start.quoteId })
-      const deadline = Date.now() + 10 * 60_000
-      const t = window.setInterval(async () => {
-        const result = await pollRedemption(start.quoteId).catch(() => null)
-        if (result === "FAILED") {
-          window.clearInterval(t)
+      await runFarmRedemption(unit, qty, (update) => {
+        if (update.kind === "waiting") setPhase({ kind: "redeeming", tail: update.tail })
+        else if (update.kind === "receipt") setPhase({ kind: "done", receipt: update.receipt })
+        else if (update.kind === "failed")
           setPhase({ kind: "error", message: "Redemption failed — your egg claims are restored." })
-        } else if (result) {
-          window.clearInterval(t)
-          setPhase({ kind: "done", receipt: result })
-        } else if (Date.now() > deadline) {
-          window.clearInterval(t)
-          setPhase({ kind: "error", message: "Still waiting for the farm to confirm handover — check back shortly." })
-        }
-      }, 2500)
+        else
+          setPhase({
+            kind: "error",
+            message: "Still waiting for the farm to confirm handover — check back shortly.",
+          })
+      })
     } catch (e) {
       setPhase({ kind: "error", message: e instanceof Error ? e.message : String(e) })
     }
@@ -130,6 +110,25 @@ export function RedeemPage() {
           <div className="kiosk-pulse" aria-hidden />
           <CameraScanner onCode={onFrame} onCancel={() => undefined} />
           <p className="kiosk-hint">Hold the animated QR steady — it takes a few frames.</p>
+          <div className="kiosk-paste">
+            <input
+              data-testid="kiosk-token-input"
+              className="kiosk-paste-input"
+              placeholder="…or paste the egg transfer code"
+              value={pasted}
+              onChange={(e) => setPasted(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && pasted.trim()) void onFrame(pasted.trim())
+              }}
+            />
+            <Button
+              size="sm"
+              disabled={!pasted.trim()}
+              onClick={() => void onFrame(pasted.trim())}
+            >
+              Validate code
+            </Button>
+          </div>
         </section>
       )}
 
@@ -140,22 +139,33 @@ export function RedeemPage() {
         </section>
       )}
 
-      {phase.kind === "verdict" && (
-        <section className={`kiosk-card kiosk-verdict ${phase.series.matured ? "ok" : "wait"}`}>
-          <div className="kiosk-stamp" aria-hidden>{phase.series.matured ? "✓" : "🥚"}</div>
-          <h2>{phase.qty} egg{phase.qty === 1 ? "" : "s"} — {phase.series.date}</h2>
-          <p>Claim valid — redeem at the counter whenever the farm has eggs.</p>
-          {!phase.series.matured && (
-            <p className="kiosk-hint" data-testid="kiosk-countdown">
-              Terms: collection opens {fmtWhen(phase.series.maturity)} ({timeLeft(phase.series.maturity)} to go) —
-              this kiosk does not enforce the window.
-            </p>
-          )}
-          <Button size="lg" onClick={() => void doRedeem(phase.unit, phase.qty)}>
-            Redeem {phase.qty} egg{phase.qty === 1 ? "" : "s"}
-          </Button>
-        </section>
-      )}
+      {phase.kind === "verdict" && (() => {
+        const today = new Date().toISOString().slice(0, 10)
+        const day = phase.series.date
+        const claimable = day === today
+        return (
+          <section className={`kiosk-card kiosk-verdict ${claimable ? "ok" : "bad"}`}>
+            <div className="kiosk-stamp" aria-hidden>🥚</div>
+            <h2>{phase.qty} egg{phase.qty === 1 ? "" : "s"} — {day}</h2>
+            {claimable ? (
+              <>
+                <p>Claim valid — collect 24/7 today; imaginary eggs are delivered best effort.</p>
+                <Button size="lg" onClick={() => void doRedeem(phase.unit, phase.qty)}>
+                  Redeem {phase.qty} egg{phase.qty === 1 ? "" : "s"}
+                </Button>
+              </>
+            ) : day < today ? (
+              <p className="kiosk-hint">
+                The {day} collection day has ended — claim-it-or-lose-it: unclaimed eggs are lost.
+              </p>
+            ) : (
+              <p className="kiosk-hint">
+                These are {day}'s eggs — they become claimable 24/7 on {day} (claim-it-or-lose-it).
+              </p>
+            )}
+          </section>
+        )
+      })()}
 
       {phase.kind === "redeeming" && (
         <section className="kiosk-card kiosk-center">
@@ -171,7 +181,7 @@ export function RedeemPage() {
           <div className="kiosk-stamp" aria-hidden>✓</div>
           <h2>Eggs redeemed</h2>
           <p className="kiosk-receipt">{phase.receipt}</p>
-          <Button variant="outline" onClick={() => { frames.current.clear(); setPhase({ kind: "scanning" }) }}>
+          <Button variant="outline" onClick={() => { frames.current.clear(); setPasted(""); setPhase({ kind: "scanning" }) }}>
             Scan another
           </Button>
         </section>
@@ -182,7 +192,7 @@ export function RedeemPage() {
           <div className="kiosk-stamp" aria-hidden>✗</div>
           <h2>Not redeemable</h2>
           <p>{phase.message}</p>
-          <Button variant="outline" onClick={() => { frames.current.clear(); setPhase({ kind: "scanning" }) }}>
+          <Button variant="outline" onClick={() => { frames.current.clear(); setPasted(""); setPhase({ kind: "scanning" }) }}>
             Try again
           </Button>
         </section>

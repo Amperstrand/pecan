@@ -25,17 +25,28 @@ export async function apiLogin(
   if (resp.status() !== 200) throw new Error(`admin login failed: ${resp.status()}`)
 }
 
+export interface SettleDelivery {
+  /** Units actually handed over (best-effort rails settle full but
+   * record the shortfall for later analysis). */
+  delivered?: number
+  /** Free-form delivery condition ("broken", "out-of-stock", …). */
+  condition?: string
+}
+
 export async function matchAndSettle(
   page: Page,
   tellerCode: string,
   notes: string,
   base = "",
+  delivery: SettleDelivery = {},
 ): Promise<{
   id: string
   kind: string
   status: string
   amount: number
   unit?: string
+  delivered?: number
+  condition?: string
 }> {
   const matchResp = await page.request.post(`${base}/api/quotes/match`, {
     headers: { "Content-Type": "application/json" },
@@ -67,7 +78,7 @@ export async function matchAndSettle(
     `${base}/api/tickets/${match.id}/mark-paid`,
     {
     headers: { "Content-Type": "application/json" },
-    data: { notes },
+    data: { notes, ...delivery },
   })
   if (settleResp.status() !== 200) {
     throw new Error(`mark-paid failed for ${match.id}: ${settleResp.status()} ${await settleResp.text()}`)
