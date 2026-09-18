@@ -216,7 +216,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
     // Sarah → Bob: 2 of 5 via bearer transfer, farm blind to it.
     // ---------------------------------------------------------------
     await page.getByLabel(`send quantity for ${series.unit}`).fill("2")
-    await page.getByRole("button", { name: /Send to Bob/i }).click()
+    await page.getByRole("button", { name: /Transfer ownership/i }).click()
     const tokenBox = page.getByTestId("farm-token")
     await tokenBox.waitFor({ state: "visible", timeout: 60_000 })
     const token = await tokenBox.inputValue()

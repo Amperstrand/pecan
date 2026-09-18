@@ -29,6 +29,7 @@ import {
   startRedemption,
 } from "@/lib/coco/farm"
 import { futureTagOfSecret } from "@/lib/coco/future-methods"
+import { AnimatedQr } from "@/components/wallet/animated-qr"
 
 type Phase =
   | { kind: "idle" }
@@ -56,7 +57,7 @@ async function sha256Hex(text: string): Promise<string> {
 
 /**
  * Sarah's farm tab: pick a production day, buy egg futures with real
- * signet sats, hold bearer claims, send them to Bob, redeem them at the
+ * signet sats, hold bearer claims, transfer ownership, redeem them at the
  * counter. The protocol details (NUT-32 unit, terms hash, mint) sit
  * behind the "details" expander.
  */
@@ -70,6 +71,8 @@ export function FarmPanel() {
   const [termsCheck, setTermsCheck] = useState<string | null>(null)
   const [sendQty, setSendQty] = useState("2")
   const [tokenOut, setTokenOut] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [selectedUnit, setSelectedUnit] = useState<string>("")
   const [tokenIn, setTokenIn] = useState("")
   const [redeemQty, setRedeemQty] = useState("2")
   const [receipt, setReceipt] = useState<string | null>(null)
@@ -187,6 +190,13 @@ export function FarmPanel() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!selectedUnit && balances && balances.length > 0) setSelectedUnit(balances[0].unit)
+    if (selectedUnit && balances && !balances.some((b) => b.unit === selectedUnit) && balances.length > 0) {
+      setSelectedUnit(balances[0].unit)
+    }
+  }, [balances, selectedUnit])
+
   const doSend = useCallback(
     async (unit: string) => {
       const qty = Number(sendQty)
@@ -276,7 +286,24 @@ export function FarmPanel() {
         </CardHeader>
         {balances !== null && balances.length > 0 && (
           <CardContent className="grid gap-3">
-            {balances.map((b) => (
+            <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Egg series">
+              {balances.map((b) => (
+                <button
+                  key={b.unit}
+                  role="tab"
+                  aria-selected={selectedUnit === b.unit}
+                  onClick={() => setSelectedUnit(b.unit)}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    selectedUnit === b.unit
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "text-muted-foreground hover:bg-accent"
+                  }`}
+                >
+                  {fmtDate(b.date ?? "")} · {b.amount} 🥚
+                </button>
+              ))}
+            </div>
+            {balances.filter((b) => b.unit === selectedUnit).map((b) => (
               <div key={b.unit} className="rounded-md border p-3 grid gap-2">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium">Farm — {fmtDate(b.date ?? "")} eggs</span>
@@ -310,7 +337,7 @@ export function FarmPanel() {
                     disabled={busy}
                     onClick={() => void doSend(b.unit)}
                   >
-                    Send to Bob (token)
+                    Transfer ownership
                   </Button>
                   <Input
                     className="w-16 h-8"
@@ -333,16 +360,29 @@ export function FarmPanel() {
               </div>
             ))}
             {tokenOut && (
-              <div className="grid gap-1">
+              <div className="grid gap-2 justify-items-center rounded-md border p-3" data-testid="transfer-out">
                 <span className="text-xs text-muted-foreground">
-                  Token to hand Bob ({sendQty} eggs) — normal Cashu bearer transfer:
+                  Ownership transferred — {sendQty} egg{Number(sendQty) === 1 ? "" : "s"} now belong to whoever holds this code:
                 </span>
+                <AnimatedQr payload={tokenOut} />
                 <textarea
                   readOnly
                   data-testid="farm-token"
-                  className="rounded bg-muted p-2 text-xs font-mono break-all h-24"
+                  className="rounded bg-muted p-2 text-xs font-mono break-all h-16 w-full"
                   value={tokenOut}
                 />
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void navigator.clipboard.writeText(tokenOut).then(() => setCopied(true))}
+                  >
+                    {copied ? "Copied ✓" : "Copy token"}
+                  </Button>
+                  <Button variant="outline" size="sm">
+                    <a href="/redeem" target="_blank" rel="noreferrer">Open redeem kiosk ↗</a>
+                  </Button>
+                </div>
               </div>
             )}
           </CardContent>
