@@ -8,6 +8,18 @@ https://giftcard.cashu.exchange. This is the honest map of what works,
 what is known-broken or limited, and the ranked backlog. Keep it current
 when the picture changes.
 
+Update 2026-09-18 (farm-ux round): the farm pair is now an **egg
+vending machine** — the day's eggs sell for the whole production day
+(same-day purchase at any hour; sales close at UTC midnight), and
+automated redemption (kiosk + teller settle) no longer enforces the
+collection hour. The terms carry the window (collection 06:00–24:00,
+availability after 08:00, unit timestamp canonical at 06 UTC ≈ 08:00
+Oslo under CEST) as advisory; only actual production caps redemption.
+Wallet YOU OWN card restacked (title+count line, Transfer ownership
+line, Redeem at farm line). Known noise: farm reconcile reports 6
+stale drifts from the 09-17 campaign (paid tickets whose melt quotes
+expired unfunded) — signet demo debt, not new breakage.
+
 ## Architecture snapshot
 
 | Piece | Version / state | Notes |

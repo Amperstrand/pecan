@@ -118,8 +118,12 @@ export function FarmPanel() {
     if (selectedDate) {
       return overview.series.find((s) => s.date === selectedDate) ?? null
     }
-    const open = overview.series.filter((s) => !s.matured && s.available > 0)
-    return open[0] ?? overview.series[0] ?? null
+    // Sales stay open for the whole production day (UTC), so today's
+    // eggs lead the picker even after the collection hour — same-day
+    // purchase is the demo path.
+    const today = new Date().toISOString().slice(0, 10)
+    const sellable = overview.series.filter((s) => s.date >= today && s.available > 0)
+    return sellable[0] ?? overview.series[0] ?? null
   }, [overview, selectedDate])
 
   const buy = useCallback(
@@ -306,9 +310,9 @@ export function FarmPanel() {
             {balances.filter((b) => b.unit === selectedUnit).map((b) => (
               <div key={b.unit} className="rounded-md border p-3 grid gap-2">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-medium">Farm — {fmtDate(b.date ?? "")} eggs</span>
-                  <span className="text-muted-foreground">·</span>
-                  <span>{b.amount}</span>
+                  <span className="font-medium">
+                    Farm — {fmtDate(b.date ?? "")} eggs · {b.amount}
+                  </span>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -324,7 +328,7 @@ export function FarmPanel() {
                     <div className="break-all">terms: {b.termsUri ?? "(unknown)"}</div>
                   </dl>
                 )}
-                <div className="flex flex-wrap items-center gap-2 text-sm">
+                <div className="flex items-center gap-2 text-sm">
                   <Input
                     className="w-16 h-8"
                     value={sendQty}
@@ -339,6 +343,8 @@ export function FarmPanel() {
                   >
                     Transfer ownership
                   </Button>
+                </div>
+                <div className="flex items-center gap-2 text-sm">
                   <Input
                     className="w-16 h-8"
                     value={redeemQty}
@@ -412,7 +418,7 @@ export function FarmPanel() {
                 {overview?.series.map((s) => (
                   <option key={s.date} value={s.date}>
                     {fmtDate(s.date)} · {s.available} of {s.capacity} free
-                    {s.matured ? " · matured" : ""}
+                    {s.matured ? " · collectable now" : ""}
                   </option>
                 ))}
               </select>

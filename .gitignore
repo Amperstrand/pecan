@@ -12,3 +12,4 @@ __pycache__/
 # local agent/browser artifacts
 .playwright-mcp/
 web/e2e/.results-video/
+node_modules

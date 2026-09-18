@@ -30,7 +30,10 @@ services:
       CDK_BRANCH_PROCESSOR_FARM_PRICE_SATS: "21"
       CDK_BRANCH_PROCESSOR_FARM_CAPACITY: "10000"
       CDK_BRANCH_PROCESSOR_FARM_HORIZON_DAYS: "10"
-      CDK_BRANCH_PROCESSOR_FARM_MATURITY_HOUR_UTC: "16"
+      # 06:00 UTC ≈ 08:00 Oslo (CEST) — the terms' availability hour.
+      # Informational: automated redemption does not enforce it, and the
+      # day's eggs sell until UTC midnight (egg vending machine).
+      CDK_BRANCH_PROCESSOR_FARM_MATURITY_HOUR_UTC: "6"
       CDK_BRANCH_PROCESSOR_FARM_PUBLIC_BASE_URL: "https://giftcard.cashu.exchange/farm-console"
       CDK_BRANCH_PROCESSOR_FARM_MINT_PUBLIC_URL: "https://giftcard.cashu.exchange/farm"
       CDK_BRANCH_PROCESSOR_FARM_MINTD_ADMIN_URL: "http://127.0.0.1:8100"

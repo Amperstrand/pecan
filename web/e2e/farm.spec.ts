@@ -36,7 +36,11 @@ async function farmOverview(page: Page): Promise<{ series: FarmSeries[] }> {
 
 async function firstOpenSeries(page: Page): Promise<FarmSeries> {
   const overview = await farmOverview(page)
-  const open = overview.series.filter((s) => !s.matured && s.available >= 5)
+  // Same-day first: the sales window is the whole production day, so
+  // today's eggs (even past the collection hour) are the demo path —
+  // mirroring the wallet panel's default selection.
+  const today = new Date().toISOString().slice(0, 10)
+  const open = overview.series.filter((s) => s.date >= today && s.available >= 5)
   const series = open[0]
   if (!series) {
     test.skip(
@@ -353,7 +357,7 @@ test.describe("farm futures (NUT-32 spike)", () => {
     }
   })
 
-  test("redemption before maturity is refused", async ({ page }) => {
+  test("redemption before maturity is accepted (egg vending machine)", async ({ page }) => {
     const series = (await farmOverview(page)).series.find((s) => !s.matured)
     if (!series) {
       test.skip(true, "no immature series left")
@@ -367,11 +371,11 @@ test.describe("farm futures (NUT-32 spike)", () => {
         amount: 1,
       },
     })
-    // Refused at some layer (mint unit gate or the farm's maturity gate —
-    // the message depends on which check fires first); the invariant is
-    // that an immature redemption never creates a quote.
-    expect(r.status()).toBeGreaterThanOrEqual(400)
-    const body = await r.text()
-    expect(body.toLowerCase()).toMatch(/matur|unsupported|refus|invalid/)
+    // The availability window is advisory: an immature series still
+    // mints a melt quote — the farm hands eggs over whenever it has
+    // them (only actual production caps redemption).
+    expect(r.status()).toBe(200)
+    const body = (await r.json()) as { quote?: string }
+    expect(body.quote).toBeTruthy()
   })
 })

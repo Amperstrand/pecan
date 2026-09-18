@@ -1964,8 +1964,9 @@ async fn mark_paid_inner(
         .await
         .ok_or_else(|| format!("mark_paid: unknown ticket {id}"))?;
     // Farm redemption: the physical handover gate runs BEFORE the burn —
-    // maturity and actual-production checks refuse the settle outright,
-    // so the proofs stay untouched if the operator cannot hand eggs over.
+    // the actual-production (shortfall) check refuses the settle
+    // outright, so the proofs stay untouched if the operator cannot hand
+    // eggs over. The collection hour is deliberately NOT enforced here.
     let is_future = ticket.unit.starts_with("future:");
     if is_future {
         let farm = state

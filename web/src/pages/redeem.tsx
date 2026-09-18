@@ -122,7 +122,7 @@ export function RedeemPage() {
       <div className="kiosk-hero">
         <div className="kiosk-egg" aria-hidden>🥚</div>
         <h1>Egg Redemption Kiosk</h1>
-        <p>Scan your egg transfer code — the kiosk validates it and redeems when the eggs are ready.</p>
+        <p>Scan your egg transfer code — the kiosk validates it and redeems it at the counter.</p>
       </div>
 
       {phase.kind === "scanning" && (
@@ -142,27 +142,18 @@ export function RedeemPage() {
 
       {phase.kind === "verdict" && (
         <section className={`kiosk-card kiosk-verdict ${phase.series.matured ? "ok" : "wait"}`}>
-          <div className="kiosk-stamp" aria-hidden>{phase.series.matured ? "✓" : "⏳"}</div>
+          <div className="kiosk-stamp" aria-hidden>{phase.series.matured ? "✓" : "🥚"}</div>
           <h2>{phase.qty} egg{phase.qty === 1 ? "" : "s"} — {phase.series.date}</h2>
-          {phase.series.matured ? (
-            <>
-              <p>Claim valid and ready for delivery.</p>
-              <Button size="lg" onClick={() => void doRedeem(phase.unit, phase.qty)}>
-                Redeem {phase.qty} egg{phase.qty === 1 ? "" : "s"}
-              </Button>
-            </>
-          ) : (
-            <>
-              <p className="kiosk-waitline">
-                These eggs are not ready for delivery until
-                <strong> {fmtWhen(phase.series.maturity)}</strong>
-              </p>
-              <div className="kiosk-countdown" data-testid="kiosk-countdown">
-                {timeLeft(phase.series.maturity)} to go
-              </div>
-              <p className="kiosk-hint">Come back when the clock hits zero — your claim is safe on this device.</p>
-            </>
+          <p>Claim valid — redeem at the counter whenever the farm has eggs.</p>
+          {!phase.series.matured && (
+            <p className="kiosk-hint" data-testid="kiosk-countdown">
+              Terms: collection opens {fmtWhen(phase.series.maturity)} ({timeLeft(phase.series.maturity)} to go) —
+              this kiosk does not enforce the window.
+            </p>
           )}
+          <Button size="lg" onClick={() => void doRedeem(phase.unit, phase.qty)}>
+            Redeem {phase.qty} egg{phase.qty === 1 ? "" : "s"}
+          </Button>
         </section>
       )}
 

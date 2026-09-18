@@ -60,8 +60,9 @@ still serves every pair.
 ### pecan processor (farm module)
 
 - **Series oracle + ledger** (`processor/src/farm.rs`): daily series
-  `Farm-YYYYMMDD` / unit `future:farm-egg:YYYYMMDDT160000Z`, capacity
-  10, price 1000 sat/egg, maturity 16:00 UTC, actual-production state
+  `Farm-YYYYMMDD` / unit `future:farm-egg:YYYYMMDDT060000Z`, capacity
+  10, price 1000 sat/egg, collection hour 06:00 UTC (≈08:00 Oslo under
+  CEST — advisory, nothing enforces it), actual-production state
   (shortfall simulation), signed immutable terms stored
   content-addressed at `/terms/<sha256>` (blob bytes determine the
   path; overwrites refused).
@@ -85,9 +86,11 @@ still serves every pair.
   match-and-settle machinery, relabeled): wallet locks proofs, teller
   matches the code, hands over eggs, settles → proofs burned +
   `FARM-...` receipt. Before settle nothing is consumed; double
-  redemption dies on spent proofs. Maturity is checked at melt-quote
-  creation (real timestamps; a clearly-marked admin "mature now"
-  override exists for tests/demo only).
+  redemption dies on spent proofs. **Egg vending machine (2026-09-18)**:
+  the collection hour is advisory — the melt-quote and settle gates
+  enforce only actual production (shortfall), so a valid claim redeems
+  at any hour; the admin "mature now" override remains a demo shortcut
+  that only flips the informational collectable flag.
 - **One-way invariant**: futures never melt to sats; the only exit is
   physical redemption (test-enforced like the fiat pairs).
 
@@ -343,3 +346,35 @@ Fix coco's addMint keyset handling (lazy per-unit fetch) and raise the
 horizon back to a month; then run a REAL seven-day maturity (no
 demo override) end-to-end with a daily faucet top-up, proving the
 timestamp path — everything else in the story is already live.
+
+## Egg vending machine round (2026-09-18, branch `farm-ux`)
+
+The demo asked for same-day eggs any time of day, and the honest
+answer was that a futures contract with a maturity gate is the wrong
+shape for it. Three changes, one framing:
+
+1. **Same-day sales**: issuance stays open for the WHOLE production
+   day (until UTC midnight), not just until the collection hour. A
+   stuck `matured_override` on today's series (an artifact of demo
+   runs) used to close issuance outright — the sales window no longer
+   looks at collectability at all.
+2. **No window enforcement**: the redemption gate (melt-quote creation
+   AND teller settle) dropped the maturity check — only actual
+   production (shortfall) is enforced. The kiosk always offers
+   Redeem, with the terms' availability line as information.
+3. **Terms say it**: `collection_window` (06:00–24:00) and
+   `availability` (after 08:00, unit timestamp canonical, automated
+   redemption does not enforce) joined the signed blob; the maturity
+   hour moved 16 UTC → 06 UTC (≈08:00 Oslo CEST — revisit when DST
+   flips, or make it local-time aware if this ever carries value).
+
+Framing: with bearer claims, a human at the counter (or a kiosk), and
+production the only real limit, this stopped being a futures market
+and became an **egg vending machine** with dated inventory — the
+window belongs in the terms (what the farm promises), not in the
+rails (what the money enforces). Verification: 102 processor tests
+(`same_day_sales_stay_open_past_the_collection_hour`,
+`redemption_gate_enforces_shortfall_only`), e2e flipped
+("redemption before maturity is accepted"), the Sarah e2e now buys
+TODAY's series every run, and a live same-day buy+redeem path was
+exercised on prod the same afternoon.

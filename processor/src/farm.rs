@@ -52,7 +52,9 @@ pub struct FarmConfig {
     /// mintd admin surface (…:8100) with the NUT-32 fork routes.
     pub mintd_admin_url: String,
     pub mintd_admin_token: String,
-    /// Hour of day (UTC) the day's eggs become collectable.
+    /// Hour of day (UTC) the terms say the day's eggs become collectable
+    /// (06 UTC ≈ 08:00 Oslo under CEST; informational only — the
+    /// automated redemption path does not enforce it).
     pub maturity_hour_utc: u32,
     pub base: String,
     pub quote: String,
@@ -86,7 +88,7 @@ impl FarmConfig {
                 .unwrap_or_else(|_| "http://127.0.0.1:8100".into()),
             mintd_admin_token: std::env::var("CDK_BRANCH_PROCESSOR_FARM_MINTD_ADMIN_TOKEN")
                 .unwrap_or_default(),
-            maturity_hour_utc: num("CDK_BRANCH_PROCESSOR_FARM_MATURITY_HOUR_UTC", 16) as u32,
+            maturity_hour_utc: num("CDK_BRANCH_PROCESSOR_FARM_MATURITY_HOUR_UTC", 6) as u32,
             base: "farm".into(),
             quote: "egg".into(),
             commodity: "egg".into(),
@@ -147,7 +149,8 @@ pub struct FarmSeries {
     /// silently settled).
     pub actual_production: Option<u64>,
     pub terms: TermsRecord,
-    /// Admin/test-only override treating the series as matured.
+    /// Admin/test-only override flagging the series as collectable
+    /// (informational only — nothing gates on it anymore).
     #[serde(default)]
     pub matured_override: bool,
 }
@@ -161,10 +164,6 @@ impl FarmSeries {
 
     pub fn redeemable_cap(&self) -> u64 {
         self.actual_production.unwrap_or(self.capacity)
-    }
-
-    fn matured(&self, now: u64) -> bool {
-        self.matured_override || now >= self.maturity
     }
 }
 
@@ -314,8 +313,13 @@ impl FarmState {
             .get(series_date)
             .ok_or_else(|| anyhow!("no farm series for {series_date}"))?
             .clone();
-        if series.matured(now) {
-            bail!("series {series_date} has matured; issuance is closed");
+        // Egg-vending semantics: the day's eggs sell for the WHOLE
+        // production day (same-day purchase is the demo path), not only
+        // until the collection hour. Sales close at the day's UTC
+        // midnight; matured_override (a collectability flag) must not
+        // close issuance.
+        if now >= maturity_unix(series_date, 24)? {
+            bail!("sales closed: the {series_date} production day has ended");
         }
         let reserved = Self::reserved_of(&guard, series_date);
         if series.issued + reserved + quantity > series.capacity {
@@ -521,9 +525,12 @@ impl FarmState {
         }
     }
 
-    /// Settle-time gate for a redemption: matured, and within the actual
-    /// production (shortfall claims are explicitly refused, never
-    /// silently settled).
+    /// Settle-time gate for a redemption: within the actual production
+    /// (shortfall claims are explicitly refused, never silently
+    /// settled). The collection hour is NOT enforced — the automated
+    /// redemption paths (kiosk, teller settle) act as an egg vending
+    /// machine: a valid claim redeems whenever the farm can hand eggs
+    /// over; the terms' availability window is advisory.
     pub async fn redemption_gate(&self, unit: &str, quantity: u64) -> Result<FarmSeries> {
         let guard = self.inner.state.read().await;
         let series = guard
@@ -532,12 +539,6 @@ impl FarmState {
             .find(|s| s.unit == unit)
             .ok_or_else(|| anyhow!("unknown future series {unit}"))?
             .clone();
-        if !series.matured(unix_now()) {
-            bail!(
-                "series {unit} matures at {}; redemptions are not open yet",
-                series.maturity
-            );
-        }
         if series.redeemed + quantity > series.redeemable_cap() {
             bail!(
                 "issuer default: {} claim(s) exceed actual production {} \
@@ -603,7 +604,12 @@ impl FarmState {
             "settlement_unit": config.commodity,
             "purchase_currency": "signet-sat",
             "reference_price_sats": price.to_string(),
-            "shortfall_policy": "issuer-default"
+            "shortfall_policy": "issuer-default",
+            "collection_window": "06:00-24:00 on the production day",
+            "availability": "claims are collectable any time after 08:00 on \
+                the production day (the unit timestamp is canonical); \
+                automated redemption does not enforce this window — only \
+                actual production caps redemption"
         });
         let mint_admin = MintAdminClient::new(
             config.mintd_admin_url.clone(),
@@ -1154,7 +1160,7 @@ mod tests {
                 mint_public_url: "https://giftcard.cashu.exchange/farm".into(),
                 mintd_admin_url: "http://127.0.0.1:8100".into(),
                 mintd_admin_token: "t".into(),
-                maturity_hour_utc: 16,
+                maturity_hour_utc: 6,
                 base: "farm".into(),
                 quote: "egg".into(),
                 commodity: "egg".into(),
@@ -1441,7 +1447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn redemption_gate_enforces_maturity_and_shortfall() {
+    async fn redemption_gate_enforces_shortfall_only() {
         let farm = fresh_farm().await;
         let series = seeded_series_matured(&farm, "2026-09-18", true).await;
         assert!(farm.redemption_gate(&series.unit, 2).await.is_ok());
@@ -1456,7 +1462,8 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("issuer default"), "{err}");
 
-        // immature series refuses redemption
+        // Egg vending machine: an immature series redeems all the same —
+        // the availability window is advisory, only production caps it.
         let mut s2 = series.clone();
         s2.date = "2026-09-19".into();
         s2.unit = "future:farm-egg:20260919t160000z".into();
@@ -1468,8 +1475,38 @@ mod tests {
             .await
             .series
             .insert("2026-09-19".into(), s2.clone());
-        let err = farm.redemption_gate(&s2.unit, 1).await.unwrap_err();
-        assert!(err.to_string().contains("matures at"), "{err}");
+        farm.redemption_gate(&s2.unit, 1)
+            .await
+            .expect("immature redemption is accepted");
+    }
+
+    #[tokio::test]
+    async fn same_day_sales_stay_open_past_the_collection_hour() {
+        let farm = fresh_farm().await;
+        // Today's series with the collection hour already behind it.
+        let today = date_offset(0);
+        seeded_series(&farm, &today).await;
+        farm.inner
+            .state
+            .write()
+            .await
+            .series
+            .get_mut(&today)
+            .unwrap()
+            .maturity = unix_now() - 3600;
+        farm.insert_purchase("FP-sd1", &today, 1, "02abc", "lnbc".into(), "aa".into())
+            .await
+            .expect("the production day is still live");
+
+        // Yesterday's series: the production day has ended — sales closed.
+        let (y, m, d) = civil_from_unix(unix_now() - 86_400);
+        let yesterday = format!("{y:04}-{m:02}-{d:02}");
+        seeded_series(&farm, &yesterday).await;
+        let err = farm
+            .insert_purchase("FP-sd2", &yesterday, 1, "02abc", "lnbc".into(), "bb".into())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("sales closed"), "{err}");
     }
 
     #[tokio::test]
