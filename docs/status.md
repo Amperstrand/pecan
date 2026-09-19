@@ -28,6 +28,29 @@ keyset debt (fresh-context main-thread wedge). Known noise: farm
 reconcile writes off two stale classes as notes (09-17 campaign
 debris) — verdict PASS.
 
+Update 2026-09-19 (virtual delivery round): **/redeem serves at the
+domain root** (it used to answer with the parked marketing page —
+also the real cause of the early "kiosk e2e ghosts") and redemption
+there is fully self-service: a `virtual:screen` melt envelope routes
+the ticket to the virtual rail, the processor re-runs the redemption
+gate when the wallet locks proofs, auto-setttes with receipt
+`FARM-VIRTUAL-…` and the delivery line recording "delivered on
+screen" — no teller code, no operator — and the kiosk pops the eggs
+in animated. Counter handover remains (wallet panel + kiosk secondary
+button). The Caddyfile is repo-tracked (`deploy/Caddyfile.giftcard`)
+and api-smoke now FAILS if the live wallet bundle loses the farm
+panel — a concurrent deployer on the network reverted it twice
+(09-17, 09-19 14:12 UTC); finding/stopping that pipeline is an open
+ops item. Also fixed: `next-friday` u32 underflow on weekends, and
+farm unit tests re-dated to relative days. Verification: 102
+processor tests, vitest 83, farm e2e 5/5 (sarah incl. counter
+delivery-line settle, capacity, same-day window, purchase resume,
+autopay-fast projection self-heal); the portal e2e
+(farm-portal.spec.ts) passed end-to-end once (20s) and is skip-pinned
+on coco's fresh-context boot wedge — **fixing coco's addMint keyset
+crawl is the top-ranked next work**: demo first-load, kiosk import,
+and e2e stability all collapse onto it.
+
 ## Architecture snapshot
 
 | Piece | Version / state | Notes |
