@@ -435,3 +435,20 @@ notes: reconcile now writes off two stale classes as notes (farm
 paid-no-quote-no-burn demo settles; paid tickets whose quote was
 pruned post-burn), and the wallet-side receipt poll can lag on a
 wedge-prone page — the demo script says so instead of failing.
+
+
+### Projection self-heal (2026-09-19)
+
+The "banner says OWNED, header says 0" wedge is root-caused: an
+autopay-fast payment mints while the fresh context still boots its
+keysets; the mint op stays `pending` with the quote **PAID at the
+mint** (amount_paid=1, amount_issued=0) and coco's background watcher
+never fires — the wallet's cached quote row even stays UNPAID. Not a
+caching issue, not a farm bug: a wallet-side watcher that can be
+starved by boot contention. `mintFuture` now drives the op to
+finalization itself (`ops.mint.listByQuote` + `ops.mint.refresh`,
+2.5s ticks, 150s deadline) — the same self-rescue `pollRedemption`
+always did for melts. e2e: "autopay-fast purchase still lands in
+YOU OWN (projection self-heal)" buys with the timer (the trigger) and
+asserts the claims appear with NO reload. A wedged op from before the
+fix recovers on page reload (boot resume re-drives pending ops).

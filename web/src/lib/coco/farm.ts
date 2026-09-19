@@ -213,6 +213,28 @@ export async function mintFuture(purchase: FarmPurchaseInfo): Promise<MintedFutu
     "future mint prepare",
   )
   await raceTimeout(coco.ops.mint.execute(operation.id), 30_000, "future mint execute")
+  // Boot contention can leave the op `pending` with the quote PAID at
+  // the mint and the background watcher silent — the wallet then shows
+  // the owned banner while the balance projection stays empty. Drive
+  // finalization ourselves, exactly like the melt leg's pollRedemption.
+  const deadline = Date.now() + 150_000
+  for (;;) {
+    const ops = await coco.ops.mint
+      .listByQuote({ mintUrl: farmMintUrl(), quoteId: quote.quoteId })
+      .catch(() => [])
+    const op = ops[0]
+    if (op && (op.state === "finalized" || op.state === "failed")) break
+    if (Date.now() > deadline) {
+      walletLog("warn", "future mint still pending after drive deadline", {
+        purchaseId: purchase.purchase_id,
+        quoteId: quote.quoteId,
+        opState: op?.state ?? "unknown",
+      })
+      break
+    }
+    if (op) await coco.ops.mint.refresh(op.id).catch(() => undefined)
+    await new Promise((r) => setTimeout(r, 2500))
+  }
   walletLog("info", "future mint executed", {
     purchaseId: purchase.purchase_id,
     quoteId: quote.quoteId,

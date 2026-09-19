@@ -587,4 +587,34 @@ test.describe("farm futures (NUT-32 spike)", () => {
       .toBeGreaterThanOrEqual(1)
     await context.close()
   })
+
+  test("autopay-fast purchase still lands in YOU OWN (projection self-heal)", async ({ page }) => {
+    test.setTimeout(480_000)
+    // The wedge this pins: an autopay-fast payment (mint executes while
+    // the fresh context is still booting its keysets) could leave the
+    // mint op pending forever — banner said OWNED, header said 0, mint
+    // showed amount_paid=1/amount_issued=0. mintFuture now drives the
+    // op to finalization itself; the claims MUST appear without any
+    // reload.
+    const overview = await farmOverview(page)
+    const today = new Date().toISOString().slice(0, 10)
+    const series = overview.series.find((s) => s.date === today && s.available >= 1)
+    if (!series) {
+      test.skip(true, "today's eggs are sold out")
+      return
+    }
+
+    await page.goto("/wallet")
+    await page.getByRole("tab", { name: "FARM" }).click()
+    await page.getByLabel("production day").waitFor({ state: "visible", timeout: 30_000 })
+    await page.getByLabel("production day").selectOption(series.date)
+    await page.getByLabel("egg quantity").fill("1")
+    await page.getByRole("button", { name: /Buy for \d+ signet sats/ }).click()
+    // No manual payment: autopay's timer settles it fast — the trigger.
+    await expect(page.getByText(/YOU OWN — Farm eggs · 1 claims/)).toBeVisible({ timeout: 300_000 })
+    await expect(page.getByText("1 egg claims").first()).toBeVisible({ timeout: 180_000 })
+    await expect(
+      page.getByRole("tablist", { name: "Egg series" }).getByRole("tab").first(),
+    ).toBeVisible({ timeout: 60_000 })
+  })
 })
