@@ -151,7 +151,7 @@ test("ev rail: charger B serves the same contract (atomB window)", async ({ page
     .toBeGreaterThanOrEqual(1)
   await page.getByRole("button", { name: "Stop charging" }).click()
 
-  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh) delivered/)).toBeVisible({
+  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh|s) delivered/)).toBeVisible({
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
@@ -198,7 +198,7 @@ test("ev rail: deposit pattern — slider, remote stop, refund of the unspent de
   await page.getByRole("button", { name: "Stop charging" }).click()
 
   // Stopped summary with actual consumption from the device-side abort.
-  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh) delivered/)).toBeVisible({
+  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh|s) delivered/)).toBeVisible({
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()
@@ -351,7 +351,7 @@ test("ev rail: double-stop is idempotent — one settle, one refund, exact balan
   const stop = page.getByRole("button", { name: "Stop charging" })
   await Promise.all([stop.click(), stop.click().catch(() => undefined)])
 
-  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh) delivered/)).toBeVisible({
+  await expect(page.getByText(/Charging stopped — [\d.]+ (?:kW·s|kWh|s) delivered/)).toBeVisible({
     timeout: 180_000,
   })
   const receipt = await page.locator("p.break-all.font-mono").textContent()

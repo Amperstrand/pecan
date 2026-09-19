@@ -744,7 +744,7 @@ test("Alice at the charge point — full lifecycle movie", async ({ page }) => {
   // natural full-budget completion reads "Charged N s at …". Accept both.
   await expect(
     page.getByText(
-      /(Charging stopped — [\d.]+ (?:kW·s|kWh) delivered|Charged [\d.]+ (?:kW·s|kWh) at Sim Charger)/,
+      /(Charging stopped — [\d.]+ (?:kW·s|kWh|s) delivered|Charged [\d.]+ (?:kW·s|kWh) at Sim Charger)/,
     ),
   ).toBeVisible({ timeout: 180_000 })
   const receipt = await page.locator("p.break-all.font-mono").first().textContent()
@@ -893,7 +893,7 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
   await page.getByRole("button", { name: "Stop charging" }).click()
   await expect(
     page.getByText(
-      /(Charging stopped — [\d.]+ (?:kW·s|kWh) delivered|Charged [\d.]+ (?:kW·s|kWh) at Sim Charger)/,
+      /(Charging stopped — [\d.]+ (?:kW·s|kWh|s) delivered|Charged [\d.]+ (?:kW·s|kWh) at Sim Charger)/,
     ),
   ).toBeVisible({ timeout: 180_000 })
   const receipt = await page.locator("p.break-all.font-mono").first().textContent()
