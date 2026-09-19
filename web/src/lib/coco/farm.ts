@@ -361,16 +361,23 @@ export interface RedemptionStart {
 
 /**
  * Redemption leg 1 — the wallet locks (burns) its proofs into a
- * `future` melt quote; the teller matches the code, hands over eggs, and
- * settles. Returns the teller code to show.
+ * `future` melt quote. The `description` chooses the delivery mode:
+ * the default creates a teller ticket (the operator matches the code,
+ * hands eggs over, settles); `"virtual:screen"` asks the farm to
+ * deliver the imaginary eggs on the redeemer's screen automatically —
+ * no code, no operator.
  */
-export async function startRedemption(unit: string, quantity: number): Promise<RedemptionStart> {
+export async function startRedemption(
+  unit: string,
+  quantity: number,
+  description = "farm redemption",
+): Promise<RedemptionStart> {
   const coco = await getCoco()
   const quote = await raceTimeout(
     coco.quotes.melt.create({
       mintUrl: farmMintUrl(),
       method: "future",
-      methodData: { amount: Amount.from(quantity), description: "farm redemption" },
+      methodData: { amount: Amount.from(quantity), description },
       unit,
     }),
     20_000,

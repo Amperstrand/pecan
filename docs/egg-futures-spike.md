@@ -452,3 +452,41 @@ always did for melts. e2e: "autopay-fast purchase still lands in
 YOU OWN (projection self-heal)" buys with the timer (the trigger) and
 asserts the claims appear with NO reload. A wedged op from before the
 fix recovers on page reload (boot resume re-drives pending ops).
+
+
+## Virtual delivery round (2026-09-19 evening, branch `farm-ux`)
+
+The claims portal became fully self-service:
+
+1. **`/redeem` at the domain root** — it previously only lived under
+   `/farm-console/redeem`; the root path answered with the parked
+   marketing page (which is also why every early kiosk e2e "wedge"
+   was actually a wrong page). One caddy handle, mirroring `/wallet`.
+   The Caddyfile is now repo-tracked (`deploy/Caddyfile.giftcard`)
+   and api-smoke warns when the live wallet bundle loses the farm
+   panel — a concurrent deployer on the network reverted it twice
+   (2026-09-17, 2026-09-19 14:12 UTC).
+2. **Virtual delivery rail** — redemption with no teller code and no
+   operator: the melt request `virtual:screen` (same `rail:dest`
+   envelope language as the payout rails) creates the ticket on the
+   `virtual` rail; the moment the wallet locks proofs, the processor
+   re-runs the redemption gate (day window + shortfall) and
+   auto-settles with the delivery line recording exactly what
+   happened: `delivered=<amount>, condition="virtual: delivered on
+   screen"`, receipt `FARM-VIRTUAL-…`. A gate refusal voids the
+   ticket and the melt saga restores the proofs. Counter handover
+   stays available (wallet panel; kiosk secondary button).
+3. **Eggs on screen** — the kiosk's done card pops the redeemed eggs
+   in as animated 🥚 (staggered pop-in + float), receipt beneath.
+4. **Calendar bug fixed**: `resolve_production_date("next-friday")`
+   underflowed on u32 for Saturday/Sunday — first Saturday since the
+   code was written. `(5 + 7 - weekday) % 7`.
+5. Processor tests re-dated to relative days (a UTC-midnight rollover
+   mid-session turned seven fixed-date tests red — the sales-window
+   gate correctly refused past dates). 102 green.
+
+The remaining known flake is coco's fresh-context keyset boot (render
+wedge, minutes): the portal e2e is skip-pinned on it after passing
+end-to-end once. That boot debt is the single highest-leverage fix
+left — demo first-load, kiosk import, and e2e duration all collapse
+onto it.

@@ -144,6 +144,61 @@ impl BranchBackend {
         });
     }
 
+    /// Virtual egg delivery: imaginary goods, instant settlement. After a
+    /// beat (so the melt response lands first) re-run the farm gate — the
+    /// day window and the shortfall cap must hold at settle time too —
+    /// then settle with the delivery line recording what happened:
+    /// everything, on screen. A gate refusal VOIDS the ticket, and the
+    /// melt saga restores the wallet's proofs.
+    fn spawn_virtual_settle(&self, ticket_id: String, unit: String, amount: u64) {
+        let state = self.state.clone();
+        let farm = self.farm.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            if let Some(farm) = farm.as_ref() {
+                if let Err(e) = farm.state.redemption_gate(&unit, amount).await {
+                    match state
+                        .mark_failed(
+                            &ticket_id,
+                            Some(format!("virtual delivery refused: {e:#}")),
+                            "virtual-rail",
+                        )
+                        .await
+                    {
+                        Ok(_) => tracing::info!(
+                            "virtual delivery refused for {ticket_id}: {e:#} — ticket voided, proofs restored"
+                        ),
+                        Err(void_err) => {
+                            tracing::warn!("virtual void failed for {ticket_id}: {void_err}")
+                        }
+                    }
+                    return;
+                }
+            }
+            let receipt = crate::payout::receipt_for_rail("virtual")
+                .unwrap_or_else(|| "FARM-VIRTUAL".to_string());
+            match state
+                .mark_paid(
+                    &ticket_id,
+                    Some(format!("virtual egg delivery receipt={receipt}")),
+                    Some(receipt.clone()),
+                    Some(amount),
+                    Some("virtual: delivered on screen".into()),
+                    "virtual-rail",
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("virtual delivery settled {ticket_id} ({amount} {unit})");
+                    if let Some(farm) = farm.as_ref() {
+                        farm.state.recount_redeemed(&state.paid_future_tickets().await).await;
+                    }
+                }
+                Err(e) => tracing::warn!("virtual settle failed for {ticket_id}: {e}"),
+            }
+        });
+    }
+
     /// Unix seconds of the first payment-stream attach since process start.
     pub fn stream_attached_at(&self) -> Option<u64> {
         match self.stream_attached_at.load(Ordering::SeqCst) {
@@ -547,13 +602,37 @@ impl MintPayment for BranchBackend {
                         .redemption_gate(&unit_str, amount)
                         .await
                         .map_err(|e| Error::Custom(format!("redemption refused: {e:#}")))?;
+                    // Delivery mode: a `virtual:<dest>` envelope redeems
+                    // in the browser (eggs on the redeemer's screen, no
+                    // teller code — auto-settled once the wallet locks
+                    // funds). Anything else is the counter handover.
+                    // Futures never exit to another rail.
+                    let delivery = parse_payout_envelope(opts.request.trim());
+                    match &delivery {
+                        Some(req) if req.rail == "virtual" => {
+                            if !crate::payout::valid_destination("virtual", &req.destination) {
+                                return Err(Error::Custom("invalid virtual destination".into()));
+                            }
+                        }
+                        Some(req) => {
+                            return Err(Error::Custom(format!(
+                                "future melts support only virtual delivery, not rail '{}'",
+                                req.rail
+                            )));
+                        }
+                        None => {}
+                    }
                     let quote_id = opts.quote_id.to_string();
                     let ticket = Ticket::new_outgoing(
                         quote_id.clone(),
                         amount,
                         unit_str.clone(),
                         Some(format!("farm redemption {unit_str}")),
-                        Some("farm".to_string()),
+                        Some(
+                            delivery
+                                .map(|_| "virtual".to_string())
+                                .unwrap_or_else(|| "farm".to_string()),
+                        ),
                         Some(unix_now() + MELT_TICKET_TTL_SECS),
                     );
                     let ticket = self
@@ -683,7 +762,15 @@ impl MintPayment for BranchBackend {
                     .mark_outgoing_submitted(&ticket.id)
                     .await
                     .map_err(|e| Error::Custom(e.to_string()))?;
-                if self.autosim {
+                // Virtual egg delivery settles itself the moment the
+                // wallet has locked its proofs — no operator, no code.
+                // It is the farm's own rail, independent of the fiat
+                // demo's autosim flag.
+                if ticket.unit.starts_with("future:")
+                    && ticket.payout_rail.as_deref() == Some("virtual")
+                {
+                    self.spawn_virtual_settle(ticket.id.clone(), ticket.unit.clone(), ticket.amount);
+                } else if self.autosim {
                     if let Some(rail) = ticket.payout_rail.clone() {
                         if let Some(delay) = crate::payout::settle_delay_ms(&rail) {
                             self.spawn_autosim_settle(ticket.id.clone(), rail, delay);

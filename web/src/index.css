@@ -158,6 +158,10 @@
 .kiosk-hero h1 { font-size: 24px; margin: 6px 0 4px; letter-spacing: -0.02em; }
 .kiosk-hero p { color: #9fb0c3; font-size: 13px; max-width: 300px; margin: 0 auto; }
 .kiosk-egg { font-size: 54px; animation: kiosk-float 3.2s ease-in-out infinite; display: inline-block; }
+.kiosk-egg-big { font-size: 72px; }
+.kiosk-eggs { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 340px; }
+.kiosk-eggs .kiosk-egg { font-size: 34px; animation: kiosk-pop-in .5s cubic-bezier(.2,1.6,.4,1) both, kiosk-float 3.2s ease-in-out infinite; }
+@keyframes kiosk-pop-in { from { transform: scale(.2) rotate(-14deg); opacity: 0; } }
 @keyframes kiosk-float { 50% { transform: translateY(-10px) rotate(-6deg); } }
 .kiosk-card {
   width: min(420px, 94vw); border-radius: 16px; padding: 22px;

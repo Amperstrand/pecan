@@ -1047,10 +1047,11 @@ pub fn resolve_production_date(input: &str) -> Result<String> {
         validate_date(trimmed)?;
         return Ok(trimmed.to_string());
     }
-    // Days until the next Friday strictly ahead of today.
+    // Days until the next Friday strictly ahead of today (weekday is
+    // ISO Mon=1..Sun=7; sum first so Saturday/Sunday cannot underflow).
     let today = unix_now();
     let (.., weekday) = weekday_from_unix(today);
-    let ahead = (5 - weekday + 7) % 7;
+    let ahead = (5 + 7 - weekday) % 7;
     let ahead = if ahead == 0 { 7 } else { ahead };
     Ok(date_offset(ahead as u64))
 }
@@ -1270,9 +1271,10 @@ mod tests {
     #[tokio::test]
     async fn quote_for_five_costs_five_thousand_sats() {
         let farm = fresh_farm().await;
-        let series = seeded_series(&farm, "2026-09-18").await;
+        let day = date_offset(1);
+        let series = seeded_series(&farm, &day).await;
         let p = farm
-            .insert_purchase("FP-test5", "2026-09-18", 5, "02abc", "lnbc1".into(), "aa".into())
+            .insert_purchase("FP-test5", &day, 5, "02abc", "lnbc1".into(), "aa".into())
             .await
             .unwrap();
         assert_eq!(p.total_sats, 5000);
@@ -1283,23 +1285,24 @@ mod tests {
     #[tokio::test]
     async fn unpaid_quote_reserves_capacity() {
         let farm = fresh_farm().await;
-        seeded_series(&farm, "2026-09-18").await;
-        farm.insert_purchase("FP-r1", "2026-09-18", 5, "02abc", "lnbc".into(), "aa".into())
+        let day = date_offset(1);
+        seeded_series(&farm, &day).await;
+        farm.insert_purchase("FP-r1", &day, 5, "02abc", "lnbc".into(), "aa".into())
             .await
             .unwrap();
-        let snapshot = farm.series_for_date("2026-09-18").await.unwrap();
+        let snapshot = farm.series_for_date(&day).await.unwrap();
         // reserved derived live from the series' purchases: 10 - 5 open
         let reserved = farm
             .purchases()
             .await
             .iter()
-            .filter(|p| p.series_date == "2026-09-18" && p.state.reserves_capacity())
+            .filter(|p| p.series_date == day && p.state.reserves_capacity())
             .map(|p| p.quantity)
             .sum::<u64>();
         assert_eq!(snapshot.available(reserved), 5);
         // a second 6-egg purchase cannot fit in the remaining 5
         assert!(farm
-            .insert_purchase("FP-r2", "2026-09-18", 6, "02abc", "lnbc".into(), "bb".into())
+            .insert_purchase("FP-r2", &day, 6, "02abc", "lnbc".into(), "bb".into())
             .await
             .is_err());
     }
@@ -1307,9 +1310,10 @@ mod tests {
     #[tokio::test]
     async fn expired_unpaid_quote_releases_capacity() {
         let farm = fresh_farm().await;
-        seeded_series(&farm, "2026-09-18").await;
+        let day = date_offset(1);
+        seeded_series(&farm, &day).await;
         let p = farm
-            .insert_purchase("FP-e1", "2026-09-18", 10, "02abc", "lnbc".into(), "aa".into())
+            .insert_purchase("FP-e1", &day, 10, "02abc", "lnbc".into(), "aa".into())
             .await
             .unwrap();
         // force-expire it
@@ -1326,11 +1330,11 @@ mod tests {
             .purchases()
             .await
             .iter()
-            .filter(|p| p.series_date == "2026-09-18" && p.state.reserves_capacity())
+            .filter(|p| p.series_date == day && p.state.reserves_capacity())
             .map(|p| p.quantity)
             .sum::<u64>();
         assert_eq!(reserved, 0, "expired purchase must release its reservation");
-        farm.insert_purchase("FP-e2", "2026-09-18", 10, "02abc", "lnbc".into(), "cc".into())
+        farm.insert_purchase("FP-e2", &day, 10, "02abc", "lnbc".into(), "cc".into())
             .await
             .expect("capacity is free again");
     }
@@ -1338,13 +1342,15 @@ mod tests {
     #[tokio::test]
     async fn reservations_are_per_series() {
         let farm = fresh_farm().await;
-        seeded_series(&farm, "2026-09-18").await;
-        seeded_series(&farm, "2026-09-19").await;
-        farm.insert_purchase("FP-x1", "2026-09-18", 10, "02abc", "lnbc".into(), "aa".into())
+        let day = date_offset(1);
+        let day2 = date_offset(2);
+        seeded_series(&farm, &day).await;
+        seeded_series(&farm, &day2).await;
+        farm.insert_purchase("FP-x1", &day, 10, "02abc", "lnbc".into(), "aa".into())
             .await
             .unwrap();
-        // Friday being sold out must not touch Saturday's capacity.
-        farm.insert_purchase("FP-x2", "2026-09-19", 10, "02abc", "lnbc".into(), "bb".into())
+        // One day being sold out must not touch the next day's capacity.
+        farm.insert_purchase("FP-x2", &day2, 10, "02abc", "lnbc".into(), "bb".into())
             .await
             .expect("a different day's eggs are a different series");
     }
@@ -1352,12 +1358,13 @@ mod tests {
     #[tokio::test]
     async fn eleventh_egg_claim_fails_tenth_succeeds() {
         let farm = fresh_farm().await;
-        seeded_series(&farm, "2026-09-18").await;
-        farm.insert_purchase("FP-t1", "2026-09-18", 10, "02abc", "lnbc".into(), "aa".into())
+        let day = date_offset(1);
+        seeded_series(&farm, &day).await;
+        farm.insert_purchase("FP-t1", &day, 10, "02abc", "lnbc".into(), "aa".into())
             .await
             .unwrap();
         assert!(farm
-            .insert_purchase("FP-t2", "2026-09-18", 1, "02abc", "lnbc".into(), "bb".into())
+            .insert_purchase("FP-t2", &day, 1, "02abc", "lnbc".into(), "bb".into())
             .await
             .is_err());
     }
@@ -1365,15 +1372,17 @@ mod tests {
     #[tokio::test]
     async fn concurrent_purchases_cannot_over_reserve() {
         let farm = fresh_farm().await;
-        seeded_series(&farm, "2026-09-18").await;
+        let day = date_offset(1);
+        seeded_series(&farm, &day).await;
         let farm = Arc::new(farm);
         let mut handles = Vec::new();
         for i in 0..12u64 {
             let f = farm.clone();
+            let day = day.clone();
             handles.push(tokio::spawn(async move {
                 f.insert_purchase(
                     &format!("FP-c{i:02}"),
-                    "2026-09-18",
+                    &day,
                     1,
                     "02abc",
                     format!("lnbc{i}"),

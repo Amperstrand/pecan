@@ -1519,17 +1519,7 @@ async fn api_farm_mature_now(
 /// The future-unit tickets whose burns already completed — the
 /// authoritative redemption record for series accounting.
 pub async fn paid_future_tickets(branch: &BranchState) -> Vec<(String, u64)> {
-    branch
-        .list_all()
-        .await
-        .into_iter()
-        .filter(|t| {
-            t.kind == TicketKind::Outgoing
-                && t.status == TicketStatus::Paid
-                && t.unit.starts_with("future:")
-        })
-        .map(|t| (t.unit, t.amount))
-        .collect()
+    branch.paid_future_tickets().await
 }
 
 // ---------------- attachment setup ----------------

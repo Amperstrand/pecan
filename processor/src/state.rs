@@ -340,6 +340,22 @@ impl BranchState {
         self.inner.tickets.read().await.values().cloned().collect()
     }
 
+    /// Paid future-unit melts — the authoritative burn record the farm's
+    /// redeemed counts are re-derived from (on boot, on every settle,
+    /// and by the virtual-delivery rail).
+    pub async fn paid_future_tickets(&self) -> Vec<(String, u64)> {
+        self.list_all()
+            .await
+            .into_iter()
+            .filter(|t| {
+                t.kind == TicketKind::Outgoing
+                    && t.status == TicketStatus::Paid
+                    && t.unit.starts_with("future:")
+            })
+            .map(|t| (t.unit, t.amount))
+            .collect()
+    }
+
     /// Look up one ticket by its id (e.g. `MINT-<quote_id>`). Used by the
     /// self-test to confirm a probe quote landed on THIS processor.
     pub async fn get_ticket(&self, id: &str) -> Option<Ticket> {

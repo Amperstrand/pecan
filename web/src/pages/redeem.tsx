@@ -24,8 +24,8 @@ type Phase =
   | { kind: "scanning" }
   | { kind: "importing" }
   | { kind: "verdict"; unit: string; qty: number; series: FarmOverview["series"][number] }
-  | { kind: "redeeming"; tail: string }
-  | { kind: "done"; receipt: string }
+  | { kind: "redeeming"; tail: string | null; qty: number; delivery: "counter" | "virtual" }
+  | { kind: "done"; receipt: string; qty: number }
   | { kind: "error"; message: string }
 
 
@@ -79,19 +79,30 @@ export function RedeemPage() {
     }
   }, [overview])
 
-  const doRedeem = useCallback(async (unit: string, qty: number) => {
+  const doRedeem = useCallback(async (unit: string, qty: number, delivery: "counter" | "virtual") => {
     try {
-      await runFarmRedemption(unit, qty, (update) => {
-        if (update.kind === "waiting") setPhase({ kind: "redeeming", tail: update.tail })
-        else if (update.kind === "receipt") setPhase({ kind: "done", receipt: update.receipt })
-        else if (update.kind === "failed")
-          setPhase({ kind: "error", message: "Redemption failed — your egg claims are restored." })
-        else
-          setPhase({
-            kind: "error",
-            message: "Still waiting for the farm to confirm handover — check back shortly.",
-          })
-      })
+      const outcome = await runFarmRedemption(
+        unit,
+        qty,
+        (update) => {
+          if (update.kind === "waiting")
+            setPhase(
+              delivery === "virtual"
+                ? { kind: "redeeming", tail: null, qty, delivery }
+                : { kind: "redeeming", tail: update.tail, qty, delivery },
+            )
+          else if (update.kind === "receipt") setPhase({ kind: "done", receipt: update.receipt, qty })
+          else if (update.kind === "failed")
+            setPhase({ kind: "error", message: "Redemption failed — your egg claims are restored." })
+          else
+            setPhase({
+              kind: "error",
+              message: "Still waiting for the farm to confirm handover — check back shortly.",
+            })
+        },
+        { delivery },
+      )
+      void outcome
     } catch (e) {
       setPhase({ kind: "error", message: e instanceof Error ? e.message : String(e) })
     }
@@ -149,9 +160,20 @@ export function RedeemPage() {
             <h2>{phase.qty} egg{phase.qty === 1 ? "" : "s"} — {day}</h2>
             {claimable ? (
               <>
-                <p>Claim valid — collect 24/7 today; imaginary eggs are delivered best effort.</p>
-                <Button size="lg" onClick={() => void doRedeem(phase.unit, phase.qty)}>
+                <p>Claim valid — redeem here and the imaginary eggs appear on this screen.</p>
+                <Button
+                  size="lg"
+                  data-testid="kiosk-redeem-virtual"
+                  onClick={() => void doRedeem(phase.unit, phase.qty, "virtual")}
+                >
                   Redeem {phase.qty} egg{phase.qty === 1 ? "" : "s"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void doRedeem(phase.unit, phase.qty, "counter")}
+                >
+                  or hand a code to the farm counter
                 </Button>
               </>
             ) : day < today ? (
@@ -167,7 +189,14 @@ export function RedeemPage() {
         )
       })()}
 
-      {phase.kind === "redeeming" && (
+      {phase.kind === "redeeming" && phase.delivery === "virtual" && (
+        <section className="kiosk-card kiosk-center">
+          <div className="kiosk-egg kiosk-egg-big" aria-hidden>🥚</div>
+          <p data-testid="kiosk-delivering">Delivering your {phase.qty} egg{phase.qty === 1 ? "" : "s"} to this screen…</p>
+        </section>
+      )}
+
+      {phase.kind === "redeeming" && phase.delivery === "counter" && (
         <section className="kiosk-card kiosk-center">
           <Loader2 className="kiosk-spin" />
           <p>Hand this code to the farm counter:</p>
@@ -179,7 +208,13 @@ export function RedeemPage() {
       {phase.kind === "done" && (
         <section className="kiosk-card kiosk-verdict ok">
           <div className="kiosk-stamp" aria-hidden>✓</div>
-          <h2>Eggs redeemed</h2>
+          <h2>Your egg{phase.qty === 1 ? "" : "s"}</h2>
+          <div className="kiosk-eggs" data-testid="kiosk-eggs" aria-label={`${phase.qty} eggs delivered`}>
+            {Array.from({ length: Math.min(phase.qty, 36) }, (_, i) => (
+              <span key={i} className="kiosk-egg kiosk-egg-pop" style={{ animationDelay: `${i * 90}ms` }} aria-hidden>🥚</span>
+            ))}
+          </div>
+          <p className="kiosk-hint">Delivered virtually — enjoy. Receipt:</p>
           <p className="kiosk-receipt">{phase.receipt}</p>
           <Button variant="outline" onClick={() => { frames.current.clear(); setPasted(""); setPhase({ kind: "scanning" }) }}>
             Scan another

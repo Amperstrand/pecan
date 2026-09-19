@@ -128,6 +128,10 @@ pub fn valid_destination(rail: &str, dest: &str) -> bool {
         // the ev-charge adapter against real hardware — it must never be
         // added to SIMULATED_RAILS or autosimmed.
         "ev" => valid_device_slug(dest),
+        // Imaginary eggs, delivered on the redeemer's screen: the
+        // destination is a free-form label ("screen"). Settles
+        // instantly through the farm's virtual-delivery path.
+        "virtual" => !dest.trim().is_empty(),
         _ => false,
     }
 }
@@ -205,6 +209,11 @@ pub fn receipt_for_rail(rail: &str) -> Option<String> {
         // (FARM-yymmdd) — the Lightning-preimage analogue for eggs at
         // the counter.
         "farm" => format!("FARM-{}-{:08X}", yymmdd_now(), rand::thread_rng().gen::<u32>()),
+        "virtual" => format!(
+            "FARM-VIRTUAL-{}-{:08X}",
+            yymmdd_now(),
+            rand::thread_rng().gen::<u32>()
+        ),
         _ => return None,
     })
 }
