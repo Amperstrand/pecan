@@ -24,6 +24,9 @@ import { migrateLegacyMintUrls } from "./wallet-migration"
 export type { DepositMethod }
 import { MeltBranchHandler } from "./melt-branch-handler"
 import { MintBranchHandler } from "./mint-branch-handler"
+import { MeltFutureHandler } from "./melt-future-handler"
+import { MintFutureHandler } from "./mint-future-handler"
+import { purchaseLockFor, termsUriFor } from "./farm"
 
 export interface HistoryRow {
   id?: number
@@ -176,7 +179,6 @@ export function getCoco(): Promise<Manager> {
       // which now 404s — re-key to the active currency's mint before coco
       // opens the database.
       await migrateLegacyMintUrls(window.location.origin, mintUrl("eur"))
-      const repo = new IndexedDbRepositories({ name: "giftcard-coco-wallet" })
       const noWsHosts = new Set(
         (Object.keys(CURRENCIES) as Currency[])
           .filter((c) => !CURRENCIES[c].nut17)
@@ -189,6 +191,7 @@ export function getCoco(): Promise<Manager> {
           })
           .filter((h): h is string => h !== null),
       )
+      const repo = new IndexedDbRepositories({ name: "giftcard-coco-wallet" })
       const coco = await initializeCoco({
         repo,
         seedGetter: () => Promise.resolve(loadSeed()),
@@ -205,6 +208,17 @@ export function getCoco(): Promise<Manager> {
       coco.registerMintMethod("branch", new MintBranchHandler("branch", coco.keyRingService))
       coco.registerMintMethod("ln", new MintBranchHandler("ln", coco.keyRingService))
       coco.registerMintMethod("btc", new MintBranchHandler("btc", coco.keyRingService))
+      // NUT-32 futures: issuance needs the series terms URI for the
+      // tagged output secrets; redemption rides the teller melt flow.
+      coco.registerMeltMethod("future", new MeltFutureHandler())
+      coco.registerMintMethod(
+        "future",
+        new MintFutureHandler(
+          coco.keyRingService,
+          (unit) => Promise.resolve(termsUriFor(unit)),
+          (purchaseId) => Promise.resolve(purchaseLockFor(purchaseId)),
+        ),
+      )
       subscribeWalletLogging(coco)
       for (const currency of Object.keys(CURRENCIES) as Currency[]) {
         // Best-effort: an unreachable external mint (sat) must not brick

@@ -35,6 +35,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use crate::config::MELT_TICKET_TTL_SECS;
+use crate::farm::FarmRail;
 use crate::ln::LnRail;
 use crate::onchain::OnchainRail;
 use crate::payout::parse_payout_envelope;
@@ -61,6 +62,9 @@ pub struct BranchBackend {
     /// with a generated scheme receipt (CDK_BRANCH_PROCESSOR_PAYOUT_AUTOSIM).
     /// Off, the python adapters in payout/ do the settling on invocation.
     autosim: bool,
+    /// Farm rail (NUT-32 futures spike): series purchases + future
+    /// issuance/redemption routing. `None` unless farm-enabled.
+    farm: Option<Arc<FarmRail>>,
     stream_active: AtomicBool,
     /// Unix seconds of the first `wait_payment_event` attach since this
     /// process started; 0 = never. Never cleared on client disconnect — it
@@ -89,6 +93,7 @@ impl BranchBackend {
         onchain: Option<Arc<OnchainRail>>,
         payout_rails: HashSet<String>,
         autosim: bool,
+        farm: Option<Arc<FarmRail>>,
     ) -> Self {
         Self {
             state,
@@ -98,6 +103,7 @@ impl BranchBackend {
             onchain,
             payout_rails,
             autosim,
+            farm,
             stream_active: AtomicBool::new(false),
             stream_attached_at: AtomicU64::new(0),
             last_settings_at: AtomicU64::new(0),
@@ -129,11 +135,66 @@ impl BranchBackend {
                 "payout rail {rail} (auto-simulated) receipt={receipt}"
             );
             match state
-                .mark_paid(&ticket_id, Some(notes), Some(receipt), None, "autosim")
+                .mark_paid(&ticket_id, Some(notes), Some(receipt), None, None, "autosim")
                 .await
             {
                 Ok(_) => tracing::info!("autosim settled {ticket_id} on rail {rail}"),
                 Err(e) => tracing::warn!("autosim settle failed for {ticket_id}: {e}"),
+            }
+        });
+    }
+
+    /// Virtual egg delivery: imaginary goods, instant settlement. After a
+    /// beat (so the melt response lands first) re-run the farm gate — the
+    /// day window and the shortfall cap must hold at settle time too —
+    /// then settle with the delivery line recording what happened:
+    /// everything, on screen. A gate refusal VOIDS the ticket, and the
+    /// melt saga restores the wallet's proofs.
+    fn spawn_virtual_settle(&self, ticket_id: String, unit: String, amount: u64) {
+        let state = self.state.clone();
+        let farm = self.farm.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            if let Some(farm) = farm.as_ref() {
+                if let Err(e) = farm.state.redemption_gate(&unit, amount).await {
+                    match state
+                        .mark_failed(
+                            &ticket_id,
+                            Some(format!("virtual delivery refused: {e:#}")),
+                            "virtual-rail",
+                        )
+                        .await
+                    {
+                        Ok(_) => tracing::info!(
+                            "virtual delivery refused for {ticket_id}: {e:#} — ticket voided, proofs restored"
+                        ),
+                        Err(void_err) => {
+                            tracing::warn!("virtual void failed for {ticket_id}: {void_err}")
+                        }
+                    }
+                    return;
+                }
+            }
+            let receipt = crate::payout::receipt_for_rail("virtual")
+                .unwrap_or_else(|| "FARM-VIRTUAL".to_string());
+            match state
+                .mark_paid(
+                    &ticket_id,
+                    Some(format!("virtual egg delivery receipt={receipt}")),
+                    Some(receipt.clone()),
+                    Some(amount),
+                    Some("virtual: delivered on screen".into()),
+                    "virtual-rail",
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("virtual delivery settled {ticket_id} ({amount} {unit})");
+                    if let Some(farm) = farm.as_ref() {
+                        farm.state.recount_redeemed(&state.paid_future_tickets().await).await;
+                    }
+                }
+                Err(e) => tracing::warn!("virtual settle failed for {ticket_id}: {e}"),
             }
         });
     }
@@ -181,6 +242,7 @@ impl BranchBackend {
         match opts.method.trim() {
             "ln" => return "ln",
             "btc" => return "btc",
+            "future" => return "future",
             _ => {}
         }
         match opts.extra_json.as_deref() {
@@ -188,6 +250,7 @@ impl BranchBackend {
                 Ok(v) => match v.get("rail").and_then(|r| r.as_str()) {
                     Some("ln") => "ln",
                     Some("btc") => "btc",
+                    Some("future") => "future",
                     _ => "branch",
                 },
                 Err(_) => "branch",
@@ -248,6 +311,82 @@ impl BranchBackend {
     /// The onchain rail handle, for the console's status endpoints.
     pub fn onchain(&self) -> Option<&Arc<OnchainRail>> {
         self.onchain.as_ref()
+    }
+
+    pub fn farm(&self) -> Option<&Arc<FarmRail>> {
+        self.farm.as_ref()
+    }
+
+    /// Future rail (NUT-32 spike): the wallet presents a NUT-20-locked
+    /// `future` mint quote whose flattened extra fields reference a PAID
+    /// farm purchase (`{"purchase": "FP-…"}`). The signet payment settled
+    /// before this quote existed, so a successful validation links the
+    /// quote to the purchase and immediately announces it PAID — the
+    /// wallet may mint exactly the purchased quantity of the series unit.
+    async fn future_create(
+        &self,
+        opts: cdk_common::payment::CustomIncomingPaymentOptions,
+    ) -> Result<CreateIncomingPaymentResponse, Error> {
+        let farm = self
+            .farm
+            .as_ref()
+            .ok_or_else(|| Error::Custom("farm rail is not enabled on this processor".into()))?;
+        let amount = opts
+            .amount
+            .as_ref()
+            .ok_or_else(|| Error::Custom("an amount is required".into()))?;
+        let unit = amount.unit().to_string();
+        if !crate::farm::valid_future_unit(&unit) {
+            return Err(Error::Custom(format!(
+                "unit {unit} does not obey the NUT-32 future grammar"
+            )));
+        }
+        let quote_id = opts.quote_id.to_string();
+        let purchase_id = opts
+            .extra_json
+            .as_deref()
+            .and_then(|extra| serde_json::from_str::<serde_json::Value>(extra).ok())
+            .and_then(|v| {
+                v.get("purchase")
+                    .and_then(|p| p.as_str())
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| {
+                Error::Custom(
+                    "future mint quotes must reference a purchase: \
+                     create one at /api/farm/futures/quote and pay it first"
+                        .into(),
+                )
+            })?;
+        // The NUT-20 lock is mandatory — the payment quote itself must
+        // never become a bearer credential someone else can spend.
+        if opts.pubkey.is_none() {
+            return Err(Error::Custom(
+                "future mint quotes must be locked to a wallet key (NUT-20)".into(),
+            ));
+        }
+        let lock_pubkey = opts.pubkey.as_ref().expect("checked").to_string();
+        let purchase = farm
+            .state
+            .authorize_issuance(
+                &purchase_id,
+                &quote_id,
+                &unit,
+                amount.value(),
+                &lock_pubkey,
+            )
+            .await
+            .map_err(|e| Error::Custom(format!("future issuance refused: {e:#}")))?;
+        farm.emit_payment_received(&quote_id, &purchase);
+        Ok(CreateIncomingPaymentResponse {
+            request_lookup_id: PaymentIdentifier::CustomId(quote_id),
+            request: purchase.id.clone(),
+            expiry: opts.unix_expiry,
+            extra_json: Some(serde_json::json!({
+                "rail": "future",
+                "purchase": purchase.id,
+            })),
+        })
     }
 
     async fn onchain_create(
@@ -316,6 +455,9 @@ impl MintPayment for BranchBackend {
         if self.onchain.is_some() {
             custom.insert("btc".to_string(), "{}".to_string());
         }
+        if self.farm.is_some() {
+            custom.insert("future".to_string(), "{}".to_string());
+        }
         Ok(SettingsResponse {
             // The stock boot handshake compares this against the mint's
             // `[[payment_backend]] unit` (strict, modulo sat/msat) — one unit
@@ -355,6 +497,14 @@ impl MintPayment for BranchBackend {
                             Some(_) => self.onchain_create(*opts).await,
                             None => Err(Error::Custom(
                                 "onchain rail is not enabled on this processor".into(),
+                            )),
+                        };
+                    }
+                    "future" => {
+                        return match &self.farm {
+                            Some(_) => self.future_create(*opts).await,
+                            None => Err(Error::Custom(
+                                "farm rail is not enabled on this processor".into(),
                             )),
                         };
                     }
@@ -414,7 +564,6 @@ impl MintPayment for BranchBackend {
         unit: &CurrencyUnit,
         options: OutgoingPaymentOptions,
     ) -> Result<PaymentQuoteResponse, Self::Err> {
-        self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
                 // One-way mint: the ln and onchain rails never melt.
@@ -423,6 +572,85 @@ impl MintPayment for BranchBackend {
                 {
                     return Err(Error::UnsupportedPaymentOption);
                 }
+                // Future melts are farm redemptions: proof burn at the
+                // counter against physical handover (the only exit for a
+                // future — never sats). The UNIT routes them: the gRPC
+                // proto drops the method name (upstream PR #2275), and
+                // melts carry no rail extra, so `method`/extra checks
+                // alone miss — a future: unit is unambiguous.
+                let unit_routes_future =
+                    crate::farm::valid_future_unit(&unit.to_string());
+                if opts.method.trim() == "future"
+                    || future_extra(opts.extra_json.as_deref())
+                    || unit_routes_future
+                {
+                    let farm = self.farm.as_ref().ok_or_else(|| {
+                        Error::Custom("farm rail is not enabled on this processor".into())
+                    })?;
+                    let amount = opts
+                        .amount
+                        .as_ref()
+                        .map(|amount| amount.value())
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            Error::Custom(
+                                "future melt quotes must declare a positive `amount`".into(),
+                            )
+                        })?;
+                    let unit_str = unit.to_string();
+                    farm.state
+                        .redemption_gate(&unit_str, amount)
+                        .await
+                        .map_err(|e| Error::Custom(format!("redemption refused: {e:#}")))?;
+                    // Delivery mode: a `virtual:<dest>` envelope redeems
+                    // in the browser (eggs on the redeemer's screen, no
+                    // teller code — auto-settled once the wallet locks
+                    // funds). Anything else is the counter handover.
+                    // Futures never exit to another rail.
+                    let delivery = parse_payout_envelope(opts.request.trim());
+                    match &delivery {
+                        Some(req) if req.rail == "virtual" => {
+                            if !crate::payout::valid_destination("virtual", &req.destination) {
+                                return Err(Error::Custom("invalid virtual destination".into()));
+                            }
+                        }
+                        Some(req) => {
+                            return Err(Error::Custom(format!(
+                                "future melts support only virtual delivery, not rail '{}'",
+                                req.rail
+                            )));
+                        }
+                        None => {}
+                    }
+                    let quote_id = opts.quote_id.to_string();
+                    let ticket = Ticket::new_outgoing(
+                        quote_id.clone(),
+                        amount,
+                        unit_str.clone(),
+                        Some(format!("farm redemption {unit_str}")),
+                        Some(
+                            delivery
+                                .map(|_| "virtual".to_string())
+                                .unwrap_or_else(|| "farm".to_string()),
+                        ),
+                        Some(unix_now() + MELT_TICKET_TTL_SECS),
+                    );
+                    let ticket = self
+                        .state
+                        .insert_open(ticket)
+                        .await
+                        .map_err(|e| Error::Custom(e.to_string()))?;
+                    return Ok(PaymentQuoteResponse {
+                        request_lookup_id: Some(PaymentIdentifier::CustomId(ticket.id)),
+                        amount: Amount::new(amount, unit.clone()),
+                        fee: Amount::new(0, unit.clone()),
+                        state: MeltQuoteState::Unpaid,
+                        extra_json: None,
+                        estimated_blocks: None,
+                        fee_options: None,
+                    });
+                }
+                self.check_unit(unit)?;
                 // The wallet declares the payout amount in the melt quote
                 // request's `amount` field; the mint requires proofs covering
                 // exactly what we echo back, so misdeclaring cannot profit.
@@ -498,7 +726,6 @@ impl MintPayment for BranchBackend {
         unit: &CurrencyUnit,
         options: OutgoingPaymentOptions,
     ) -> Result<MakePaymentResponse, Self::Err> {
-        self.check_unit(unit)?;
         match options {
             OutgoingPaymentOptions::Custom(opts) => {
                 // One-way mint: the ln and onchain rails never melt.
@@ -506,6 +733,16 @@ impl MintPayment for BranchBackend {
                     || extra_names_rail(opts.extra_json.as_deref())
                 {
                     return Err(Error::UnsupportedPaymentOption);
+                }
+                // Future melts (farm redemptions) carry their own unit;
+                // the base-unit check below does not apply to them. The
+                // UNIT routes: the melt proto drops the method tag (same
+                // PR #2275 gap) and melts carry no rail extra.
+                let future = opts.method.trim() == "future"
+                    || future_extra(opts.extra_json.as_deref())
+                    || crate::farm::valid_future_unit(&unit.to_string());
+                if !future {
+                    self.check_unit(unit)?;
                 }
                 // The wallet has locked its proofs at the mint; flip the ticket
                 // to Pending so the operator may dispense cash. The quote id is
@@ -525,7 +762,15 @@ impl MintPayment for BranchBackend {
                     .mark_outgoing_submitted(&ticket.id)
                     .await
                     .map_err(|e| Error::Custom(e.to_string()))?;
-                if self.autosim {
+                // Virtual egg delivery settles itself the moment the
+                // wallet has locked its proofs — no operator, no code.
+                // It is the farm's own rail, independent of the fiat
+                // demo's autosim flag.
+                if ticket.unit.starts_with("future:")
+                    && ticket.payout_rail.as_deref() == Some("virtual")
+                {
+                    self.spawn_virtual_settle(ticket.id.clone(), ticket.unit.clone(), ticket.amount);
+                } else if self.autosim {
                     if let Some(rail) = ticket.payout_rail.clone() {
                         if let Some(delay) = crate::payout::settle_delay_ms(&rail) {
                             self.spawn_autosim_settle(ticket.id.clone(), rail, delay);
@@ -605,6 +850,18 @@ impl MintPayment for BranchBackend {
                         }]);
                     }
                 }
+                if let Some(farm) = &self.farm {
+                    if let Some((quantity, unit, purchase_id)) = farm.paid_quote(id).await {
+                        return Ok(vec![WaitPaymentResponse {
+                            payment_identifier: PaymentIdentifier::CustomId(id.clone()),
+                            payment_amount: Amount::new(
+                                quantity,
+                                CurrencyUnit::Custom(unit.as_str().into()),
+                            ),
+                            payment_id: purchase_id,
+                        }]);
+                    }
+                }
                 return Ok(Vec::new());
             }
         }
@@ -630,6 +887,14 @@ fn extra_names_rail(extra_json: Option<&str>) -> bool {
         .and_then(|extra| serde_json::from_str::<serde_json::Value>(extra).ok())
         .and_then(|v| v.get("rail").and_then(|r| r.as_str()).map(str::to_string))
         .is_some_and(|rail| rail == "ln" || rail == "btc")
+}
+
+/// True when the flattened extra fields tag the future rail.
+fn future_extra(extra_json: Option<&str>) -> bool {
+    extra_json
+        .and_then(|extra| serde_json::from_str::<serde_json::Value>(extra).ok())
+        .and_then(|v| v.get("rail").and_then(|r| r.as_str()).map(str::to_string))
+        .is_some_and(|rail| rail == "future")
 }
 
 fn unix_now() -> u64 {
@@ -661,8 +926,13 @@ mod tests {
     fn rail_routing_by_method_and_tag() {
         assert_eq!(BranchBackend::rail_of(&opts("ln", None)), "ln");
         assert_eq!(BranchBackend::rail_of(&opts("btc", None)), "btc");
+        assert_eq!(BranchBackend::rail_of(&opts("future", None)), "future");
         assert_eq!(BranchBackend::rail_of(&opts("", Some(r#"{"rail":"ln"}"#))), "ln");
         assert_eq!(BranchBackend::rail_of(&opts("", Some(r#"{"rail":"btc"}"#))), "btc");
+        assert_eq!(
+            BranchBackend::rail_of(&opts("", Some(r#"{"rail":"future"}"#))),
+            "future"
+        );
         // Default and malformed input route to the teller rail.
         assert_eq!(BranchBackend::rail_of(&opts("", None)), "branch");
         assert_eq!(BranchBackend::rail_of(&opts("", Some("not json"))), "branch");
@@ -699,6 +969,7 @@ mod tests {
                 None,
                 rails_from_config(rails),
                 false,
+                None,
             )
         }
 

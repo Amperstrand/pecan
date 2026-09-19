@@ -128,6 +128,10 @@ pub fn valid_destination(rail: &str, dest: &str) -> bool {
         // the ev-charge adapter against real hardware — it must never be
         // added to SIMULATED_RAILS or autosimmed.
         "ev" => valid_device_slug(dest),
+        // Imaginary eggs, delivered on the redeemer's screen: the
+        // destination is a free-form label ("screen"). Settles
+        // instantly through the farm's virtual-delivery path.
+        "virtual" => !dest.trim().is_empty(),
         _ => false,
     }
 }
@@ -201,6 +205,15 @@ pub fn receipt_for_rail(rail: &str) -> Option<String> {
         "mobilepay" => format!("MP-{}", digits(10)),
         "ideal" => digits(16),
         "bizum" => format!("BZ{}", digits(10)),
+        // The physical-futures rail: date-tagged handover receipt
+        // (FARM-yymmdd) — the Lightning-preimage analogue for eggs at
+        // the counter.
+        "farm" => format!("FARM-{}-{:08X}", yymmdd_now(), rand::thread_rng().gen::<u32>()),
+        "virtual" => format!(
+            "FARM-VIRTUAL-{}-{:08X}",
+            yymmdd_now(),
+            rand::thread_rng().gen::<u32>()
+        ),
         _ => return None,
     })
 }
@@ -340,6 +353,9 @@ mod tests {
         assert_eq!(receipt_for_rail("ideal").unwrap().len(), 16);
         let bz = receipt_for_rail("bizum").unwrap();
         assert!(bz.starts_with("BZ") && bz.len() == 12);
+        let farm = receipt_for_rail("farm").unwrap();
+        assert!(farm.starts_with("FARM-"));
+        assert_eq!(farm.len(), "FARM-".len() + 7 + 8);
         assert!(receipt_for_rail("wire").is_none());
         assert!(settle_delay_ms("sepa") > settle_delay_ms("sepa-instant"));
         assert!(settle_delay_ms("teller-none").is_none());

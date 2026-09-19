@@ -21,6 +21,7 @@ mod backends;
 mod checks;
 mod clients;
 mod config;
+mod farm;
 mod fleet;
 mod ln;
 mod onchain;
@@ -341,7 +342,7 @@ async fn main() -> Result<()> {
                     .and_then(|v| v.trim().parse().ok())
                     .unwrap_or(1);
                 let rail = onchain::OnchainRail::start(
-                    cln_client.expect("onchain enabled implies client"),
+                    cln_client.clone().expect("onchain enabled implies client"),
                     Arc::new(ln::Fx::new(app_config.unit.clone(), Some(rate_url), markup)),
                     confirmations,
                     url.trim().trim_end_matches('/').to_string(),
@@ -369,6 +370,21 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Farm rail (NUT-32 futures spike): raw-sat egg-futures purchases on
+    // the same CLN socket, series/terms ledger, redemption gating.
+    let farm_rail = match farm::FarmConfig::from_env() {
+        Some(farm_config) => {
+            let farm_state = farm::FarmState::load(&work_dir, farm_config).await?;
+            let socket = std::env::var("CDK_BRANCH_PROCESSOR_CLN_SOCKET")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/run/lightning-rpc"));
+            let cln = cln_client.clone().unwrap_or_else(|| Arc::new(ln::ClnClient::new(socket)));
+            let mint_url = app_config.mint_url.clone();
+            Some(farm::FarmRail::start(farm_state, cln, mint_url, branch.event_sender()))
+        }
+        None => None,
+    };
+
     let backend = Arc::new(BranchBackend::new(
         branch.clone(),
         unit,
@@ -381,6 +397,7 @@ async fn main() -> Result<()> {
         std::env::var("CDK_BRANCH_PROCESSOR_PAYOUT_AUTOSIM")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false),
+        farm_rail.clone(),
     ));
     let mut server = PaymentProcessorServer::new(backend.clone(), &grpc_addr, grpc_port)
         .map_err(|e| anyhow!("payment processor server init: {e}"))?;
@@ -414,6 +431,14 @@ async fn main() -> Result<()> {
         self_test_running.clone(),
     );
 
+    // Farm redemption accounting follows the teller ticket store (the
+    // authoritative burn record) — recount once at boot so a crash between
+    // ticket-settle and the farm's counter self-heals.
+    if let Some(farm) = &farm_rail {
+        let paid = web::paid_future_tickets(&branch).await;
+        farm.state.recount_redeemed(&paid).await;
+    }
+
     let app = web::router(web::WebState::new(
         branch,
         backend,
@@ -427,6 +452,7 @@ async fn main() -> Result<()> {
         published_grpc_port,
         self_test,
         self_test_running,
+        farm_rail,
     ));
 
     tracing::info!("branch-processor HTTP on {http_socket}");

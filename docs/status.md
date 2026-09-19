@@ -1,11 +1,55 @@
 # Pecan + EV rail — status, limitations, and where to go next
 
-Snapshot: 2026-09-15 (updated after the hygiene round — canonical pair
-manifest, NOK into backup/smoke/reconcile, one deploy image tag, ev on
-USD, fleet card; see the 2026-09-15 section). Live at
-https://giftcard.cashu.exchange. This is
-the honest map of what works, what is known-broken or limited, and the
-ranked backlog. Keep it current when the picture changes.
+Snapshot: 2026-09-17 (NUT-32 egg-futures spike landed — a fourth `farm`
+pair with dated `future:farm-egg:<maturity>` series, wallet-bound
+issuance against real signet payments, bearer transfer, teller
+redemption; see docs/egg-futures-spike.md). Live at
+https://giftcard.cashu.exchange. This is the honest map of what works,
+what is known-broken or limited, and the ranked backlog. Keep it current
+when the picture changes.
+
+Update 2026-09-18 (farm-ux round): the farm pair is now an **egg
+vending machine** — the day's eggs sell for the whole production day
+(same-day purchase at any hour; sales close at UTC midnight), and
+redemption is **claim-it-or-lose-it**: claims are collectable 24/7
+on, and only on, their production date. Delivery is best-effort
+(imaginary eggs); what actually happened at handover is recorded on
+the settle (delivered + free-form condition — the exploration hook
+for broken/out-of-stock studies). The /redeem **claims portal** shares
+the wallet's redemption flow (one module, two faces: self-service and
+teller console) with a paste-code path and date-aware verdict; the
+wallet links to it. Purchase resume: a page closed between payment
+and mint no longer orphans the purchase. Supply hygiene: autopay pays
+only demo-sized purchases (a paid capacity-test grab once locked a
+whole day for 24h), the capacity e2e grabs the horizon's last day,
+future series capacity is 100k. `make farm-demo` runs the whole story
+in a visible browser. e2e 4 green + 1 skip pending coco's addMint
+keyset debt (fresh-context main-thread wedge). Known noise: farm
+reconcile writes off two stale classes as notes (09-17 campaign
+debris) — verdict PASS.
+
+Update 2026-09-19 (virtual delivery round): **/redeem serves at the
+domain root** (it used to answer with the parked marketing page —
+also the real cause of the early "kiosk e2e ghosts") and redemption
+there is fully self-service: a `virtual:screen` melt envelope routes
+the ticket to the virtual rail, the processor re-runs the redemption
+gate when the wallet locks proofs, auto-setttes with receipt
+`FARM-VIRTUAL-…` and the delivery line recording "delivered on
+screen" — no teller code, no operator — and the kiosk pops the eggs
+in animated. Counter handover remains (wallet panel + kiosk secondary
+button). The Caddyfile is repo-tracked (`deploy/Caddyfile.giftcard`)
+and api-smoke now FAILS if the live wallet bundle loses the farm
+panel — a concurrent deployer on the network reverted it twice
+(09-17, 09-19 14:12 UTC); finding/stopping that pipeline is an open
+ops item. Also fixed: `next-friday` u32 underflow on weekends, and
+farm unit tests re-dated to relative days. Verification: 102
+processor tests, vitest 83, farm e2e 5/5 (sarah incl. counter
+delivery-line settle, capacity, same-day window, purchase resume,
+autopay-fast projection self-heal); the portal e2e
+(farm-portal.spec.ts) passed end-to-end once (20s) and is skip-pinned
+on coco's fresh-context boot wedge — **fixing coco's addMint keyset
+crawl is the top-ranked next work**: demo first-load, kiosk import,
+and e2e stability all collapse onto it.
 
 ## Architecture snapshot
 
@@ -184,6 +228,8 @@ suffix glued to a unit password → 401 loop → login-throttle storm
 self-sustains it). ev-charge-deploy.sh now refreshes unit passwords
 on every rewrite.
 
+
+
 ## Narrated-movie round 2026-09-17 (evening)
 
 The full cut now ships as alice-final.mp4 WITH VOICEOVER: the spec
@@ -249,6 +295,8 @@ fixed here: reconcile no longer flags the #13 daemon's terminal
 failed-and-rolled-back melts as drift (the class that had api-smoke
 red on the morning of 2026-09-17).
 
+
+
 ## Metered-truth round 2026-09-16 (evening)
 
 #30 layer A + #31 shipped: the gateway is repo-tracked
@@ -263,6 +311,10 @@ frame review). charger-v @smoke pins elapsed-vs-budget (a constant-
 rate contract cannot pass it). Public live pole:
 https://giftcard.cashu.exchange/chargepoint.html (CORS-open
 /atom-gateway/public/{id}).
+
+/atom-gateway/public/{id}). Remaining for #30: €/kWh pricing (layer
+B — wallet copy, e2e budgets, daemon tariff). Wallet copy now reads
+"1 € = 1 kW·s, billed by the car's meter".
 
 ## Alice movie round 2026-09-16
 

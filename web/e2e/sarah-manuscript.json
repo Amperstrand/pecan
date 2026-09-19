@@ -1,0 +1,25 @@
+{
+  "voice": "am_michael",
+  "speed": 0.94,
+  "lines": [
+    { "id": "l01", "text": "Sarah wants eggs next Friday. On signet, that's a futures contract — a Cashu future." },
+    { "id": "l02", "text": "Each production day is its own series. The unit names the farm, the commodity, and the maturity. Friday's eggs are not Saturday's eggs." },
+    { "id": "l03", "text": "The terms are a small signed document, and its SHA-256 digest is its address. Every proof's secret carries one tag pointing at it." },
+    { "id": "l04", "text": "Sarah picks a production day. Five eggs, twenty-one sats each." },
+    { "id": "l05", "text": "One hundred and five sats. A real Lightning invoice on signet." },
+    { "id": "l06", "text": "Paid. The mint issues exactly five claims, locked to Sarah's wallet key." },
+    { "id": "l07", "text": "Five bearer claims — the details show the unit, the terms digest, and the maturity." },
+    { "id": "l08", "text": "The farm's ledger counts totals only. A claim beyond capacity simply cannot be minted." },
+    { "id": "l09", "text": "Sarah gives Bob two of her notes. Not a payment — a handover, like cash." },
+    { "id": "l10", "text": "Here's what she hands him: the mint, the unit, and two proofs — Sarah's proofs." },
+    { "id": "l11", "text": "Bob's wallet takes them straight to the mint and swaps them: Sarah's notes are burned." },
+    { "id": "l12", "text": "The mint issues fresh proofs of the same future — same unit, same terms tag, but brand-new secrets. Only Bob's keys can spend them now." },
+    { "id": "l13", "text": "Sarah keeps three. The farm's ledger never moved." },
+    { "id": "l14", "text": "Friday, four p.m. — the series matures. For the film, we advance the clock with the admin override." },
+    { "id": "l15", "text": "Bob redeems two at the counter. The wallet burns the proofs and shows the teller a code." },
+    { "id": "l16", "text": "The operator matches the code, hands over two eggs, and settles. Until that moment, nothing is consumed." },
+    { "id": "l17", "text": "Redeemed. The spent proofs can never be spent again." },
+    { "id": "l18", "text": "Signet sats in. Dated bearer claims out. Hand to hand, no registry. Physical redemption at maturity." },
+    { "id": "l19", "text": "NUT-32, draft one — live on signet, enforced by the mint, and checked end to end by automated tests." }
+  ]
+}

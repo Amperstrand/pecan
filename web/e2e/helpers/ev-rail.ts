@@ -21,7 +21,9 @@ export async function bootAndFund(page: Page, consoleBase: string, minBalance: n
   await page.goto(`${consoleBase}/wallet`)
   await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible()
   if ((await readBalance(page)) < minBalance) {
-    await page.getByPlaceholder("5.00").fill("15")
+    // Top up to what the caller needs (metered-truth budgets run larger
+    // than the historical €15) — one deposit, rounded up to whole euros.
+    await page.getByPlaceholder("5.00").fill(String(Math.max(15, Math.ceil(minBalance))))
     await page.getByRole("button", { name: "Create deposit quote" }).click()
     const depCode = await readTellerCode(page)
     const password = process.env.PECAN_ADMIN_PASSWORD!

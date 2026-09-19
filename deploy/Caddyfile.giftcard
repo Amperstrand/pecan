@@ -1,0 +1,571 @@
+# Authoritative copy of giftcard.cashu.exchange caddy config (inr2 /etc/caddy/Caddyfile).
+# Hand-edited on the server for too long — this file is now the reference;
+# scripts/api-smoke.sh warns on drift. Apply changes BOTH here and on the
+# server (edit here, then scp).
+{
+	on_demand_tls {
+		ask http://127.0.0.1:9090/api/tls-check
+	}
+}
+
+vipps.cashu.exchange {
+	log {
+	}
+	root * /var/www/vipps.cashu.exchange
+
+	@html path /index.html
+	header @html Cache-Control "no-cache, no-store, must-revalidate"
+	header @html Pragma "no-cache"
+	header @html Expires "0"
+
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	handle /v1/* {
+		reverse_proxy localhost:8085
+	}
+
+	handle /assets/* {
+		file_server
+		respond 404
+	}
+
+	handle /mint-proxy/* {
+		uri strip_prefix /mint-proxy
+		reverse_proxy https://testnut.cashu.space {
+			header_up Host testnut.cashu.space
+		}
+		header {
+			Access-Control-Allow-Origin *
+			Access-Control-Allow-Methods "GET, POST, OPTIONS"
+			Access-Control-Allow-Headers "Content-Type"
+		}
+	}
+
+	handle {
+		try_files {path} {path}/index.html /index.html
+		file_server
+	}
+}
+
+wallet.cashu.exchange {
+	log {
+	}
+	redir https://temporarywallet.cashu.exchange{uri} permanent
+}
+
+temporarywallet.cashu.exchange {
+	log {
+	}
+	root * /var/www/vipps.cashu.exchange
+
+	@html path /index.html
+	header @html Cache-Control "no-cache, no-store, must-revalidate"
+	header @html Pragma "no-cache"
+	header @html Expires "0"
+
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	handle /v1/* {
+		reverse_proxy localhost:8085
+	}
+
+	handle /assets/* {
+		file_server
+	}
+
+	handle /mint-proxy/* {
+		uri strip_prefix /mint-proxy
+		reverse_proxy https://testnut.cashu.space {
+			header_up Host testnut.cashu.space
+		}
+		header {
+			Access-Control-Allow-Origin *
+			Access-Control-Allow-Methods "GET, POST, OPTIONS"
+			Access-Control-Allow-Headers "Content-Type"
+		}
+	}
+
+	handle {
+		try_files {path} {path}/index.html /index.html
+		file_server
+	}
+}
+
+ws.vipps.cashu.exchange {
+	log {
+	}
+	reverse_proxy localhost:50052
+}
+
+nodns.shop {
+	log {
+	}
+
+	handle /nomail-mint/* {
+		uri strip_prefix /nomail-mint
+		reverse_proxy 127.0.0.1:2052
+	}
+	handle /.well-known/* {
+		reverse_proxy 127.0.0.1:9090
+	}
+
+	handle /v1/* {
+		reverse_proxy localhost:8094
+	}
+
+	handle /vms/* {
+		reverse_proxy localhost:8094
+	}
+
+	handle /mint/* {
+		uri strip_prefix /mint
+		reverse_proxy localhost:3341
+	}
+
+	handle /downloads/* {
+		uri strip_prefix /downloads
+		root * /var/www/downloads
+		file_server
+	}
+
+	handle /api/payment/* {
+
+		reverse_proxy localhost:8094
+	}
+
+	handle /api/* {
+
+		reverse_proxy 127.0.0.1:9090
+	}
+
+	header /api/* {
+		Access-Control-Allow-Origin *
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type, X-Nostr-Npub"
+		Access-Control-Max-Age 3600
+	}
+
+	handle /api/mint {
+
+		reverse_proxy localhost:8095
+	}
+
+	handle /webssh/* {
+		uri strip_prefix /webssh
+		reverse_proxy localhost:8092 {
+			flush_interval -1
+		}
+	}
+
+	handle /ws {
+		reverse_proxy localhost:7682 {
+			flush_interval -1
+		}
+	}
+	handle {
+		redir https://amperstrand.github.io/nodns-poc{uri} permanent
+	}
+}
+
+ssh.nodns.shop {
+	log {
+	}
+	tls {
+		on_demand
+	}
+	reverse_proxy localhost:8092
+}
+
+ocpi.nodns.shop {
+	log {
+	}
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:8093
+}
+
+*.nodns.shop {
+	log {
+	}
+	tls {
+		on_demand
+	}
+
+	redir https://amperstrand.github.io/nodns-poc/search?q={host} permanent
+}
+
+dns.nodns.shop {
+	log {
+	}
+	tls {
+		on_demand
+	}
+	handle / {
+		root * /var/www/dns-nodns-shop
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle /dns-query/premium {
+		forward_auth 127.0.0.1:9090 {
+			uri /api/resolver/auth
+			copy_headers X-Subscription
+		}
+		reverse_proxy https://127.0.0.1:8054 {
+			transport http {
+				tls_insecure_skip_verify
+			}
+		}
+		header {
+			Content-Type application/dns-message
+			Access-Control-Allow-Origin *
+			Access-Control-Allow-Methods "GET, POST, OPTIONS"
+			Access-Control-Allow-Headers "Content-Type, X-Subscription"
+		}
+	}
+	handle /dns-query {
+		reverse_proxy https://127.0.0.1:8053 {
+			transport http {
+				tls_insecure_skip_verify
+			}
+		}
+		header {
+			Content-Type application/dns-message
+			Access-Control-Allow-Origin *
+			Access-Control-Allow-Methods "GET, POST, OPTIONS"
+			Access-Control-Allow-Headers "Content-Type"
+		}
+	}
+	handle /api/resolver/* {
+
+		reverse_proxy 127.0.0.1:9090
+	}
+}
+
+http://dns4sats.xyz {
+	root * /var/www/dns4sats-liar
+	encode gzip
+	try_files {path} /index.html
+	file_server
+}
+
+ssh.cashu.email {
+	log {
+	}
+	reverse_proxy localhost:8092 {
+		flush_interval -1
+	}
+}
+
+faucet.cashu.email {
+	log {
+	}
+	root * /opt/cashu-tollgate/faucet
+	file_server
+	try_files {path} /index.html
+}
+
+opencpo.nodns.shop {
+	log {
+	}
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:8080
+}
+
+farm.nodns.shop {
+	log {
+	}
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:8087
+}
+
+eur-mint.nodns.shop {
+	log {
+	}
+	tls {
+		on_demand
+	}
+	@blocked path /v1/mint/* /v1/swap/*
+	handle @blocked {
+		respond 403
+	}
+	handle {
+		reverse_proxy 127.0.0.1:3340
+	}
+}
+
+credits.nodns.shop {
+		tls {
+		on_demand
+	}
+	reverse_proxy localhost:8093
+}
+
+# CLN signet node REST API for signut Cashu mint backend (ISSUE-065 signut)
+clnrest.signet.cashu.exchange {
+	handle /atom-bridge/* {
+		uri strip_prefix /atom-bridge
+		reverse_proxy 127.0.0.1:8099
+	}
+	log {
+	}
+	@allowedmethods method POST GET OPTIONS
+	handle {
+		reverse_proxy 127.0.0.1:3010
+	}
+}
+
+# giftcard-mint (managed by scripts/tls-cutover.sh)
+# Site block appended to the existing /etc/caddy/Caddyfile on inr2 by
+# scripts/tls-cutover.sh. Serves the web wallet (static) with /api/* proxied
+# to the laptop wallet backend (via reverse tunnel on 127.0.0.1:3000) and
+# the Cashu mint API on /v1/* (cdk-mintd on 127.0.0.1:8089).
+
+# giftcard-mint (pecan + wallet + mint proxy)
+giftcard.cashu.exchange {
+	handle /atom-gateway/* {
+		uri strip_prefix /atom-gateway
+		reverse_proxy 127.0.0.1:8099
+	}
+	encode gzip
+
+	# USD twin (see docs/lightning-mint.md / issue #4): mint at /usd path,
+	# its pecan console under /usd-console. EUR keeps the root paths.
+	handle /usd/v1/* {
+		uri strip_prefix /usd
+		reverse_proxy 127.0.0.1:8097 {
+			transport http {
+				response_header_timeout 120s
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	handle /usd-console/* {
+		uri strip_prefix /usd-console
+		reverse_proxy 127.0.0.1:9093 {
+			transport http {
+				response_header_timeout 120s
+				read_timeout 300s
+			write_timeout 300s
+		}
+		}
+	}
+
+	# Path convention: {currency}/v1/* for each mint pair, {currency}-console/*
+	# for its pecan. Root /v1 and /console are RESERVED for a future sats pair.
+	handle /eur/v1/* {
+		uri strip_prefix /eur
+		reverse_proxy 127.0.0.1:8089 {
+			transport http {
+				response_header_timeout 120s
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	handle /eur-console/assets/* {
+		uri strip_prefix /eur-console
+		reverse_proxy 127.0.0.1:9091
+	}
+
+	handle /eur-console/* {
+		uri strip_prefix /eur-console
+		reverse_proxy 127.0.0.1:9091 {
+			transport http {
+				response_header_timeout 120s
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	handle /ops/metrics/eur {
+		basic_auth {
+			ops $2a$14$Srzlip5dx82aE5SL9vz0m.1qyGnqZoqr6LZRJfvlkb1yHGtNcQ3lS
+		}
+		rewrite * /metrics
+		reverse_proxy 127.0.0.1:9095
+	}
+
+	handle /ops/metrics/usd {
+		basic_auth {
+			ops $2a$14$Srzlip5dx82aE5SL9vz0m.1qyGnqZoqr6LZRJfvlkb1yHGtNcQ3lS
+		}
+		rewrite * /metrics
+		reverse_proxy 127.0.0.1:9096
+	}
+
+	handle_path /ops/* {
+		root * /opt/pecan-tools
+		file_server
+	}
+
+	# Wallet at the root domain: the bundle is identical across pairs and
+	# the ACTIVE currency lives in the wallet localStorage — the URL never
+	# encodes it. Either pecan instance serves it; EUR is nominal.
+	# Cache hygiene: hashed assets are content-addressed (immutable);
+	# the wallet shell and manifest must always revalidate so a redeploy
+	# is picked up on the next load instead of serving a stale reference
+	# to a bundle hash that no longer exists (2026-09-17 incident).
+	handle /wallet {
+		reverse_proxy 127.0.0.1:9091 {
+			header_down Cache-Control "no-cache"
+		}
+	}
+	handle /wallet-classic {
+		reverse_proxy 127.0.0.1:9091 {
+			header_down Cache-Control "no-cache"
+		}
+	}
+	# The claims portal (egg kiosk) rides the same rule as the wallet:
+	# one bundle, any pair may serve it; no-cache for redeploy pickup.
+	handle /redeem {
+		reverse_proxy 127.0.0.1:9091 {
+			header_down Cache-Control "no-cache"
+		}
+	}
+	# Grace window: archived bundles from previous deploys keep serving so
+	# cached shells from before a redeploy stay functional until the user
+	# reloads; unknown (current, not-yet-archived) hashes go to the processor.
+	@archived_asset file /var/www/pecan-assets-archive{path}
+	handle /assets/* {
+		handle @archived_asset {
+			root * /var/www/pecan-assets-archive
+			file_server
+			header Cache-Control "public, max-age=31536000, immutable"
+		}
+		handle {
+			reverse_proxy 127.0.0.1:9091 {
+				header_down Cache-Control "public, max-age=31536000, immutable"
+			}
+		}
+	}
+	handle /manifest.webmanifest {
+		reverse_proxy 127.0.0.1:9091 {
+			header_down Cache-Control "no-cache"
+		}
+	}
+	handle /favicon.svg {
+		reverse_proxy 127.0.0.1:9091
+	}
+	handle /static/* {
+		reverse_proxy 127.0.0.1:9091
+	}
+
+	# reserved: nothing serves the root API until the sats pair exists
+	handle /v1/* {
+		respond 404
+	}
+
+	handle {
+		root * /var/www/giftcard.cashu.exchange
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+
+	log {
+	}
+
+# NOK pair (2026-09-14): mint at /nok, console at /nok-console
+handle /farm/v1/* {
+	uri strip_prefix /farm
+	reverse_proxy 127.0.0.1:8100 {
+		transport http {
+			response_header_timeout 120s
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+}
+handle /farm-console/assets/* {
+	uri strip_prefix /farm-console
+	reverse_proxy 127.0.0.1:9101
+}
+handle /farm-console/* {
+	uri strip_prefix /farm-console
+	reverse_proxy 127.0.0.1:9101 {
+		transport http {
+			response_header_timeout 120s
+			read_timeout 300s
+		}
+	}
+}
+handle /nok/v1/* {
+	uri strip_prefix /nok
+	reverse_proxy 127.0.0.1:8098 {
+		transport http {
+			response_header_timeout 120s
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+}
+
+handle /nok-console/* {
+	uri strip_prefix /nok-console
+	reverse_proxy 127.0.0.1:9097 {
+		transport http {
+			response_header_timeout 120s
+			read_timeout 300s
+		}
+	}
+}
+}
+
+
+http://46.224.104.12 {
+	log
+	handle_path /nomail-mint/* {
+		reverse_proxy 127.0.0.1:2052
+	}
+}
+
+signet-mint.nodns.shop {
+	log {
+	}
+	tls {
+		on_demand
+	}
+	handle {
+		reverse_proxy 127.0.0.1:2052
+	}
+}
+
+# CDK signet pilot mint for cashu-cf shadow audit (ISSUE-095)
+cdk.signet.cashu.exchange {
+	reverse_proxy 127.0.0.1:8190
+}
+
+spark.cashu.exchange {
+	log
+	reverse_proxy 127.0.0.1:3338
+}
+
+mutiny.spark.cashu.exchange {
+	log
+	reverse_proxy 127.0.0.1:3339
+}
+
+clnrest.mutinynet.cashu.exchange {
+	log
+	@allowedmethods method POST GET OPTIONS
+	handle {
+		reverse_proxy 127.0.0.1:3012
+	}
+}

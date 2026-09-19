@@ -25,17 +25,28 @@ export async function apiLogin(
   if (resp.status() !== 200) throw new Error(`admin login failed: ${resp.status()}`)
 }
 
+export interface SettleDelivery {
+  /** Units actually handed over (best-effort rails settle full but
+   * record the shortfall for later analysis). */
+  delivered?: number
+  /** Free-form delivery condition ("broken", "out-of-stock", …). */
+  condition?: string
+}
+
 export async function matchAndSettle(
   page: Page,
   tellerCode: string,
   notes: string,
   base = "",
+  delivery: SettleDelivery = {},
 ): Promise<{
   id: string
   kind: string
   status: string
   amount: number
   unit?: string
+  delivered?: number
+  condition?: string
 }> {
   const matchResp = await page.request.post(`${base}/api/quotes/match`, {
     headers: { "Content-Type": "application/json" },
@@ -67,7 +78,7 @@ export async function matchAndSettle(
     `${base}/api/tickets/${match.id}/mark-paid`,
     {
     headers: { "Content-Type": "application/json" },
-    data: { notes },
+    data: { notes, ...delivery },
   })
   if (settleResp.status() !== 200) {
     throw new Error(`mark-paid failed for ${match.id}: ${settleResp.status()} ${await settleResp.text()}`)
@@ -115,9 +126,52 @@ export function decodeInvoiceDescription(invoice: string): string {
   return JSON.parse(`"${match[1]}"`) as string
 }
 
-/** Pays from the hub node (well-connected, multiple channels). */
+/**
+ * Pays from the lab nodes, failing over: the hub is usually the best
+ * connected, but its channel to a given mint node can be locally
+ * disabled (seen 2026-09-16: hub→farm mint channels dark, clboss fine).
+ */
+const LIGHTNING_PAYERS = [
+  "cln-hub-signet",
+  "cln-clboss-signet",
+  "cln-nostr-signet",
+  "cln-vls-signet",
+] as const
+
+/**
+ * The farm/LN e2es pay INVOICES HELD BY cln-swap (the mint's node), so
+ * every run drains the payers' side of the hub↔swap channels. This
+ * pushes liquidity back by paying a hub-held invoice from cln-swap —
+ * best-effort; a failure just means routes are already fine (or the
+ * rebalance can wait).
+ */
+export function rebalanceSwapChannels(sat = 20_000): void {
+  try {
+    const inv = execSync(
+      `ssh -o BatchMode=yes root@46.224.104.12 "docker exec cln-hub-signet lightning-cli --network=signet invoice ${sat * 1000}msat farm-e2e-rebalance rebalance"`,
+      { timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
+    ).toString()
+    const bolt11 = inv.match(/"bolt11":\s*"((?:[^"\\]|\\.)*)"/)?.[1]
+    if (!bolt11) return
+    execSync(
+      `ssh -o BatchMode=yes root@46.224.104.12 "docker exec cln-swap-signet lightning-cli --network=signet pay ${bolt11}"`,
+      { timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
+    )
+  } catch {
+    // best-effort rig maintenance
+  }
+}
+
 export function payLightningInvoice(invoice: string): string {
-  return payLightningInvoiceFrom("cln-hub-signet", invoice)
+  const failures: string[] = []
+  for (const node of LIGHTNING_PAYERS) {
+    try {
+      return payLightningInvoiceFrom(node, invoice)
+    } catch (err) {
+      failures.push(`${node}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  throw new Error(`lightning pay failed on all nodes:\n${failures.join("\n")}`)
 }
 
 /**

@@ -1,0 +1,53 @@
+# Farm pair (NUT-32 egg-futures spike): pecan processor only.
+# The mint (giftcard-mint-farm-mintd-1, the NUT-32 fork image
+# cashubtc/mintd:nut32) is managed by its own compose at
+# /opt/giftcard-mint-farm — NOT here. Ports: gRPC :50058, HTTP :9101.
+#
+# See docs/egg-futures-spike.md for the rail design. Signet only.
+services:
+  pecan:
+    image: pecan:deployment
+    command: ["cdk-branch-processor"]
+    network_mode: host
+    environment:
+      RUST_LOG: "info,cdk_payment_processor=info"
+      CDK_BRANCH_PROCESSOR_WORK_DIR: /var/lib/cdk-branch-processor
+      CDK_BRANCH_PROCESSOR_CONFIG_DIR: /var/lib/pecan/config
+      CDK_BRANCH_PROCESSOR_GRPC_ADDR: "127.0.0.1"
+      CDK_BRANCH_PROCESSOR_GRPC_PORT: "50058"
+      CDK_BRANCH_PROCESSOR_HTTP_ADDR: "127.0.0.1"
+      CDK_BRANCH_PROCESSOR_HTTP_PORT: "9101"
+      CDK_BRANCH_PROCESSOR_INITIAL_UNIT: "farm"
+      CDK_BRANCH_PROCESSOR_INITIAL_MINT_URL: "http://127.0.0.1:8100"
+      CDK_BRANCH_PROCESSOR_INITIAL_ADVERTISED_GRPC: "127.0.0.1:50058"
+      # Same signet CLN socket as the fiat pairs — Sarah's payment is a
+      # raw-sat bolt11 (no FX), created and watched by the farm rail.
+      CDK_BRANCH_PROCESSOR_CLN_SOCKET: "/run/pecan-cln/signet/lightning-rpc"
+      # The farm rail: series bootstrap (daily egg series, signed
+      # content-addressed terms via the mintd NUT-32 admin routes),
+      # purchases + capacity, redemption gating.
+      CDK_BRANCH_PROCESSOR_FARM: "true"
+      CDK_BRANCH_PROCESSOR_FARM_PRICE_SATS: "21"
+      CDK_BRANCH_PROCESSOR_FARM_CAPACITY: "100000"
+      CDK_BRANCH_PROCESSOR_FARM_HORIZON_DAYS: "10"
+      # Structural only (the unit grammar needs SOME hour). Delivery is
+      # best-effort — no promised times; the day's eggs sell until UTC
+      # midnight (egg vending machine).
+      CDK_BRANCH_PROCESSOR_FARM_MATURITY_HOUR_UTC: "6"
+      CDK_BRANCH_PROCESSOR_FARM_PUBLIC_BASE_URL: "https://giftcard.cashu.exchange/farm-console"
+      CDK_BRANCH_PROCESSOR_FARM_MINT_PUBLIC_URL: "https://giftcard.cashu.exchange/farm"
+      CDK_BRANCH_PROCESSOR_FARM_MINTD_ADMIN_URL: "http://127.0.0.1:8100"
+      CDK_BRANCH_PROCESSOR_FARM_MINTD_ADMIN_TOKEN: "${PECAN_FARM_MINTD_ADMIN_TOKEN:?set in /opt/pecan-farm/.env}"
+      # Teller rail stays available for self-test wiring; futures never
+      # melt to sats — redemption rides the `future` melt method.
+      CDK_BRANCH_PROCESSOR_PAYOUT_RAILS: ""
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - /opt/pecan-farm-data:/var/lib/cdk-branch-processor
+      - /opt/pecan-farm-config:/var/lib/pecan/config
+      - /opt/inr2-swapnet/cln-swap-data:/run/pecan-cln
+    restart: unless-stopped

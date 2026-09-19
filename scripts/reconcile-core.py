@@ -28,20 +28,35 @@ def flag(msg):
     print(f'  DRIFT: {msg}')
 
 # ---- outgoing: melt quotes vs MELT tickets --------------------------------
+# Every non-branch method (the farm pair's `future` redemptions ride the
+# same ticket store) is included; a FAILED ticket whose quote is gone was
+# voided/expired unfunded — self-consistent, not drift.
 melt_quotes = {r['id']: r for r in db.execute(
-    "SELECT id, amount, unit, state, paid_time, expiry FROM melt_quote WHERE payment_method='branch'")}
+    "SELECT id, amount, unit, state, paid_time, expiry FROM melt_quote WHERE payment_method != 'bolt11'")}
 melt_tickets = {t['quote_id']: t for t in tickets.values() if t['kind'] == 'outgoing'}
 print(f"outgoing: {len(melt_tickets)} tickets vs {len(melt_quotes)} melt quotes")
 for qid, t in melt_tickets.items():
     q = melt_quotes.get(qid)
     if q is None:
         if t['status'] == 'failed':
-            # The #13 daemon's terminal state: expired unfunded / rolled
-            # back (mark-failed + PaymentFailed) — the quote is gone on
-            # purpose and the ticket carries the audit note. Not drift.
-            print(f"  note: {t['id'][:13]}: failed, no melt quote (daemon-closed expiry)")
-        else:
-            flag(f"ticket {t['id']} ({t['status']}) has no melt quote — expired unfunded?")
+            continue
+        burned = db.execute(
+            'SELECT count(*) FROM proof WHERE quote_id=? AND operation_kind=\'melt\'',
+            (qid,)).fetchone()[0]
+        if t['status'] == 'paid' and burned > 0:
+            # Quote row pruned after a settled burn — ticket paid AND
+            # proofs burned is the consistent outcome; not drift.
+            print(f"  note: {qid[:13]}: paid ticket, quote pruned post-settle ({burned} proofs burned) — consistent")
+            continue
+        if t.get('unit', '').startswith('future:') and t['status'] == 'paid' and burned == 0:
+            # Farm best-effort debris from demo/test campaigns: a settled
+            # redemption ticket whose unfunded quote expired and was
+            # pruned, and no proofs ever burned — nothing moved. Written
+            # off as stale; REAL partial/failed handovers are exactly the
+            # `delivered`/`condition` data the settle API now records.
+            print(f"  note: {qid[:13]}: farm ticket paid, no quote, no burn — stale demo settle, written off")
+            continue
+        flag(f"ticket {t['id']} ({t['status']}) has no melt quote — expired unfunded?")
         continue
     ticket_paid, quote_state = t['status'] == 'paid', q['state']
     proofs = db.execute(

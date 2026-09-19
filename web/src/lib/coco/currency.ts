@@ -10,7 +10,7 @@
 // The customer wallet talks to mint URLs directly; pecan-scoped endpoints
 // (onchain-status, teller login) use the console path per currency.
 
-export type Currency = "eur" | "nok" | "usd" | "sat"
+export type Currency = "eur" | "nok" | "usd" | "sat" | "farm"
 
 export interface CurrencyConfig {
   /**
@@ -89,6 +89,22 @@ export const CURRENCIES: Record<Currency, CurrencyConfig> = {
     step: "1",
     hasRails: false,
     nut17: false,
+  },
+  farm: {
+    // The NUT-32 egg-futures pair (spike): the mint's units are per-day
+    // future:farm-egg:<maturity> series, NOT a base "farm" currency —
+    // balances render through the farm panel, not the fiat forms.
+    // nut17:true — the ws-hybrid transport needs a real socket; the
+    // blackhole variant sent some receive paths into a spin.
+    mintUrl: "",
+    mintPath: "/farm",
+    consolePath: "/farm-console",
+    symbol: "eggs",
+    label: "FARM",
+    scale: 1,
+    step: "1",
+    hasRails: false,
+    nut17: true,
   },
 }
 

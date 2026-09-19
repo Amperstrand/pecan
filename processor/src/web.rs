@@ -60,6 +60,8 @@ pub struct WebState {
     pub self_test_running: Arc<AtomicBool>,
     /// Charger fleet surface (None when the EV gateway env is not set).
     pub fleet: Option<crate::fleet::FleetConfig>,
+    /// Farm rail (None when CDK_BRANCH_PROCESSOR_FARM is unset).
+    pub farm: Option<Arc<crate::farm::FarmRail>>,
     /// Shared outbound client for console-side probes (fleet card).
     pub http: reqwest::Client,
 }
@@ -79,6 +81,7 @@ impl WebState {
         published_grpc_port: u16,
         self_test: Arc<RwLock<Option<SelfTestOutcome>>>,
         self_test_running: Arc<AtomicBool>,
+        farm: Option<Arc<crate::farm::FarmRail>>,
     ) -> Self {
         Self {
             branch,
@@ -94,6 +97,7 @@ impl WebState {
             self_test,
             self_test_running,
             fleet: crate::fleet::FleetConfig::from_env(),
+            farm,
             http: reqwest::Client::new(),
         }
     }
@@ -106,6 +110,7 @@ pub fn router(state: WebState) -> Router {
         .route("/login", get(spa_page))
         .route("/wallet", get(spa_page))
         .route("/wallet-classic", get(spa_page))
+        .route("/redeem", get(spa_page))
         // Unauthenticated liveness probe for container healthchecks and the
         // installer's wait loop.
         .route("/healthz", get(healthz))
@@ -121,6 +126,26 @@ pub fn router(state: WebState) -> Router {
         .route("/api/onchain-status/{address}", get(api_onchain_status))
         .route("/api/onchain/chain-status", get(api_onchain_chain_status))
         .route("/api/fleet", get(api_fleet))
+        .route("/api/farm", get(api_farm_overview))
+        .route("/api/farm/futures/quote", post(api_farm_purchase_quote))
+        .route(
+            "/api/farm/futures/purchase/{id}",
+            get(api_farm_purchase_get),
+        )
+        .route(
+            "/api/farm/admin/purchases",
+            get(api_farm_admin_purchases),
+        )
+        .route(
+            "/api/farm/series/{date}/production",
+            post(api_farm_set_production),
+        )
+        .route(
+            "/api/farm/series/{date}/mature-now",
+            post(api_farm_mature_now),
+        )
+        .route("/api/farm/{date}", get(api_farm_oracle))
+        .route("/terms/{sha256}", get(api_farm_terms))
         .route("/api/users", post(api_users_create))
         .route("/api/users/{username}", delete(api_users_delete))
         .route(
@@ -475,6 +500,10 @@ struct ApiTicket {
     payout_rail: Option<String>,
     /// Settlement receipt from the payout rail — the payment proof.
     receipt: Option<String>,
+    /// Delivery line for best-effort rails: what was actually handed
+    /// over, and in what condition — analysis data, never a gate.
+    delivered: Option<u64>,
+    condition: Option<String>,
     notes: Option<String>,
     settled_by: Option<String>,
     voided_by: Option<String>,
@@ -672,6 +701,8 @@ impl ApiTicket {
             description: ticket.description.clone(),
             payout_rail: ticket.payout_rail.clone(),
             receipt: ticket.receipt.clone(),
+            delivered: ticket.delivered,
+            condition: ticket.condition.clone(),
             notes: ticket.notes.clone(),
             settled_by: ticket.settled_by.clone(),
             voided_by: ticket.voided_by.clone(),
@@ -1007,7 +1038,13 @@ async fn verify_with_mint(state: &WebState, ticket: &Ticket) -> Result<(), Respo
             "no mint is attached — set the mint URL in the Mint tab before settling",
         ));
     };
-    let method = config.method.as_str();
+    // Future-unit tickets (farm redemptions) live under the `future`
+    // method, not this install's base teller method.
+    let method = if ticket.unit.starts_with("future:") {
+        "future"
+    } else {
+        config.method.as_str()
+    };
     match ticket.kind {
         TicketKind::Incoming => match mint.get_mint_quote(method, quote_id).await {
             Err(e) => Err(api_error(
@@ -1085,7 +1122,7 @@ async fn api_mark_paid(
         Ok(authed) => authed,
         Err(r) => return r,
     };
-    match mark_paid_inner(&state, &id, form.notes, form.receipt, form.delivered, &authed.username).await {
+    match mark_paid_inner(&state, &id, form.notes, form.receipt, form.delivered, form.condition, &authed.username).await {
         Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
@@ -1105,6 +1142,384 @@ async fn api_mark_failed(
         Ok(ticket) => Json(ApiTicket::from_ticket(&ticket)).into_response(),
         Err(e) => api_error(StatusCode::BAD_REQUEST, e),
     }
+}
+
+// ---------------- farm (NUT-32 egg futures) ----------------
+
+#[derive(Serialize)]
+struct ApiFarmSeries {
+    date: String,
+    unit: String,
+    maturity: u64,
+    capacity: u64,
+    issued: u64,
+    redeemed: u64,
+    available: u64,
+    price_sats: u64,
+    actual_production: Option<u64>,
+    terms_uri: String,
+    terms_sha256: String,
+    matured: bool,
+}
+
+#[derive(Serialize)]
+struct ApiFarmPurchase {
+    purchase_id: String,
+    series: String,
+    date: String,
+    unit: String,
+    quantity: u64,
+    /// The NUT-20 lock key the issuance must be signed by (a per-purchase
+    /// wallet key, not an identity).
+    pubkey: String,
+    price_per_egg_sats: u64,
+    total_sats: u64,
+    state: String,
+    payment_state: String,
+    capacity_reservation: String,
+    future_issuance: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mint_quote: Option<String>,
+    /// The unpaid invoice (Open purchases) — lets a reloaded wallet
+    /// resume an in-flight purchase instead of orphaning it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payment: Option<ApiFarmPayment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    expires_at: u64,
+    created_at: u64,
+}
+
+#[derive(Serialize)]
+struct ApiFarmPayment {
+    bolt11: String,
+    payment_hash: String,
+}
+
+fn farm_series_api(
+    series: &crate::farm::FarmSeries,
+    reserved: u64,
+    matured: bool,
+) -> ApiFarmSeries {
+    ApiFarmSeries {
+        date: series.date.clone(),
+        unit: series.unit.clone(),
+        maturity: series.maturity,
+        capacity: series.capacity,
+        issued: series.issued,
+        redeemed: series.redeemed,
+        available: series.available(reserved),
+        price_sats: series.price_sats,
+        actual_production: series.actual_production,
+        terms_uri: series.terms.uri.clone(),
+        terms_sha256: series.terms.sha256.clone(),
+        matured,
+    }
+}
+
+async fn api_farm_overview(State(state): State<WebState>) -> Response {
+    let Some(farm) = state.farm.clone() else {
+        return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
+    };
+    let purchases = farm.state.purchases().await;
+    let now = unix_now();
+    let series: Vec<ApiFarmSeries> = farm
+        .state
+        .series_snapshot()
+        .await
+        .iter()
+        .map(|s| {
+            // Reservations are per-series: a purchase only holds ITS day's
+            // eggs, never the horizon's.
+            let reserved: u64 = purchases
+                .iter()
+                .filter(|p| {
+                    p.series_date == s.date
+                        && matches!(
+                            p.state,
+                            crate::farm::PurchaseState::Open
+                                | crate::farm::PurchaseState::Paid
+                                | crate::farm::PurchaseState::Authorized
+                        )
+                })
+                .map(|p| p.quantity)
+                .sum();
+            farm_series_api(s, reserved, s.matured_override || now >= s.maturity)
+        })
+        .collect();
+    Json(serde_json::json!({
+        "name": "Farm",
+        "commodity": farm.state.config().commodity,
+        "producer": farm.state.config().producer,
+        "price_sats_per_unit": farm.state.config().price_sats,
+        "series": series,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct FarmQuoteForm {
+    production_date: String,
+    quantity: u64,
+    pubkey: String,
+}
+
+async fn api_farm_purchase_quote(
+    State(state): State<WebState>,
+    Json(form): Json<FarmQuoteForm>,
+) -> Response {
+    let Some(farm) = state.farm.clone() else {
+        return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
+    };
+    let date = match crate::farm::resolve_production_date(&form.production_date) {
+        Ok(date) => date,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    };
+    if form.quantity == 0 || form.quantity > farm.state.config().capacity {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            format!("quantity must be 1..={}", farm.state.config().capacity),
+        );
+    }
+    let pubkey = form.pubkey.trim().to_string();
+    if pubkey.len() != 66 || !pubkey.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "pubkey must be a compressed secp256k1 public key (66 hex chars)",
+        );
+    }
+    let Some(series) = farm.state.series_for_date(&date).await else {
+        return api_error(StatusCode::NOT_FOUND, format!("no series for {date}"));
+    };
+    let total = series.price_sats * form.quantity;
+    // Invoice first (outside the state lock), then reserve atomically — a
+    // failed reservation leaves a harmless orphaned invoice on the node.
+    // The CLN invoice label IS the purchase id: the payment poller watches
+    // purchases by their id, so the two must never diverge.
+    let description = format!(
+        "Farm {}: {} egg(s) x {} sat",
+        series.date, form.quantity, series.price_sats
+    );
+    let purchase_id = format!(
+        "FP-{}",
+        &crate::farm::sha256_hex(format!("{}-{}", unix_now(), form.quantity).as_bytes())[..12]
+    );
+    let (bolt11, payment_hash) = match farm
+        .create_invoice(&purchase_id, total, &description)
+        .await
+    {
+        Ok(created) => created,
+        Err(e) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("cannot create signet invoice: {e:#}"),
+            )
+        }
+    };
+    let purchase = match farm
+        .state
+        .insert_purchase(&purchase_id, &date, form.quantity, &pubkey, bolt11.clone(), payment_hash.clone())
+        .await
+    {
+        Ok(purchase) => purchase,
+        Err(e) => return api_error(StatusCode::CONFLICT, format!("{e:#}")),
+    };
+    Json(serde_json::json!({
+        "purchase_id": purchase.id,
+        "series": format!("Farm-{}", purchase.series_date.replace('-', "")),
+        "date": purchase.series_date,
+        "unit": purchase.unit,
+        "pubkey": purchase.pubkey,
+        "quantity": purchase.quantity,
+        "price_per_egg_sats": purchase.price_per_egg_sats,
+        "total_sats": purchase.total_sats,
+        "payment": {
+            "method": "bolt11",
+            "network": "signet",
+            "bolt11": bolt11,
+            "payment_hash": payment_hash,
+        },
+        "expires_at": purchase.invoice_expires_at,
+    }))
+    .into_response()
+}
+
+async fn api_farm_purchase_get(
+    State(state): State<WebState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(farm) = state.farm.clone() else {
+        return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
+    };
+    let Some(purchase) = farm.state.purchase(&id).await else {
+        return api_error(StatusCode::NOT_FOUND, "unknown purchase");
+    };
+    Json(farm_purchase_api(&purchase)).into_response()
+}
+
+fn farm_purchase_api(p: &crate::farm::FarmPurchase) -> ApiFarmPurchase {
+    use crate::farm::PurchaseState;
+    let (payment_state, reservation, issuance) = match p.state {
+        PurchaseState::Open => ("unpaid", "reserved", "blocked"),
+        PurchaseState::Paid => ("confirmed", "reserved", "claimable"),
+        PurchaseState::Authorized => ("confirmed", "committed", "authorized"),
+        PurchaseState::Minted => ("confirmed", "released", "issued"),
+        PurchaseState::Expired => ("expired", "released", "none"),
+        PurchaseState::Failed => ("failed", "released", "none"),
+    };
+    ApiFarmPurchase {
+        purchase_id: p.id.clone(),
+        series: format!("Farm-{}", p.series_date.replace('-', "")),
+        date: p.series_date.clone(),
+        unit: p.unit.clone(),
+        quantity: p.quantity,
+        pubkey: p.pubkey.clone(),
+        price_per_egg_sats: p.price_per_egg_sats,
+        total_sats: p.total_sats,
+        state: format!("{:?}", p.state).to_lowercase(),
+        payment_state: payment_state.into(),
+        capacity_reservation: reservation.into(),
+        future_issuance: issuance.into(),
+        mint_quote: p.quote_id.clone(),
+        payment: (p.state == PurchaseState::Open).then(|| ApiFarmPayment {
+            bolt11: p.bolt11.clone(),
+            payment_hash: p.payment_hash.clone(),
+        }),
+        error: p.error.clone(),
+        expires_at: p.invoice_expires_at,
+        created_at: p.created_at,
+    }
+}
+
+async fn api_farm_admin_purchases(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_api_admin(&state, &headers).await {
+        return r;
+    }
+    let Some(farm) = state.farm.clone() else {
+        return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
+    };
+    let purchases: Vec<ApiFarmPurchase> = farm
+        .state
+        .purchases()
+        .await
+        .iter()
+        .map(farm_purchase_api)
+        .collect();
+    Json(serde_json::json!({ "purchases": purchases })).into_response()
+}
+
+async fn api_farm_oracle(
+    State(state): State<WebState>,
+    AxumPath(date): AxumPath<String>,
+) -> Response {
+    let Some(farm) = state.farm.clone() else {
+        return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
+    };
+    let Some(series) = farm.state.series_for_date(&date).await else {
+        return api_error(StatusCode::NOT_FOUND, format!("no series for {date}"));
+    };
+    let purchases = farm.state.purchases().await;
+    let reserved: u64 = purchases
+        .iter()
+        .filter(|p| p.series_date == date)
+        .filter(|p| {
+            matches!(
+                p.state,
+                crate::farm::PurchaseState::Open
+                    | crate::farm::PurchaseState::Paid
+                    | crate::farm::PurchaseState::Authorized
+            )
+        })
+        .map(|p| p.quantity)
+        .sum();
+    Json(serde_json::json!({
+        "date": series.date,
+        "unit": series.unit,
+        "capacity": series.capacity,
+        "actual_production": series.actual_production.unwrap_or(series.capacity),
+        "expected_production": series.capacity,
+        "issued": series.issued,
+        "redeemed": series.redeemed,
+        "reserved": reserved,
+        "remaining_issuable": series.available(reserved),
+        "maturity": series.maturity,
+        "terms": { "uri": series.terms.uri, "sha256": series.terms.sha256 },
+    }))
+    .into_response()
+}
+
+async fn api_farm_terms(
+    State(state): State<WebState>,
+    AxumPath(sha256): AxumPath<String>,
+) -> Response {
+    let Some(farm) = state.farm.clone() else {
+        return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
+    };
+    let Some(blob) = farm.state.terms_blob(&sha256).await else {
+        return api_error(StatusCode::NOT_FOUND, "no terms blob at this digest");
+    };
+    (
+        [
+            ("content-type", "application/json; charset=utf-8"),
+            ("cache-control", "public, max-age=31536000, immutable"),
+        ],
+        blob,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct FarmProductionForm {
+    actual: Option<u64>,
+}
+
+async fn api_farm_set_production(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+    Json(form): Json<FarmProductionForm>,
+) -> Response {
+    if let Err(r) = require_api_admin(&state, &headers).await {
+        return r;
+    }
+    let Some(farm) = state.farm.clone() else {
+        return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
+    };
+    match farm.state.set_actual_production(&date, form.actual).await {
+        Ok(()) => Json(ApiMessage {
+            message: "production updated",
+        })
+        .into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    }
+}
+
+async fn api_farm_mature_now(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    AxumPath(date): AxumPath<String>,
+) -> Response {
+    if let Err(r) = require_api_admin(&state, &headers).await {
+        return r;
+    }
+    let Some(farm) = state.farm.clone() else {
+        return api_error(StatusCode::NOT_FOUND, "farm rail is not enabled");
+    };
+    // Test/demo override only: production code compares real timestamps;
+    // this flips a series' redemption gate without waiting a week.
+    match farm.state.set_matured_override(&date, true).await {
+        Ok(()) => Json(ApiMessage {
+            message: "series marked matured (demo override)",
+        })
+        .into_response(),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    }
+}
+
+/// The future-unit tickets whose burns already completed — the
+/// authoritative redemption record for series accounting.
+pub async fn paid_future_tickets(branch: &BranchState) -> Vec<(String, u64)> {
+    branch.paid_future_tickets().await
 }
 
 // ---------------- attachment setup ----------------
@@ -1534,6 +1949,8 @@ struct NotesForm {
     receipt: String,
     #[serde(default)]
     delivered: Option<u64>,
+    #[serde(default)]
+    condition: Option<String>,
 }
 
 fn clean_notes(notes: String) -> Option<String> {
@@ -1551,20 +1968,58 @@ async fn mark_paid_inner(
     notes: String,
     receipt: String,
     delivered: Option<u64>,
+    condition: Option<String>,
     settled_by: &str,
 ) -> Result<Ticket, String> {
-    state
+    let condition = condition.filter(|c| !c.trim().is_empty());
+    let ticket = state
+        .branch
+        .get_ticket(id)
+        .await
+        .ok_or_else(|| format!("mark_paid: unknown ticket {id}"))?;
+    // Farm redemption: the physical handover gate runs BEFORE the burn —
+    // the actual-production (shortfall) check refuses the settle
+    // outright, so the proofs stay untouched if the operator cannot hand
+    // eggs over. The collection hour is deliberately NOT enforced here.
+    let is_future = ticket.unit.starts_with("future:");
+    if is_future {
+        let farm = state
+            .backend
+            .farm()
+            .ok_or_else(|| "mark_paid: farm rail is not enabled".to_string())?
+            .clone();
+        farm.state
+            .redemption_gate(&ticket.unit, ticket.amount)
+            .await
+            .map_err(|e| format!("redemption refused: {e:#}"))?;
+    }
+    let receipt = if is_future && receipt.trim().is_empty() {
+        // The redemption receipt is the operator's proof of handover —
+        // Lightning's preimage analogue for the physical rail.
+        crate::payout::receipt_for_rail("farm").unwrap_or_else(|| "FARM".into())
+    } else {
+        receipt
+    };
+    let settled = state
         .branch
         .mark_paid(
             id,
             clean_notes(notes),
             clean_notes(receipt),
             delivered,
+            condition,
             settled_by,
         )
         .await
-        .map_err(|e| format!("mark_paid: {e}"))
+        .map_err(|e| format!("mark_paid: {e}"))?;
+    if is_future {
+        if let Some(farm) = state.backend.farm() {
+            farm.state.recount_redeemed(&paid_future_tickets(&state.branch).await).await;
+        }
+    }
+    Ok(settled)
 }
+
 
 async fn mark_failed_inner(
     state: &WebState,
