@@ -3,6 +3,8 @@ import { test, expect } from "@playwright/test"
 // Standalone check of the wasm mirror: dashboard renders, START drives
 // the countdown + output LEDs, board banner present. Run with the
 // dev server up: scripts/dev-server.sh (python http.server).
+// Needs the local sim server (not started by the default lane).
+test.skip(!process.env.PECAN_SIM, "sim server required (set PECAN_SIM=1)")
 test("charger sim mirror renders and reacts", async ({ page }) => {
   await page.goto("http://localhost:8791/dev/charger-sim.html")
   await expect(page.locator("#board")).toHaveText(/atom/)

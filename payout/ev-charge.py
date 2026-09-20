@@ -514,6 +514,16 @@ def resolve_expired_ticket(a, console, state, t, action):
 
 def watch(a, console, gateway, device_map):
     state = load_state(a.state_file)
+    # Restore tariff snapshots from persisted records (#12): an in-flight
+    # session must bill at the rate it was PRICED at, even across a daemon
+    # restart with a different --eur-per-kwh flag. Without this, the
+    # in-memory _tariffs dict starts empty and deliver_energy falls back
+    # to the CURRENT flag — repricing delivered energy.
+    if not hasattr(a, "_tariffs"):
+        a._tariffs = {}
+    for tid, rec in state.items():
+        if isinstance(rec, dict) and "tariff_eur_per_kwh" in rec:
+            a._tariffs[tid] = rec["tariff_eur_per_kwh"]
     while True:
         try:
             tickets = console.open_tickets()

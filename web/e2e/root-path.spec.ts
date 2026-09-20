@@ -6,9 +6,9 @@ import { test, expect } from "@playwright/test"
 test("root domain serves the wallet; currency links are per-pair", async ({ page }) => {
   test.setTimeout(60_000)
 
-  // / redirects to /wallet.
+  // / serves the landing page linking to the wallet and per-pair consoles.
   await page.goto("/")
-  await expect(page).toHaveURL(/\/wallet$/)
+  await expect(page.getByRole("link", { name: /open the wallet/i })).toBeVisible({ timeout: 15_000 })
 
   // The wallet boots from the root path (assets resolve relatively).
   await expect(page.getByRole("heading", { name: "Wallet" })).toBeVisible({

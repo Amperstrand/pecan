@@ -11,6 +11,12 @@ import { readBalance } from "./helpers/wallet"
 // 2 units keeps the refund above the mint's 1-unit minimum.
 const BUDGET_EUR = 2
 
+// Charger D requires the physical t-relay box (#33 — currently down)
+// or the atomD stand-in properly wired. Skipped when neither answers.
+test.skip(
+  !(process.env.PECAN_CHARGER_D === "1"),
+  "charger D offline (#33) — set PECAN_CHARGER_D=1 when the box or stand-in chain works",
+)
 test("charger D deposit-pattern session end to end", async ({ page }) => {
   // The charge + refund legs alone budget 120s + 180s inside; the default
   // 60s test timeout would cut them off mid-wait on any slow delivery.
