@@ -901,11 +901,12 @@ test("Alice at the charge point — the 30 second cut", async ({ page }) => {
   expect(receipt).toMatch(/^EV-atomV-\d+s-[0-9A-F]{8}/)
   const delivered = Number(receipt!.match(/-(\d+)s-/)![1])
 
+  const spent = Math.round((delivered * 0.5) / 36) / 100
   await expect
     .poll(() => readBalance(page), { timeout: 200_000 })
-    .toBeCloseTo(DEPOSIT_EUR - delivered, 1)
+    .toBeCloseTo(DEPOSIT_EUR - spent, 1)
   await card(page, {
-    title: `\${delivered} kW·s used. €${DEPOSIT_EUR - delivered} came back.`,
+    title: `\${(delivered / 3600).toFixed(2)} kWh used. €${DEPOSIT_EUR - spent} came back.`,
     body: "No app. No card. No history. Ecash is cash.",
     holdMs: undefined,
   })
