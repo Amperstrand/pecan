@@ -3,6 +3,9 @@ import { defineConfig } from "@playwright/test"
 
 export default defineConfig({
   ...base,
+  // Film takes legitimately run long (buy + autopay + portal boot +
+  // delivery); the base 30-minute suite ceiling killed healthy takes.
+  globalTimeout: 45 * 60_000,
   use: {
     ...base.use,
     video: { mode: "on", size: { width: 420, height: 900 } },

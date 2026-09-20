@@ -1,0 +1,18 @@
+{
+  "voice": "am_michael",
+  "speed": 0.94,
+  "lines": [
+    { "id": "p01", "text": "Sarah wants eggs. Not Friday's eggs. Today's." },
+    { "id": "p02", "text": "This farm sells the day's eggs until midnight. Buy them at breakfast, collect them at dinner. Claim them or lose them." },
+    { "id": "p03", "text": "Two eggs, forty-two sats. A real Lightning invoice." },
+    { "id": "p04", "text": "And nobody presses pay. The farm settles its own invoice. It is a demo, remember." },
+    { "id": "p05", "text": "Paid. Two claims mint, locked to Sarah's wallet." },
+    { "id": "p06", "text": "Two bearer claims. Whoever holds the code owns the eggs. So Sarah moves them to the portal." },
+    { "id": "p07", "text": "Same farm, one link. Any device opens the claims portal." },
+    { "id": "p08", "text": "The code pastes in. The claim reads: two eggs, today." },
+    { "id": "p09", "text": "One tap. No teller code, no operator. The eggs simply arrive, on the screen." },
+    { "id": "p10", "text": "A receipt, like any vending machine. The claims are burned, and the day's window has used them up." },
+    { "id": "p11", "text": "The public ledger agrees. Two redeemed, capacity intact, no names anywhere." },
+    { "id": "p12", "text": "Signet sats in, imaginary eggs out. The machine is the counter. NUT-32, live." }
+  ]
+}

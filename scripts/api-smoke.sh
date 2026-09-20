@@ -155,10 +155,10 @@ fi
 # network has reverted it to stale/farm-less builds twice (2026-09-17,
 # 2026-09-19 14:12 UTC). Catch it loudly instead of debugging ghosts.
 JS=$(curl -s -m 10 "$URL/wallet" | grep -oE 'assets/index-[^"]*\.js' | head -1)
-if [ -n "$JS" ] && curl -s -m 10 "$URL/$JS" | grep -q "Transfer ownership"; then
-  echo "  ok   wallet bundle carries the farm panel"
+if [ -n "$JS" ] && curl -s -m 10 "$URL/$JS" | grep -q "kiosk-redeem-virtual"; then
+  echo "  ok   wallet bundle carries virtual delivery (today's build)"
 else
-  echo "  FAIL wallet bundle lacks the farm panel — concurrent deployer reverted it? (deploy/Caddyfile.giftcard is the routing reference)" >&2
+  echo "  FAIL wallet bundle lacks virtual delivery — an older build is live (concurrent deployer?) (deploy/Caddyfile.giftcard is the routing reference)" >&2
   fail=$((fail + 1))
 fi
 
