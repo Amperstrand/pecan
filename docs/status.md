@@ -42,7 +42,10 @@ and api-smoke now FAILS if the live wallet bundle loses the farm
 panel — a concurrent deployer on the network reverted it twice
 (09-17, 09-19 14:12 UTC); finding/stopping that pipeline is an open
 ops item. Also fixed: `next-friday` u32 underflow on weekends, and
-farm unit tests re-dated to relative days. Verification: 102
+farm unit tests re-dated to relative days. `scripts/farm-fuzz.sh` adds the enumerated API matrix (81 parametrized
+cases in ~7s, JSONL + `scripts/farm-analyze.py` for log analysis) —
+it caught and fixed a real purchase-id collision (same-second buys
+shared one CLN invoice label). Verification: 102
 processor tests, vitest 83, farm e2e 5/5 (sarah incl. counter
 delivery-line settle, capacity, same-day window, purchase resume,
 autopay-fast projection self-heal); the portal e2e

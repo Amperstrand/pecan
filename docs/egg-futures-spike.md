@@ -490,3 +490,42 @@ wedge, minutes): the portal e2e is skip-pinned on it after passing
 end-to-end once. That boot debt is the single highest-leverage fix
 left — demo first-load, kiosk import, and e2e duration all collapse
 onto it.
+
+
+## The farm matrix (2026-09-21, branch `farm-ux`)
+
+`scripts/farm-fuzz.sh` runs the enumerated API-tier matrix —
+`web/e2e/farm-matrix.spec.ts`, 14 parametrized groups / 81 cases in
+~7s — and summarizes the JSONL it emits per case
+(`e2e/.results/farm-matrix-results.jsonl`, `scripts/farm-analyze.py`:
+groups, pass/fail, latency by param). Coverage:
+
+- oracle invariants (sorted/unique dates, unit grammar per date,
+  capacity arithmetic, digest shapes, per-date endpoints)
+- terms blobs for EVERY series, content-addressing verified
+  (sha256(blob) == digest), era-aware language (hour-16 legacy vs
+  hour-06 day-window terms)
+- valid buys: dates × quantities, next-friday resolver
+- invalid buys: quantity/date/pubkey shape enumeration
+- capacity edges: per-quantity cap vs reservation-sum gates
+- melt quotes: today-any-hour accepted, future/past gated
+  (claim-it-or-lose-it), amount/unit shape refusals
+- rails: virtual:screen routes to a virtual ticket (verified via the
+  teller ticket's payout_rail), empty `virtual:` DEGRADES to counter
+  (pinned behavior), sim/sepa/ln/btc refused — futures only exit
+  virtually
+- one-way invariant (ln/btc/bolt11 exits refused)
+- 8-way concurrent buys (atomic reservation)
+
+The matrix earned its keep on day one: purchase ids were
+`sha256(unix-second, quantity)[..12]` — same-second same-quantity
+buys collided into ONE CLN invoice label (the concurrency case hit it
+8-way). Fixed with a random nonce in the hash input; four concurrent
+live buys now yield four distinct ids. It also pinned the mixed-hour
+horizon (legacy 16:00 vs structural 06:00 units) and the
+create-vs-get purchase response shapes.
+
+Known pin: `farm-wallet-stories.spec.ts` (back-to-back journeys on
+one persistent wallet) is skip-pinned WIP — the coco cold-path debt
+makes every step sit at its timeout bound in-runner; the individual
+journeys stay green via farm.spec, farm-portal.spec, and the film.
