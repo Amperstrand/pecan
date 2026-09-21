@@ -1300,9 +1300,21 @@ async fn api_farm_purchase_quote(
         "Farm {}: {} egg(s) x {} sat",
         series.date, form.quantity, series.price_sats
     );
+    // The id must be unique under CONCURRENT purchases: deriving it
+    // from (unix second, quantity) made same-second same-quantity buys
+    // collide into one CLN invoice label (the farm matrix caught 8-way
+    // collisions). A random nonce makes it collision-proof.
     let purchase_id = format!(
         "FP-{}",
-        &crate::farm::sha256_hex(format!("{}-{}", unix_now(), form.quantity).as_bytes())[..12]
+        &crate::farm::sha256_hex(
+            format!(
+                "{}-{}-{}",
+                unix_now(),
+                form.quantity,
+                crate::farm::hex_random(16)
+            )
+            .as_bytes(),
+        )[..12]
     );
     let (bolt11, payment_hash) = match farm
         .create_invoice(&purchase_id, total, &description)

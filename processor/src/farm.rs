@@ -1022,7 +1022,7 @@ fn pubkey_eq(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
 
-fn hex_random(n: usize) -> String {
+pub fn hex_random(n: usize) -> String {
     use rand::Rng;
     (0..n)
         .map(|_| format!("{:02x}", rand::thread_rng().gen::<u8>()))
