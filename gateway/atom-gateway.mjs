@@ -29,6 +29,7 @@
 // MQTT_USER, MQTT_PASS. Listens on 127.0.0.1:8099; caddy fronts it at
 // https://giftcard.cashu.exchange/atom-gateway/*.
 import http from "node:http";
+import fs from "node:fs";
 import crypto from "node:crypto";
 import mqtt from "mqtt";
 
@@ -40,6 +41,46 @@ const client = mqtt.connect(process.env.MQTT_URL, {
   reconnectPeriod: 2000,
 });
 
+// Session persistence (#11): snapshot to disk on every mutation and
+// restore on boot — a gateway restart mid-session previously lost the
+// ref→session map (the slider stopped updating, the browser Stop fell
+// back to the physical button).
+const STATE_FILE = process.env.STATE_FILE ?? "/opt/atom-bridge/sessions.json";
+const PERSIST_DEBOUNCE_MS = 2000;
+let persistTimer = null;
+
+function persistSessions() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try {
+      const snapshot = {
+        sessions: [...sessions.entries()].map(([id, s]) => [id, {
+          ...s, meter: s.meter ?? null,
+        }]),
+        refToDevice: [...refToDevice.entries()],
+      };
+      fs.writeFileSync(
+        STATE_FILE + ".tmp", JSON.stringify(snapshot));
+      fs.renameSync(STATE_FILE + ".tmp", STATE_FILE);
+    } catch (e) {
+      console.error("persist failed:", e.message);
+    }
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+function restoreSessions() {
+  try {
+    const raw = fs.readFileSync(STATE_FILE, "utf8");
+    const snapshot = JSON.parse(raw);
+    for (const [id, s] of snapshot.sessions ?? []) sessions.set(id, s);
+    for (const [ref, id] of snapshot.refToDevice ?? []) refToDevice.set(ref, id);
+    console.log(`restored ${sessions.size} session(s) from ${STATE_FILE}`);
+  } catch {
+    // no state file yet — fresh start
+  }
+}
+
 /** device id → current session (atomA, atomB, …) */
 const sessions = new Map();
 /** device id → last meter reading ({"kw","wh","kws"}, always-on) */
@@ -50,6 +91,7 @@ const METER_STALE_MS = 6000;
  *  ref instead of the operator key. */
 const refToDevice = new Map();
 
+restoreSessions();
 client.on("connect", () => {
   client.subscribe(
     ["charger/+/ack", "charger/+/done", "charger/+/aborted", "charger/+/meter", "charger/atom/status"],
@@ -119,6 +161,7 @@ client.on("message", (topic, payload) => {
 // their ref indexes are per-charge bookkeeping, not ledgers, and without
 // pruning the maps grow forever on a long-lived host.
 setInterval(() => {
+  persistSessions();
   const now = Date.now() / 1000;
   for (const [id, s] of sessions) {
     // Metered truth: the device's cumulative kW·s IS the delivery.
@@ -164,8 +207,24 @@ const server = http.createServer(async (req, res) => {
   // Wallet-facing session endpoints: the melt quote id is the capability.
   // No operator key — a customer may read their own session's progress
   // and stop it; anything beyond that still needs the key.
+  // Rate-limit public session endpoints: the ref is unguessable, but
+  // a brute-force scan shouldn't be free either (#11).
+  const RATE_LIMIT = 30; // requests per minute per IP
+  const rateMap = new Map();
+  function rateLimited(ip) {
+    const now = Date.now();
+    const hits = (rateMap.get(ip) ?? []).filter(t => now - t < 60_000);
+    if (hits.length >= RATE_LIMIT) return true;
+    hits.push(now);
+    rateMap.set(ip, hits);
+    return false;
+  }
+
   const sess = url.pathname.match(/^\/session\/([^/]+)\/(status|stop)$/);
   if (sess) {
+    if (rateLimited(req.socket.remoteAddress ?? "unknown")) {
+      return json(res, 429, { error: "too many session requests" });
+    }
     const [, ref, action] = sess;
     const deviceId = refToDevice.get(ref);
     const st = sessions.get(deviceId ?? "");

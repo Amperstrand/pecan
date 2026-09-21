@@ -355,7 +355,14 @@ def settle_refunds(a, console, state):
     delivery ledger — the claimed amount may not exceed what the session
     actually left unconsumed, and each melt refunds at most once — then
     settle it like any deposit. Money returns through the standard
-    mint-quote machinery; no melt is ever settled below its amount."""
+    mint-quote machinery; no melt is ever settled below its amount.
+
+    Sub-unit rounding (#26): the mint enforces a 1-unit (100-cent)
+    minimum on mint quotes. When a session's refund is BELOW that, the
+    cents stay in a per-install accumulator (`refund_dust_cents` in the
+    state file) and ride along with the NEXT refund that clears the
+    minimum — the operator never loses sub-unit remainders, they batch.
+    """
     try:
         tickets = console.get("/api/tickets/open?kind=incoming")
     except (urllib.error.URLError, urllib.error.HTTPError) as e:
@@ -376,6 +383,20 @@ def settle_refunds(a, console, state):
             continue  # one refund per melt, ever
         overpay = max(0, int(rec.get("amount_cents", 0))
                       - int(rec.get("delivered_cents", 0)))
+        # Sub-unit rounding (#26): accumulate dust below the mint minimum
+        # — it rides with the next refund that clears 100 cents.
+        dust = int(state.get("_dust_cents", 0))
+        if overpay > 0 and overpay + dust < 100:
+            state["_dust_cents"] = dust + overpay
+            save_state(a.state_file, state)
+            log({"result": "refund-dust-accumulated", "added_cents": overpay,
+                 "total_dust_cents": state["_dust_cents"]})
+            continue
+        if dust > 0:
+            overpay += dust
+            state["_dust_cents"] = 0
+            save_state(a.state_file, state)
+            log({"result": "refund-dust-flushed", "flushed_cents": dust})
         claimed = int(t.get("amount", 0))
         if claimed < 1 or claimed > overpay:
             log({"result": "refund-refused", "id": t.get("id"),
