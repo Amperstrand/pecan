@@ -593,9 +593,10 @@ pub fn wait_for_tls(console_domain: &str, budget: Duration) -> bool {
 
 /// Same wait for an arbitrary URL (the bundled mint's /v1/info).
 pub fn wait_for_tls_url(url: &str, budget: Duration) -> bool {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(5))
-        .build();
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .new_agent();
     let deadline = std::time::Instant::now() + budget;
     while std::time::Instant::now() < deadline {
         if agent.get(url).call().is_ok() {
