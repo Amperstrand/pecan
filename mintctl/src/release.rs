@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
+use ureq::ResponseExt;
 
 pub const REPO: &str = "zeugmaster/pecan";
 
@@ -14,18 +15,25 @@ pub fn own_version() -> &'static str {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(60))
-        .user_agent(&format!("mintctl/{}", own_version()))
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(60)))
+        .user_agent(format!("mintctl/{}", own_version()))
         .build()
+        .new_agent()
 }
 
 /// Latest release tag: GitHub API first, then the /releases/latest redirect
 /// (which carries the tag in its final URL) when the API is rate-limited.
 pub fn resolve_latest_version() -> Result<String> {
     let api = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    if let Ok(resp) = agent().get(&api).timeout(Duration::from_secs(15)).call() {
-        if let Ok(body) = resp.into_json::<serde_json::Value>() {
+    if let Ok(mut resp) = agent()
+        .get(&api)
+        .config()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .build()
+        .call()
+    {
+        if let Ok(body) = resp.body_mut().read_json::<serde_json::Value>() {
             if let Some(tag) = body.get("tag_name").and_then(|t| t.as_str()) {
                 if !tag.is_empty() {
                     return Ok(tag.to_string());
@@ -36,10 +44,12 @@ pub fn resolve_latest_version() -> Result<String> {
     let human = format!("https://github.com/{REPO}/releases/latest");
     let resp = agent()
         .get(&human)
-        .timeout(Duration::from_secs(15))
+        .config()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .build()
         .call()
         .context("could not reach github.com to resolve the latest release")?;
-    let final_url = resp.get_url().to_string();
+    let final_url = resp.get_uri().to_string();
     final_url
         .split("/releases/tag/")
         .nth(1)
@@ -71,7 +81,7 @@ impl ArtifactSource {
                     .get(&url)
                     .call()
                     .with_context(|| format!("could not download {rel} from {url}"))?;
-                let mut reader = resp.into_reader();
+                let mut reader = resp.into_body().into_reader();
                 let mut file = std::fs::File::create(dest)
                     .with_context(|| format!("create {}", dest.display()))?;
                 std::io::copy(&mut reader, &mut file)
@@ -104,11 +114,14 @@ pub fn download_release_binary(version: &str, near: &Path) -> Result<PathBuf> {
     let asset = binary_asset_name()?;
     let base = format!("https://github.com/{REPO}/releases/download/{version}");
 
-    let sums = agent()
+    let mut sums_resp = agent()
         .get(&format!("{base}/SHA256SUMS"))
         .call()
-        .with_context(|| format!("download SHA256SUMS for {version}"))?
-        .into_string()?;
+        .with_context(|| format!("download SHA256SUMS for {version}"))?;
+    let sums = sums_resp
+        .body_mut()
+        .read_to_string()
+        .with_context(|| format!("read SHA256SUMS for {version}"))?;
     let expected = sums
         .lines()
         .find_map(|line| {
@@ -128,7 +141,7 @@ pub fn download_release_binary(version: &str, near: &Path) -> Result<PathBuf> {
         .get(&format!("{base}/{asset}"))
         .call()
         .with_context(|| format!("download {asset} for {version}"))?;
-    std::io::copy(&mut resp.into_reader(), &mut tmp)
+    std::io::copy(&mut resp.into_body().into_reader(), &mut tmp)
         .with_context(|| format!("write {asset}"))?;
 
     let bytes = std::fs::read(tmp.path())?;

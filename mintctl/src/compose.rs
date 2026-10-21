@@ -226,9 +226,12 @@ pub fn wait_healthy(ui_port: u16, budget: Duration) -> bool {
 
 /// Poll an arbitrary URL until it answers 2xx (the bundled mint's /v1/info).
 pub fn wait_http_ok(url: &str, budget: Duration) -> bool {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(3))
-        .build();
+    // ureq 3 keeps status-as-error ON by default: `.call().is_ok()` means
+    // 2xx, exactly the ureq 2 polling semantics.
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .build()
+        .new_agent();
     let deadline = std::time::Instant::now() + budget;
     while std::time::Instant::now() < deadline {
         if agent.get(url).call().is_ok() {
@@ -241,13 +244,14 @@ pub fn wait_http_ok(url: &str, budget: Duration) -> bool {
 
 /// GET /healthz and return the reported build version, if any.
 pub fn probe_healthz(url: &str) -> Option<String> {
-    let resp = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(3))
+    let mut resp = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(3)))
         .build()
+        .new_agent()
         .get(url)
         .call()
         .ok()?;
-    let body: serde_json::Value = resp.into_json().ok()?;
+    let body: serde_json::Value = resp.body_mut().read_json().ok()?;
     Some(
         body.get("version")
             .and_then(|v| v.as_str())
@@ -268,15 +272,16 @@ pub fn detect_public_ip() -> Option<String> {
         "https://ifconfig.me/ip",
         "https://icanhazip.com",
     ] {
-        let Ok(resp) = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(5))
+        let Ok(mut resp) = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(5)))
             .build()
+            .new_agent()
             .get(url)
             .call()
         else {
             continue;
         };
-        if let Ok(body) = resp.into_string() {
+        if let Ok(body) = resp.body_mut().read_to_string() {
             let ip = body.trim();
             if ip.parse::<std::net::IpAddr>().is_ok() {
                 return Some(ip.to_string());
@@ -291,15 +296,16 @@ pub fn detect_public_ip() -> Option<String> {
 /// existing AAAA records — quick timeouts, since v4-only boxes fail here.
 pub fn detect_public_ipv6() -> Option<String> {
     for url in ["https://ipv6.icanhazip.com", "https://api6.ipify.org"] {
-        let Ok(resp) = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(3))
+        let Ok(mut resp) = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(3)))
             .build()
+            .new_agent()
             .get(url)
             .call()
         else {
             continue;
         };
-        if let Ok(body) = resp.into_string() {
+        if let Ok(body) = resp.body_mut().read_to_string() {
             let ip = body.trim();
             if ip.parse::<std::net::Ipv6Addr>().is_ok() {
                 return Some(ip.to_string());
