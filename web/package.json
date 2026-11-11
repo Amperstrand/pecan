@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "5.0.0-rc.9",
-    "@cashu/coco-core": "file:vendor/cashu-coco-core-1.0.18.tgz",
-    "@cashu/coco-indexeddb": "file:vendor/cashu-coco-indexeddb-1.0.18.tgz",
+    "@cashu/coco-core": "file:vendor/cashu-coco-core-2.0.0.tgz",
+    "@cashu/coco-indexeddb": "file:vendor/cashu-coco-indexeddb-2.0.0.tgz",
     "@radix-ui/react-alert-dialog": "^1.1.23",
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-separator": "^1.1.15",
@@ -44,5 +44,8 @@
     "typescript": "^5.7.2",
     "vite": "^8.0.16",
     "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "@cashu/cashu-ts": "5.0.0-rc.9"
   }
 }
