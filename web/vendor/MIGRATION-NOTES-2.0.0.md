@@ -37,3 +37,16 @@ serve accounting fields; verified against cdk v0.18.2 source).
   or upstream's handler wiring. Design work, ~the teller integration.
 - Amount sites (coco-wallet.ts:325 class): number -> Amount conversions
   at quote-create call sites.
+
+## Port pattern FOUND (2026-11-11, research #1)
+
+Upstream's own answer for custom methods is the plugin architecture:
+cocod consumes `coco-cashu-plugin-npc` (a separate plugin package) via
+runtime; coco 2.0 exports the full Plugin surface from
+`@cashu/coco-core/plugin` (Plugin, PluginContext, ServiceMap,
+PluginExtensions). Port shape for pecan: turn branch-methods.ts into a
+small in-repo plugin passed to initializeCoco({ plugins: [...] }) —
+NOT Manager-internal registration (registerMeltMethod/keyRingService
+are gone by design). Next concrete step: read
+coco-cashu-plugin-npc's source as the reference implementation and
+mirror its structure for the branch/teller methods.
