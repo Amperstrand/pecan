@@ -21,3 +21,19 @@ FORK.md taxonomy + cashu-cf ISSUE-110 assessment):
 
 Blocked-by-none: the NUT-04 cf finding does NOT gate pecan (cdk twins
 serve accounting fields; verified against cdk v0.18.2 source).
+
+## Port recon (2026-11-11, second pass)
+
+- branch-methods.ts is ALREADY declaration-merging MeltMethodDefinitions
+  (fork 1.0.18 adopted the pattern). Its tsc errors are import-path only:
+  2.0's exports map serves ".", "./plugin", "./adapter" — no
+  ./operations/{melt,mint}. Interfaces exist in index types; retarget the
+  declare-module specifier to "@cashu/coco-core" (or plugin surface) —
+  mechanical.
+- coco-wallet.ts is NOT mechanical: no public
+  registerMeltMethod/registerMintMethod/MeltMethodHandler in 2.0's
+  d.ts, and keyRingService stays private. The ~10 registration sites +
+  keyring access must move to the plugin architecture (dist/plugin.d.ts)
+  or upstream's handler wiring. Design work, ~the teller integration.
+- Amount sites (coco-wallet.ts:325 class): number -> Amount conversions
+  at quote-create call sites.
